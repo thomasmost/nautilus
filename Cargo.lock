@@ -817,12 +817,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fastrand"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
-
-[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1053,18 +1047,6 @@ dependencies = [
  "wayland-sys",
  "windows-sys 0.52.0",
  "x11-dl",
-]
-
-[[package]]
-name = "glutin-winit"
-version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85edca7075f8fc728f28cb8fbb111a96c3b89e930574369e3e9c27eb75d3788f"
-dependencies = [
- "cfg_aliases",
- "glutin",
- "raw-window-handle",
- "winit",
 ]
 
 [[package]]
@@ -1614,38 +1596,10 @@ name = "nautilus"
 version = "0.1.0"
 dependencies = [
  "clap",
- "egui",
- "egui-winit",
- "egui_glow",
  "env_logger",
- "glow",
- "glutin",
- "glutin-winit",
- "keyboard-types",
- "log",
- "muda",
- "nautilus-core",
  "nautilus-engine",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.3.2",
- "png",
- "url",
- "windows-sys 0.61.2",
- "winit",
+ "osmena-shell",
  "winresource",
-]
-
-[[package]]
-name = "nautilus-core"
-version = "0.1.0"
-dependencies = [
- "directories",
- "keyboard-types",
- "serde",
- "tempfile",
- "toml",
- "url",
 ]
 
 [[package]]
@@ -1656,7 +1610,8 @@ dependencies = [
  "dpi",
  "keyboard-types",
  "log",
- "nautilus-core",
+ "osmena-core",
+ "osmena-engine",
  "raw-window-handle",
  "url",
 ]
@@ -2018,6 +1973,78 @@ checksum = "5df339f526ea9a60e371768d50efc2f2508c7203290731565d1f7a6f71d21747"
 dependencies = [
  "libc",
  "libredox",
+]
+
+[[package]]
+name = "osmena-chrome"
+version = "0.1.0"
+dependencies = [
+ "dpi",
+ "egui",
+ "keyboard-types",
+ "log",
+ "muda",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "osmena-core",
+ "png",
+ "url",
+ "windows-sys 0.61.2",
+ "winit",
+]
+
+[[package]]
+name = "osmena-core"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "keyboard-types",
+ "serde",
+ "toml",
+ "url",
+]
+
+[[package]]
+name = "osmena-engine"
+version = "0.1.0"
+dependencies = [
+ "dpi",
+ "glow",
+ "glutin",
+ "keyboard-types",
+ "log",
+ "osmena-core",
+ "raw-window-handle",
+ "url",
+]
+
+[[package]]
+name = "osmena-shell"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dpi",
+ "egui",
+ "egui-winit",
+ "egui_glow",
+ "glow",
+ "log",
+ "osmena-chrome",
+ "osmena-core",
+ "osmena-engine",
+ "url",
+ "windows-sys 0.61.2",
+ "winit",
+]
+
+[[package]]
+name = "osmena-xtask"
+version = "0.1.0"
+dependencies = [
+ "icns",
+ "ico",
+ "resvg",
 ]
 
 [[package]]
@@ -2742,19 +2769,6 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
-]
-
-[[package]]
-name = "tempfile"
-version = "3.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
-dependencies = [
- "fastrand",
- "getrandom 0.4.3",
- "once_cell",
- "rustix 1.1.5",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3628,9 +3642,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "icns",
- "ico",
- "resvg",
+ "osmena-xtask",
 ]
 
 [[package]]

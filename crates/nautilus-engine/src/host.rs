@@ -11,14 +11,15 @@ use cef::{
     KeyEventType, MouseButtonType, MouseEvent, WindowInfo,
 };
 use dpi::PhysicalSize;
-use nautilus_core::{PendingTab, TabId};
+use osmena_core::{ButtonAction, EngineInput, MouseButton, PendingTab, TabId};
+use osmena_engine::{EngineError, FrameRef, PagePaint, TabHost as TabHostApi};
 use raw_window_handle::RawWindowHandle;
 use url::Url;
 
 use crate::delegate::{DelegateState, ViewState, client_for};
-use crate::engine::{Engine, EngineError};
+use crate::engine::Engine;
 use crate::frame::Frame;
-use crate::input::{self, ButtonAction, EngineInput, KeyEventKind, MouseButton};
+use crate::input::{self, KeyEventKind};
 
 /// Two clicks closer than this in time and space count as a double click
 /// (then a triple), as Chromium itself expects to be told.
@@ -82,8 +83,62 @@ impl TabHost {
         })
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.tabs.is_empty()
+    }
+
+    fn with(&self, tab: TabId, f: impl FnOnce(&TabEntry)) {
+        match self.tabs.get(&tab) {
+            Some(entry) => f(entry),
+            None => log::warn!("no engine tab for {tab:?}"),
+        }
+    }
+
+    fn with_host(&self, tab: TabId, f: impl FnOnce(&cef::BrowserHost)) {
+        self.with(tab, |entry| {
+            if let Some(host) = entry.browser.host() {
+                f(&host);
+            }
+        });
+    }
+
+    /// Borrow the tab's latest pixels.
+    pub fn with_frame<R>(&self, tab: TabId, f: impl FnOnce(&mut Frame) -> R) -> Option<R> {
+        let entry = self.tabs.get(&tab)?;
+        Some(f(&mut entry.view.frame.borrow_mut()))
+    }
+
+    /// The click count CEF expects for a press: 1, or one more than the
+    /// previous click's if it was the same button, close in time and
+    /// space.
+    fn click_count(&self, button: MouseButton, x: f32, y: f32) -> i32 {
+        let now = Instant::now();
+        let mut last = self.last_click.borrow_mut();
+        let count = match last.as_ref() {
+            Some(prev)
+                if prev.button == button
+                    && now.duration_since(prev.at) <= MULTI_CLICK_TIME
+                    && (prev.x - x).abs() <= MULTI_CLICK_DISTANCE
+                    && (prev.y - y).abs() <= MULTI_CLICK_DISTANCE =>
+            {
+                (prev.count % 3) + 1
+            }
+            _ => 1,
+        };
+        *last = Some(LastClick {
+            at: now,
+            button,
+            x,
+            y,
+            count,
+        });
+        count
+    }
+}
+
+impl TabHostApi for TabHost {
     /// Create a tab loading `url`.
-    pub fn create_tab(&mut self, tab: TabId, url: Url) {
+    fn create_tab(&mut self, tab: TabId, url: Url) {
         let (width, height) = self.content_size.get();
         let scale = self.scale.get();
         let view = Rc::new(ViewState {
@@ -121,7 +176,7 @@ impl TabHost {
 
     /// Create the tab page content asked for. Returns false if the engine
     /// no longer holds the request.
-    pub fn adopt_tab(&mut self, pending: PendingTab, tab: TabId) -> bool {
+    fn adopt_tab(&mut self, pending: PendingTab, tab: TabId) -> bool {
         let Some(url) = self.delegate.take_pending(pending) else {
             return false;
         };
@@ -130,7 +185,7 @@ impl TabHost {
     }
 
     /// Close the tab's browser. It finishes closing on the message loop.
-    pub fn close_tab(&mut self, tab: TabId) {
+    fn close_tab(&mut self, tab: TabId) {
         if let Some(entry) = self.tabs.remove(&tab) {
             entry.view.closing.set(true);
             if let Some(host) = entry.browser.host() {
@@ -139,30 +194,11 @@ impl TabHost {
         }
     }
 
-    pub fn has_tab(&self, tab: TabId) -> bool {
+    fn has_tab(&self, tab: TabId) -> bool {
         self.tabs.contains_key(&tab)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.tabs.is_empty()
-    }
-
-    fn with(&self, tab: TabId, f: impl FnOnce(&TabEntry)) {
-        match self.tabs.get(&tab) {
-            Some(entry) => f(entry),
-            None => log::warn!("no engine tab for {tab:?}"),
-        }
-    }
-
-    fn with_host(&self, tab: TabId, f: impl FnOnce(&cef::BrowserHost)) {
-        self.with(tab, |entry| {
-            if let Some(host) = entry.browser.host() {
-                f(&host);
-            }
-        });
-    }
-
-    pub fn navigate(&self, tab: TabId, url: Url) {
+    fn navigate(&self, tab: TabId, url: Url) {
         self.with(tab, |entry| {
             if let Some(frame) = entry.browser.main_frame() {
                 frame.load_url(Some(&CefString::from(url.as_str())));
@@ -170,7 +206,7 @@ impl TabHost {
         });
     }
 
-    pub fn back(&self, tab: TabId) {
+    fn back(&self, tab: TabId) {
         self.with(tab, |entry| {
             if entry.browser.can_go_back() != 0 {
                 entry.browser.go_back();
@@ -178,7 +214,7 @@ impl TabHost {
         });
     }
 
-    pub fn forward(&self, tab: TabId) {
+    fn forward(&self, tab: TabId) {
         self.with(tab, |entry| {
             if entry.browser.can_go_forward() != 0 {
                 entry.browser.go_forward();
@@ -186,16 +222,16 @@ impl TabHost {
         });
     }
 
-    pub fn reload(&self, tab: TabId) {
+    fn reload(&self, tab: TabId) {
         self.with(tab, |entry| entry.browser.reload());
     }
 
-    pub fn stop(&self, tab: TabId) {
+    fn stop(&self, tab: TabId) {
         self.with(tab, |entry| entry.browser.stop_load());
     }
 
     /// The tab is the window's visible tab: paint it.
-    pub fn show(&self, tab: TabId) {
+    fn show(&self, tab: TabId) {
         self.with_host(tab, |host| {
             host.was_hidden(0);
             host.invalidate(cef::PaintElementType::VIEW);
@@ -203,16 +239,16 @@ impl TabHost {
     }
 
     /// The tab is behind another: stop painting it.
-    pub fn hide(&self, tab: TabId) {
+    fn hide(&self, tab: TabId) {
         self.with_host(tab, |host| host.was_hidden(1));
     }
 
-    pub fn set_focused(&self, tab: TabId, focused: bool) {
+    fn set_focused(&self, tab: TabId, focused: bool) {
         self.with_host(tab, |host| host.set_focus(i32::from(focused)));
     }
 
     /// Resize the page area, if it changed. All tabs in a window share it.
-    pub fn resize_content(&self, tab: TabId, size: PhysicalSize<u32>) {
+    fn resize_content(&self, tab: TabId, size: PhysicalSize<u32>) {
         let size = (size.width.max(1), size.height.max(1));
         if self.content_size.replace(size) == size {
             return;
@@ -229,11 +265,11 @@ impl TabHost {
 
     /// Where the page area sits on screen (logical pixels), so Chromium
     /// can place its menus and widgets.
-    pub fn set_content_origin(&self, x: i32, y: i32) {
+    fn set_content_origin(&self, x: i32, y: i32) {
         self.origin.set((x, y));
     }
 
-    pub fn set_hidpi(&self, scale: f32) {
+    fn set_hidpi(&self, scale: f32) {
         self.scale.set(scale);
         let (width, height) = self.content_size.get();
         let dip = dip_size(width, height, scale);
@@ -247,13 +283,7 @@ impl TabHost {
         }
     }
 
-    /// Borrow the tab's latest pixels.
-    pub fn with_frame<R>(&self, tab: TabId, f: impl FnOnce(&mut Frame) -> R) -> Option<R> {
-        let entry = self.tabs.get(&tab)?;
-        Some(f(&mut entry.view.frame.borrow_mut()))
-    }
-
-    pub fn input(&self, tab: TabId, input: EngineInput) {
+    fn input(&self, tab: TabId, input: EngineInput) {
         let Some(entry) = self.tabs.get(&tab) else {
             log::warn!("no engine tab for {tab:?}");
             return;
@@ -358,31 +388,24 @@ impl TabHost {
         }
     }
 
-    /// The click count CEF expects for a press: 1, or one more than the
-    /// previous click's if it was the same button, close in time and
-    /// space.
-    fn click_count(&self, button: MouseButton, x: f32, y: f32) -> i32 {
-        let now = Instant::now();
-        let mut last = self.last_click.borrow_mut();
-        let count = match last.as_ref() {
-            Some(prev)
-                if prev.button == button
-                    && now.duration_since(prev.at) <= MULTI_CLICK_TIME
-                    && (prev.x - x).abs() <= MULTI_CLICK_DISTANCE
-                    && (prev.y - y).abs() <= MULTI_CLICK_DISTANCE =>
-            {
-                (prev.count % 3) + 1
-            }
-            _ => 1,
+    /// The tab's latest frame, if it painted one yet.
+    fn paint_page(&self, tab: TabId, sink: &mut dyn FnMut(PagePaint<'_>)) {
+        let Some(entry) = self.tabs.get(&tab) else {
+            return;
         };
-        *last = Some(LastClick {
-            at: now,
-            button,
-            x,
-            y,
-            count,
-        });
-        count
+        let mut frame = entry.view.frame.borrow_mut();
+        if frame.is_empty() {
+            return;
+        }
+        let (width, height) = frame.size();
+        let fresh = frame.take_dirty();
+        let pixels = frame.pixels();
+        sink(PagePaint::Frame(FrameRef {
+            width,
+            height,
+            bgra: &pixels,
+            fresh,
+        }));
     }
 }
 

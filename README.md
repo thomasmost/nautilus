@@ -4,8 +4,10 @@ A desktop web browser for macOS and Windows, written in Rust. Pages render
 through Chromium, embedded with the Chromium Embedded Framework (CEF); the
 window chrome (tab strip, address bar, settings) is drawn with egui. There
 is no HTML in the chrome. Nautilus is the Chromium sibling of
-[Paladin](../paladin), which has the same chrome and model on the Servo
-engine.
+[Paladin](https://github.com/thomasmost/paladin), which runs the same
+chrome and model on the Servo engine: both are built on
+[osmena](https://github.com/thomasmost/osmena), the shared shell, and
+this repository holds only what is Chromium's.
 
 ## Features
 
@@ -26,9 +28,9 @@ engine.
   and toolbar per profile.
 - **Keyboard first.** Every control is a command with a platform-native
   shortcut, and chords work even while the address bar has focus.
-- **Engine-agnostic design.** Only one crate imports CEF; the model and the
-  UI speak in pure, unit-tested commands and events, and are shared in
-  spirit (and largely in code) with Paladin.
+- **Engine-agnostic design.** Only one crate imports CEF, and it implements
+  osmena's `Engine` trait; the model and the UI are osmena's, shared with
+  Paladin and unit-tested without an engine.
 
 ## Stack
 
@@ -36,8 +38,9 @@ engine.
 | --------- | ----------------------------------------------------------------- |
 | Language  | Rust 1.97.1 (pinned in `rust-toolchain.toml`), edition 2024       |
 | Engine    | Chromium 154 through CEF (the `cef` crate 154.5), confined to `crates/nautilus-engine` |
-| Chrome    | egui 0.34 on winit 0.30, rendered through egui_glow on a glutin GL context |
-| Pages     | CEF off-screen rendering: each tab paints BGRA frames that egui draws as a texture |
+| Shell     | [osmena](https://github.com/thomasmost/osmena): the model, the egui 0.34 chrome on winit 0.30, the settings window, pinned by git revision |
+| Chrome GL | osmena's glutin surface (Chromium paints into memory, so the chrome owns the GL context) |
+| Pages     | CEF off-screen rendering: each tab paints BGRA frames that osmena draws as a texture |
 | Packaging | cargo-packager: `.app` and `.dmg` on macOS (not yet wired up, see Packaging), NSIS installer on Windows |
 | CI        | GitHub Actions on macOS and Windows runners                       |
 
@@ -45,10 +48,9 @@ engine.
 
 ```
 crates/
-  nautilus-core/    Engine-free model: windows, tabs, commands, keymap, settings, profiles
-  nautilus-engine/  CEF glue: engine, per-window tab host, handlers -> events, frames
-  nautilus/         The binary: winit app, GL surface, egui chrome, dispatch loop, packaging metadata
-xtask/              `cargo xtask icons` (logo.svg -> icns/ico/png)
+  nautilus-engine/  CEF glue: osmena's Engine and TabHost over CEF, handlers -> events, frames
+  nautilus/         The binary: the Brand, Chromium's process preamble, the command line, packaging metadata
+xtask/              `cargo xtask icons` (osmena's icon task for logo.svg -> icns/ico/png)
 assets/
   logo.svg          The shell logo (pure vector)
   icons/            Generated from logo.svg; committed
@@ -58,6 +60,12 @@ docs/
 ```
 
 ## Local development
+
+The model, chrome, and winit application come from the osmena crates,
+pinned by git revision in the workspace `Cargo.toml`. To change them
+alongside Nautilus, check osmena out next to this repository and patch the
+source to it in `~/.cargo/config.toml` (osmena's README has the table);
+then bump the `rev`s here once the change is pushed.
 
 Prerequisites: a Rust toolchain via `rustup` (the pinned version installs on
 first `cargo` run), and the tools that build CEF's C++ wrapper library:
@@ -96,9 +104,9 @@ belongs to one running Nautilus at a time.
 
 ## Tests
 
-- `cargo test --workspace` — unit tests in `nautilus-core`, `nautilus`, and
-  `nautilus-engine` (frame composition, key mapping; nothing starts
-  Chromium).
+- `cargo test --workspace` — unit tests in `nautilus-engine` (frame
+  composition, key mapping; nothing starts Chromium). The model, chrome,
+  and routing tests live in osmena.
 - `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo fmt --all --check` — what CI runs.
 

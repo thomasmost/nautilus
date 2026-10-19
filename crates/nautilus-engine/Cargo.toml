@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "Chromium glue: the only crate that imports the cef crate"
+description = "Chromium glue: the only crate that imports the cef crate; implements osmena's Engine"
 
 [dependencies]
-nautilus-core = { path = "../nautilus-core" }
+osmena-core = { workspace = true }
+# Chromium paints into memory, so the chrome's GL context is the shell's
+# glutin one.
+osmena-engine = { workspace = true, features = ["glutin"] }
 cef = { workspace = true }
 dpi = { workspace = true }
 keyboard-types = { workspace = true }

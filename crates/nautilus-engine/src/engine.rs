@@ -2,7 +2,6 @@
 //! to the application's event loop, and the event queue.
 
 use std::cell::Cell;
-use std::fmt;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,27 +15,24 @@ use cef::{
     ImplCommandLine, LogSeverity, Settings, WrapApp, WrapBrowserProcessHandler, api_hash, wrap_app,
     wrap_browser_process_handler,
 };
-use nautilus_core::{EngineEvent, PendingTab};
+use osmena_core::{EngineEvent, EngineInfo, PendingTab};
+use osmena_engine::raw_window_handle::{DisplayHandle, WindowHandle};
+use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker};
 
 use crate::delegate::DelegateState;
+use crate::host::TabHost;
 
-/// Wakes the application's event loop from any thread. CEF calls this
-/// when it has work for the main thread; the app then calls
-/// [`Engine::spin`].
-pub trait Waker: Send + Sync + 'static {
-    fn wake(&self);
-}
-
-#[derive(Debug)]
-pub struct EngineError(pub String);
-
-impl fmt::Display for EngineError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for EngineError {}
+/// What the shell needs to know about this engine. The version is the
+/// Chromium major of the `cef` crate pinned in the workspace `Cargo.toml`.
+pub static INFO: EngineInfo = EngineInfo {
+    name: "Chromium",
+    version: "154",
+    data_dir: "chromium",
+    supports_stop: true,
+    // winit reports one wheel notch as one line on Windows; Chromium
+    // scrolls about 100 px per notch.
+    wheel_line_px: 100.0,
+};
 
 /// Run this process as one of Chromium's helper processes if it is one.
 ///
@@ -168,10 +164,20 @@ impl Engine {
         })
     }
 
+    pub(crate) fn delegate(&self) -> &Rc<DelegateState> {
+        &self.delegate
+    }
+}
+
+impl osmena_engine::Engine for Engine {
+    /// Chromium paints into memory, so the chrome's GL context is the
+    /// shell's own.
+    type Surface = GlutinSurface;
+    type Host = TabHost;
+
     /// Run the work CEF has queued for the main thread: it delivers the
-    /// handler callbacks (which become [`EngineEvent`]s) and paints. Call
-    /// after every window event and every [`Waker::wake`].
-    pub fn spin(&self) {
+    /// handler callbacks (which become [`EngineEvent`]s) and paints.
+    fn spin(&self) {
         if self.spinning.replace(true) {
             return;
         }
@@ -179,20 +185,32 @@ impl Engine {
         self.spinning.set(false);
     }
 
-    /// Take every event produced since the last call.
-    pub fn drain_events(&self) -> Vec<EngineEvent> {
+    fn drain_events(&self) -> Vec<EngineEvent> {
         self.delegate.drain()
     }
 
-    /// Forget a tab that page content asked for but that no window adopted.
-    pub fn discard_pending(&self, pending: PendingTab) {
+    fn discard_pending(&self, pending: PendingTab) {
         if self.delegate.take_pending(pending).is_none() {
             log::debug!("no pending tab {pending:?} to discard");
         }
     }
 
-    pub(crate) fn delegate(&self) -> &Rc<DelegateState> {
-        &self.delegate
+    fn open_surface(
+        &self,
+        display: DisplayHandle<'_>,
+        window: WindowHandle<'_>,
+        size: PhysicalSize<u32>,
+    ) -> Result<GlutinSurface, EngineError> {
+        GlutinSurface::new(display, window, size)
+    }
+
+    fn open_host(
+        &self,
+        _surface: &GlutinSurface,
+        window: WindowHandle<'_>,
+        scale: f32,
+    ) -> Result<TabHost, EngineError> {
+        TabHost::new(self, window.as_raw(), scale)
     }
 }
 

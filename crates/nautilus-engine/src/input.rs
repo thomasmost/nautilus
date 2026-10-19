@@ -1,69 +1,11 @@
-//! Nautilus's input events and their conversion to CEF's. The app builds
-//! `EngineInput` from winit events; this keeps winit out of the engine and
-//! CEF out of the app.
+//! Conversion of the browser's input events (`osmena_core::EngineInput`)
+//! to CEF's. The shell builds the events from winit; this keeps winit
+//! out of the engine and CEF out of the shell.
 
-use keyboard_types::{Code, Key, KeyState, Location, Modifiers, NamedKey};
+use keyboard_types::{Key, KeyState, Location, Modifiers, NamedKey};
+use osmena_core::{KeyInput, MouseButton};
 
 use crate::keycodes;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MouseButton {
-    Primary,
-    Secondary,
-    Auxiliary,
-    Back,
-    Forward,
-    Other(u16),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ButtonAction {
-    Down,
-    Up,
-}
-
-/// A key event in `keyboard-types` terms (the W3C UI Events model).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KeyInput {
-    pub state: KeyState,
-    pub key: Key,
-    pub code: Code,
-    pub location: Location,
-    pub modifiers: Modifiers,
-    pub repeat: bool,
-}
-
-/// Input for a tab. Positions are physical pixels relative to the top-left
-/// of the page area (below the toolbar).
-#[derive(Clone, Debug, PartialEq)]
-pub enum EngineInput {
-    MouseMove {
-        x: f32,
-        y: f32,
-    },
-    MouseButton {
-        action: ButtonAction,
-        button: MouseButton,
-        x: f32,
-        y: f32,
-    },
-    /// The pointer left the page area.
-    MouseLeft,
-    /// Scroll by `(dx, dy)` pixels with the pointer at `(x, y)`; positive
-    /// `dy` scrolls towards the top of the page (wheel rolled away from
-    /// the user), as in winit.
-    Wheel {
-        dx: f64,
-        dy: f64,
-        x: f32,
-        y: f32,
-    },
-    Key(KeyInput),
-    ImeStart,
-    ImePreedit(String),
-    ImeCommit(String),
-    ImeDismissed,
-}
 
 // CEF's `cef_event_flags_t` bits (include/internal/cef_types.h).
 pub(crate) const FLAG_SHIFT: u32 = 1 << 1;
@@ -196,6 +138,8 @@ fn typed_text(key: &Key) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    use keyboard_types::Code;
+
     use super::*;
 
     fn press(key: Key, code: Code, modifiers: Modifiers) -> KeyInput {

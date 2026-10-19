@@ -22,7 +22,7 @@ use cef::{
     WrapRequestHandler, wrap_client, wrap_display_handler, wrap_download_image_callback,
     wrap_life_span_handler, wrap_load_handler, wrap_render_handler, wrap_request_handler,
 };
-use nautilus_core::{Cursor, EngineEvent, Favicon, LoadState, PendingTab, TabId};
+use osmena_core::{Cursor, EngineEvent, Favicon, LoadState, PendingTab, TabId};
 use url::Url;
 
 use crate::frame::Frame;
