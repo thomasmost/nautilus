@@ -1,0 +1,4 @@
+[toolchain]
+# The stable channel Servo 0.7.0 pins. Bump together with the servo crate.
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]

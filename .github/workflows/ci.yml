@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # The CEF binary distribution (about 420 MB unpacked) lives outside the
+  # target directory so it is cached on its own and survives target cache
+  # churn. cef-dll-sys downloads the matching version into it on a miss.
+  CEF_PATH: ${{ github.workspace }}/.cef
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            check-icons: true
+          - os: windows-2025
+            check-icons: false
+    steps:
+      - uses: actions/checkout@v7
+
+      # dtolnay/rust-toolchain does not read rust-toolchain.toml; keep the
+      # version in sync with it so rustup installs one toolchain, not two.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      # cef-dll-sys builds libcef_dll_wrapper with CMake and the Ninja
+      # generator. The runner images ship CMake; Ninja is installed here.
+      - uses: seanmiddleditch/gha-setup-ninja@v6
+
+      - name: Remove the runner image's preinstalled toolchains
+        shell: bash
+        run: |
+          active=$(rustup show active-toolchain | cut -d' ' -f1)
+          for toolchain in $(rustup toolchain list --quiet); do
+            if [ "$toolchain" != "$active" ]; then
+              rustup toolchain uninstall "$toolchain"
+            fi
+          done
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Cache the CEF binary distribution
+        uses: actions/cache@v4
+        with:
+          path: .cef
+          key: cef-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+
+      # tiny-skia's output is not guaranteed identical across CPU
+      # architectures, so only the Apple Silicon runner diffs the icons.
+      - name: Icons are up to date
+        if: matrix.check-icons
+        run: |
+          cargo xtask icons
+          git diff --exit-code -- assets/icons
+
+  package:
+    name: package ${{ matrix.os }}
+    needs: check
+    # Packaging runs on pushes to main only. macOS is not packaged yet
+    # (README.md, Packaging): CEF needs a bundle layout cargo-packager does
+    # not produce.
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - uses: seanmiddleditch/gha-setup-ninja@v6
+      - name: Remove the runner image's preinstalled toolchains
+        shell: bash
+        run: |
+          active=$(rustup show active-toolchain | cut -d' ' -f1)
+          for toolchain in $(rustup toolchain list --quiet); do
+            if [ "$toolchain" != "$active" ]; then
+              rustup toolchain uninstall "$toolchain"
+            fi
+          done
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Cache the CEF binary distribution
+        uses: actions/cache@v4
+        with:
+          path: .cef
+          key: cef-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+
+      - run: cargo install cargo-packager --version 0.11.8 --locked
+      - run: cargo build --release -p nautilus
+      - run: cargo packager --release -p nautilus
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: nautilus-${{ matrix.os }}
+          path: |
+            target/release/*-setup.exe
+            target/release/nautilus.pdb
+          if-no-files-found: error

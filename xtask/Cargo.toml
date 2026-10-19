@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Workspace helper tasks: `cargo xtask icons`"
+
+[dependencies]
+# default-features = false drops text and system-font support, so the
+# output never depends on fonts installed on the machine. The logo must
+# therefore contain no <text> elements.
+resvg = { version = "0.48.1", default-features = false }
+icns = "0.5.0"
+ico = "0.6.0"

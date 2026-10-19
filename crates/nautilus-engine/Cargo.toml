@@ -1,0 +1,16 @@
+[package]
+name = "nautilus-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Chromium glue: the only crate that imports the cef crate"
+
+[dependencies]
+nautilus-core = { path = "../nautilus-core" }
+cef = { workspace = true }
+dpi = { workspace = true }
+keyboard-types = { workspace = true }
+log = { workspace = true }
+url = { workspace = true }
+raw-window-handle = { workspace = true }

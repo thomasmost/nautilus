@@ -1,0 +1,87 @@
+[package]
+name = "nautilus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Nautilus desktop browser"
+
+[[bin]]
+name = "nautilus"
+path = "src/main.rs"
+
+# macOS: Chromium's helper processes must be a separate executable inside
+# the app bundle (see README.md, Packaging). Windows runs them from the main
+# executable.
+[[bin]]
+name = "nautilus-helper"
+path = "src/helper.rs"
+
+[dependencies]
+nautilus-core = { path = "../nautilus-core" }
+nautilus-engine = { path = "../nautilus-engine" }
+clap = { version = "4", features = ["derive"] }
+egui = { workspace = true }
+egui-winit = { workspace = true }
+egui_glow = { workspace = true }
+env_logger = "0.11"
+glow = { workspace = true }
+glutin = { workspace = true }
+glutin-winit = { workspace = true }
+keyboard-types = { workspace = true }
+log = { workspace = true }
+png = "0.18"
+url = { workspace = true }
+winit = { workspace = true }
+muda = { version = "0.21", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSResponder",
+    "NSImage",
+    "NSRunningApplication",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+
+[target.'cfg(windows)'.dependencies]
+# Native message box for fatal startup errors in release builds (see fatal.rs),
+# the job object that ties Chromium's processes to the browser (process.rs).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    # CreateJobObjectW takes a SECURITY_ATTRIBUTES, gated behind this feature.
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+# `cargo packager --release -p nautilus`, run from the workspace root. The
+# hook below builds the release binary first, so packaging never bundles a
+# stale one. The CEF runtime files (libcef.dll, resources, locales) land in
+# target/release/ during the build and are picked up by the `resources` globs.
+[package.metadata.packager]
+product-name = "Nautilus"
+identifier = "org.nautilus.software"
+before-packaging-command = "cargo build --release -p nautilus"
+icons = ["../../assets/icons/nautilus.icns", "../../assets/icons/nautilus.ico", "../../assets/icons/nautilus-256.png"]
+resources = [
+    "../../target/release/*.dll",
+    "../../target/release/*.pak",
+    "../../target/release/*.dat",
+    "../../target/release/*.bin",
+    "../../target/release/*.json",
+    "../../target/release/locales",
+]
+
+[package.metadata.packager.macos]
+minimum-system-version = "12.0"
+
+[package.metadata.packager.nsis]
+installer-icon = "../../assets/icons/nautilus.ico"
+installer-mode = "currentUser"
