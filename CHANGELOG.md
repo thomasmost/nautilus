@@ -17,6 +17,16 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Tab folders: "Move tab to folder…" in a tab's context menu (acting on
+  the selection) names a folder ("Folder A", "Folder B", … by default,
+  or an existing one) whose tabs sit behind one chip in the strip; the
+  chip lists its tabs on a click and its menu expands, collapses,
+  renames, ungroups, or closes the folder. "Close all selected" closes
+  the selection.
+- Bookmark groups: "Bookmark all selected…" names a group (or picks an
+  existing one); groups live in `bookmarks.toml` in the profile and open
+  from the window menu's "Bookmarks" submenu, a page at a time or all at
+  once.
 - Chrome extensions. The toolbar ends in a puzzle-piece button whose
   menu lists the installed extensions (click one for its popup), pins
   them to the toolbar, installs the extension on the current Chrome Web

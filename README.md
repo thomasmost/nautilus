@@ -34,6 +34,9 @@ this repository holds only what is Chromium's.
   the puzzle-piece menu, or paste its URL or id into Settings) or load
   an unpacked directory; pin them to the toolbar, where their popups
   open under the button; switch them off or remove them in Settings.
+- **Tab folders and bookmark groups.** Fold a selection of tabs behind
+  one chip in the strip, or bookmark it as a named group to reopen from
+  the menu.
 - **Keyboard first.** Every control is a command with Chromium's shortcut
   (Cmd for Ctrl on macOS), chords work even while the address bar has
   focus, and Settings remaps them the way a game's controls screen does:
@@ -226,7 +229,22 @@ engine glue. Each item must pass.
     extension leaves the list, the menu, and the directory. Relaunch:
     installed extensions are still there, and no Chromium window appears
     (the management page runs in a window that is never shown).
-13. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+13. **Folders and bookmarks.** Open three tabs. Right-click the second:
+    the menu has "Close all selected (1)" (disabled with one selected),
+    "Move tab to folder…", and "Bookmark all selected (1)…". Pick "Move
+    tab to folder…": a prompt over the page offers "Folder A"; Enter.
+    The strip shows a chip "▸ Folder A (1)" in the tab's place; click
+    it: a list drops down with the tab, and clicking the tab there
+    activates it. Right-click the chip: Expand, Rename…, Ungroup, Close
+    folder (1 tab). Expand: the tab appears after the chip, which reads
+    "▾ Folder A". Ctrl-click the other two tabs, right-click one, "Move
+    2 tabs to folder…", pick Folder A from the existing-folder choice:
+    the folder holds three tabs, together. "Bookmark all selected…" on a
+    selection asks for a group name; type Work, Enter: the profile has
+    `bookmarks.toml` with the pages, and ☰ → Bookmarks → Work lists
+    them with "Open all (n)", which opens each in a new tab. Folders are
+    gone after a relaunch; bookmarks stay.
+14. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging
