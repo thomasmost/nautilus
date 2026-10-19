@@ -129,6 +129,13 @@ Ninja on `PATH`:
   store's, and loads it unpacked. Chromium keeps unpacked extensions
   across launches itself, in prefs it writes a few seconds later: a
   forced kill right after an install loses it, a normal exit does not.
+- **A `cef` binding callback that returns an int defaults to 0.** The
+  `wrap_*!` macros install every callback with the trait's default, which
+  for an int return is `0`: `CefWindowDelegate::CanClose` then says "no"
+  (CEF's own default is "yes"), so a window never closes and CEF's
+  shutdown crashes with it alive. Implement such callbacks explicitly
+  (`ManagerWindowDelegate::can_close` returns 1); `Engine::drop` waits for
+  the manager's window to be destroyed as well as for every browser.
 - **Browsers Chromium opens on its own get the default client.** An
   extension's `chrome.tabs.create`, or a link from the management page,
   makes Chromium create a browser Nautilus cannot show;

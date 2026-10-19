@@ -278,14 +278,17 @@ impl Drop for Engine {
         }
         self.extensions.shutdown();
         let deadline = Instant::now() + Duration::from_secs(3);
-        while self.delegate.live_browsers() > 0 && Instant::now() < deadline {
+        while (self.delegate.live_browsers() > 0 || !self.extensions.is_closed())
+            && Instant::now() < deadline
+        {
             cef::do_message_loop_work();
             std::thread::sleep(Duration::from_millis(5));
         }
-        if self.delegate.live_browsers() > 0 {
+        if self.delegate.live_browsers() > 0 || !self.extensions.is_closed() {
             log::warn!(
-                "{} browser(s) still open at shutdown",
-                self.delegate.live_browsers()
+                "{} browser(s) still open at shutdown (extension manager closed: {})",
+                self.delegate.live_browsers(),
+                self.extensions.is_closed()
             );
         }
         cef::shutdown();

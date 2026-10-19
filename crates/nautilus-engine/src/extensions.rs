@@ -118,6 +118,10 @@ mod stub {
             None
         }
 
+        pub(crate) fn is_closed(&self) -> bool {
+            true
+        }
+
         pub(crate) fn install(&self, _source: ExtensionSource) {}
 
         pub(crate) fn set_enabled(&self, _id: &str, _enabled: bool) {}
@@ -260,6 +264,9 @@ mod windows {
         downloads: Vec<Urlrequest>,
         /// The never-shown Views window holding the browser.
         window: Option<CefWindow>,
+        /// The window exists (created, not yet destroyed). CEF may only
+        /// shut down once it is gone.
+        window_alive: bool,
     }
 
     /// The management browser (never shown) and what it learnt. One per
@@ -307,6 +314,7 @@ mod windows {
                     known: Vec::new(),
                     downloads: Vec::new(),
                     window: None,
+                    window_alive: false,
                 }),
             });
             let mut client = ManagerClient::new(
@@ -328,12 +336,19 @@ mod windows {
                 log::error!("Chromium could not create the extension manager browser");
                 return manager;
             };
-            let mut window_delegate = ManagerWindowDelegate::new(browser_view);
+            let mut window_delegate = ManagerWindowDelegate::new(browser_view, manager.clone());
             match cef::window_create_top_level(Some(&mut window_delegate)) {
                 Some(window) => manager.inner.borrow_mut().window = Some(window),
                 None => log::error!("Chromium could not create the extension manager window"),
             }
             manager
+        }
+
+        /// True once the management browser and its window are gone (or
+        /// were never made), so CEF may shut down.
+        pub(crate) fn is_closed(&self) -> bool {
+            let inner = self.inner.borrow();
+            inner.browser.is_none() && !inner.window_alive
         }
 
         /// Evaluate `script` in the management page, now or once it is
@@ -507,6 +522,7 @@ mod windows {
         /// Close the management window and its browser; the engine then
         /// pumps until they are gone.
         pub(crate) fn shutdown(&self) {
+            log::debug!("extension manager shutting down");
             let mut inner = self.inner.borrow_mut();
             inner.ready = false;
             inner.queued.clear();
@@ -864,6 +880,7 @@ mod windows {
     wrap_window_delegate! {
         struct ManagerWindowDelegate {
             browser_view: BrowserView,
+            manager: Rc<ExtensionManager>,
         }
 
         impl ViewDelegate {}
@@ -873,9 +890,24 @@ mod windows {
         impl WindowDelegate {
             /// The browser goes into the window, which is never shown.
             fn on_window_created(&self, window: Option<&mut CefWindow>) {
+                self.manager.inner.borrow_mut().window_alive = true;
                 if let Some(window) = window {
                     window.add_child_view(Some(&mut View::from(&self.browser_view)));
                 }
+            }
+
+            /// The window may close whenever asked. (The binding's default
+            /// answers 0, which keeps the window open for ever and then
+            /// crashes CEF's shutdown.)
+            fn can_close(&self, _window: Option<&mut CefWindow>) -> ::std::os::raw::c_int {
+                1
+            }
+
+            fn on_window_destroyed(&self, _window: Option<&mut CefWindow>) {
+                log::debug!("extension manager window destroyed");
+                let mut inner = self.manager.inner.borrow_mut();
+                inner.window_alive = false;
+                inner.window = None;
             }
 
             fn initial_bounds(&self, _window: Option<&mut CefWindow>) -> Rect {

@@ -6,6 +6,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Closing the browser after installing an extension in that session
+  crashed inside Chromium's shutdown: the extension manager's hidden
+  window never closed (its delegate answered "cannot close") and CEF
+  shut down with it alive. The window now closes, and shutdown waits
+  for it.
+
 ### Changed
 
 - The model, the egui chrome, the settings window, and the winit
