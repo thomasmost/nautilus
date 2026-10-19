@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-19 (moved onto osmena)._
+_Last updated: 2026-10-19 (handoff after the move onto osmena)._
 
 ## Architecture
 
@@ -139,3 +139,44 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-10-19)
+
+What exists: Nautilus was started today as Paladin's feature set on
+Chromium (CEF 154), and the same day its model and chrome moved to osmena;
+this repository is the CEF engine crate and the binary. Public at
+<https://github.com/thomasmost/nautilus>.
+
+Verified on Windows: `cargo test --workspace`, clippy, formatting, icons
+unchanged; launch renders example.com with the Nautilus title and icon;
+before the osmena move, also Ctrl+T with a typed URL, Ctrl-click selection
+with the native tab menu, wheel scrolling, and a clean exit with no leftover
+processes. Not verified: typing into page fields, link hover status, Alt+Left,
+tab drags between windows, open-in-profile, the crashed-tab panel
+(`chrome://crash`), anything on macOS.
+
+CI: the Windows job passed. The first macOS job failed in `nautilus-engine`:
+`cef::CursorHandle` is a Windows-only name in the `cef` crate; the fix in this
+repository's history uses the platform typedef instead and is unverified on
+macOS (no Mac was available). macOS also needs the app bundle before it can
+run at all (C3 in `docs/upstream-issues.md`).
+
+Open items, most useful first:
+1. macOS app bundle with the framework and the five helper apps (C3, T1).
+2. The renderer sandbox through CEF's `bootstrap.exe` (C1).
+3. Accelerated off-screen rendering (C2).
+4. The manual checklist items above that were never exercised.
+5. A freshly created profile can take more than 12 s before the first page
+   paints; nothing is wrong, but screenshots taken earlier show a white page.
+
+All three checkouts live side by side under `vibes/browser-project/`
+(`osmena`, `paladin`, `nautilus`); Paladin's Servo and stylo fork checkouts
+stay at `~/vibes/servo` and `~/vibes/stylo`. `~/.cargo/config.toml` on the
+development Windows box carries a `[patch."https://github.com/thomasmost/osmena"]`
+table pointing at the osmena checkout, so both browsers build against
+uncommitted osmena changes; while it is active `cargo` rewrites the
+browsers' `Cargo.lock` with path sources for the osmena crates. Before
+committing a browser's lock, disable the table (rename its key), run
+`cargo metadata` to put the git sources back, commit, and re-enable it.
+Cargo fetches the pinned revision from GitHub even when the table is
+active, so GitHub must be reachable.

@@ -27,6 +27,14 @@ use url::Url;
 
 use crate::frame::Frame;
 
+/// The native cursor handle `on_cursor_change` receives. The `cef` crate's
+/// generated handler signature names `CursorHandle` on Windows and Linux
+/// but a bare pointer on macOS, and the implementation must match exactly.
+#[cfg(target_os = "macos")]
+type NativeCursor = *mut u8;
+#[cfg(not(target_os = "macos"))]
+type NativeCursor = cef::CursorHandle;
+
 /// Shared by every tab of the process: the event queue and the tabs page
 /// content asked for.
 #[derive(Default)]
@@ -484,7 +492,7 @@ wrap_display_handler! {
         fn on_cursor_change(
             &self,
             _browser: Option<&mut Browser>,
-            _cursor: cef::CursorHandle,
+            _cursor: NativeCursor,
             type_: CursorType,
             _custom_cursor_info: Option<&CursorInfo>,
         ) -> ::std::os::raw::c_int {
