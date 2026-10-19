@@ -123,7 +123,7 @@ impl Engine {
             ))
         })?;
         // Absolute, but not canonical: on Windows `canonicalize` yields a
-        // verbatim `\?\` path, and Chromium's LevelDB (IndexedDB) then
+        // verbatim `\\?\` path, and Chromium's LevelDB (IndexedDB) then
         // fails to take its lock file in it.
         let engine_dir = std::path::absolute(engine_dir).map_err(|e| {
             EngineError(format!(
