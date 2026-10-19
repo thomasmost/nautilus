@@ -12,14 +12,16 @@ use cef::{
 };
 use dpi::PhysicalSize;
 use osmena_core::{ButtonAction, EngineInput, MouseButton, PendingTab, TabId};
-use osmena_engine::{EngineError, FrameRef, PagePaint, TabHost as TabHostApi};
+use osmena_engine::{EngineError, FrameRef, PagePaint, ScreenRect, TabHost as TabHostApi};
 use raw_window_handle::RawWindowHandle;
 use url::Url;
 
 use crate::delegate::{DelegateState, ViewState, client_for};
 use crate::engine::Engine;
+use crate::extensions::ExtensionManager;
 use crate::frame::Frame;
 use crate::input::{self, KeyEventKind};
+use crate::popup::Popups;
 
 /// Two clicks closer than this in time and space count as a double click
 /// (then a triple), as Chromium itself expects to be told.
@@ -35,6 +37,9 @@ struct TabEntry {
 pub struct TabHost {
     tabs: HashMap<TabId, TabEntry>,
     delegate: Rc<DelegateState>,
+    extensions: Rc<ExtensionManager>,
+    /// The extension action popups over this window.
+    popups: Popups,
     /// The native window the tabs belong to, for the dialogs and menus
     /// Chromium opens itself.
     parent: cef::sys::cef_window_handle_t,
@@ -72,6 +77,8 @@ impl TabHost {
         Ok(TabHost {
             tabs: HashMap::new(),
             delegate: engine.delegate().clone(),
+            extensions: engine.extensions().clone(),
+            popups: Popups::new(engine.delegate().clone(), parent),
             parent,
             scale: Cell::new(scale),
             content_size: Cell::new((1024, 768)),
@@ -244,6 +251,9 @@ impl TabHostApi for TabHost {
     }
 
     fn set_focused(&self, tab: TabId, focused: bool) {
+        if focused && let Some(entry) = self.tabs.get(&tab) {
+            self.delegate.set_last_focused(tab, &entry.browser);
+        }
         self.with_host(tab, |host| host.set_focus(i32::from(focused)));
     }
 
@@ -386,6 +396,18 @@ impl TabHostApi for TabHost {
             }
             EngineInput::ImeDismissed => host.ime_cancel_composition(),
         }
+    }
+
+    /// Open the popup page of `extension`'s action under its button.
+    fn open_extension_action(&self, _tab: TabId, extension: &str, anchor: ScreenRect) {
+        match self.extensions.popup_url(extension) {
+            Some(url) => self.popups.open(extension, &url, anchor, self.scale.get()),
+            None => log::warn!("extension {extension} has no popup to open"),
+        }
+    }
+
+    fn close_extension_popups(&self) {
+        self.popups.close_all();
     }
 
     /// The tab's latest frame, if it painted one yet.

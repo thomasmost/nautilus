@@ -13,13 +13,17 @@
 //!   (off-screen) browser that paints into a [`Frame`] the shell uploads
 //!   as a texture under the toolbar (`PagePaint::Frame`).
 
+mod crx;
 mod delegate;
 mod engine;
+mod extensions;
 mod frame;
 mod host;
 mod input;
 mod keycodes;
+mod popup;
 
 pub use crate::engine::{Engine, INFO, run_helper, run_subprocess};
+pub use crate::extensions::web_store_item_id;
 pub use crate::frame::Frame;
 pub use crate::host::TabHost;

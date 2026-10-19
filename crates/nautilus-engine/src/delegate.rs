@@ -8,19 +8,22 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, CefString, CefStringList, Client, CursorInfo, CursorType, DisplayHandler,
-    DownloadImageCallback, Errorcode, Frame as CefFrame, Image, ImplBinaryValue, ImplBrowser,
-    ImplBrowserHost, ImplClient, ImplDisplayHandler, ImplDownloadImageCallback, ImplFrame,
-    ImplImage, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler, ImplRequestHandler,
-    LifeSpanHandler, LoadHandler, LogSeverity, PaintElementType, Rect, RenderHandler,
-    RequestHandler, ScreenInfo, TerminationStatus, WrapClient, WrapDisplayHandler,
-    WrapDownloadImageCallback, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
-    WrapRequestHandler, wrap_client, wrap_display_handler, wrap_download_image_callback,
-    wrap_life_span_handler, wrap_load_handler, wrap_render_handler, wrap_request_handler,
+    Browser, CefString, CefStringList, Client, CursorInfo, CursorType, DialogHandler,
+    DisplayHandler, DownloadImageCallback, Errorcode, FileDialogCallback, FileDialogMode,
+    Frame as CefFrame, Image, ImplBinaryValue, ImplBrowser, ImplBrowserHost, ImplClient,
+    ImplDialogHandler, ImplDisplayHandler, ImplDownloadImageCallback, ImplFileDialogCallback,
+    ImplFrame, ImplImage, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler,
+    ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity, PaintElementType, Rect,
+    RenderHandler, RequestHandler, ScreenInfo, TerminationStatus, WrapClient, WrapDialogHandler,
+    WrapDisplayHandler, WrapDownloadImageCallback, WrapLifeSpanHandler, WrapLoadHandler,
+    WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_dialog_handler, wrap_display_handler,
+    wrap_download_image_callback, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
+    wrap_request_handler,
 };
 use osmena_core::{Cursor, EngineEvent, Favicon, LoadState, PendingTab, TabId};
 use url::Url;
@@ -47,6 +50,16 @@ pub(crate) struct DelegateState {
     /// Browsers created and not yet destroyed (`on_after_created` to
     /// `on_before_close`); CEF may only shut down at zero.
     live_browsers: Cell<usize>,
+    /// The tab focused last, which stands as the opener of a tab that
+    /// Chromium opens on its own (an extension's `chrome.tabs.create`).
+    last_focused: Cell<Option<TabId>>,
+    /// That tab's browser, whose visible window owns the dialogs the
+    /// engine shows the user.
+    focused_browser: RefCell<Option<Browser>>,
+    /// The directory the next folder dialog is answered with, whichever
+    /// browser Chromium routes it to (the extension manager's `loadUnpacked`
+    /// opens one; CEF does not always attribute it to that browser).
+    dialog_answer: RefCell<Option<PathBuf>>,
 }
 
 impl DelegateState {
@@ -64,6 +77,58 @@ impl DelegateState {
 
     pub(crate) fn live_browsers(&self) -> usize {
         self.live_browsers.get()
+    }
+
+    pub(crate) fn set_last_focused(&self, tab: TabId, browser: &Browser) {
+        self.last_focused.set(Some(tab));
+        *self.focused_browser.borrow_mut() = Some(browser.clone());
+    }
+
+    /// The browser of the last focused tab, for dialogs the user should
+    /// see.
+    pub(crate) fn focused_browser(&self) -> Option<Browser> {
+        self.focused_browser.borrow().clone()
+    }
+
+    pub(crate) fn forget_browser(&self, browser: &Browser) {
+        let mut focused = self.focused_browser.borrow_mut();
+        if focused
+            .as_ref()
+            .is_some_and(|f| f.identifier() == browser.identifier())
+        {
+            *focused = None;
+        }
+    }
+
+    /// Answer the next folder dialog with `dir` instead of showing it.
+    pub(crate) fn answer_next_dialog(&self, dir: PathBuf) {
+        *self.dialog_answer.borrow_mut() = Some(dir);
+    }
+
+    /// The dialog handler every client of this engine uses: a pending
+    /// answer settles the dialog without showing it; otherwise CEF shows
+    /// its own, owned by the browser's window.
+    pub(crate) fn dialog_handler(self: &Rc<Self>) -> DialogHandler {
+        AnswerDialog::new(self.clone())
+    }
+
+    /// A URL Chromium wants shown that has no opener tab (an extension
+    /// asked for a tab): offer it to the last focused tab's window.
+    pub(crate) fn request_tab_without_opener(&self, url: Url) -> bool {
+        match self.last_focused.get() {
+            Some(opener) => {
+                self.request_tab(opener, url);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// A browser other than a tab (the extension manager, a popup) was
+    /// created (`+1`) or destroyed (`-1`).
+    pub(crate) fn add_live(&self, delta: i64) {
+        let count = (self.live_browsers.get() as i64 + delta).max(0);
+        self.live_browsers.set(count as usize);
     }
 
     /// Record that `opener` asked for a new tab at `url` and report it.
@@ -101,13 +166,46 @@ impl ViewState {
 
 /// Build the client for one tab.
 pub(crate) fn client_for(view: Rc<ViewState>) -> Client {
+    let dialog = view.delegate.dialog_handler();
     TabClient::new(
         TabRenderHandler::new(view.clone()),
         TabLifeSpanHandler::new(view.clone()),
         TabLoadHandler::new(view.clone()),
         TabDisplayHandler::new(view.clone()),
         TabRequestHandler::new(view),
+        dialog,
     )
+}
+
+wrap_dialog_handler! {
+    struct AnswerDialog {
+        delegate: Rc<DelegateState>,
+    }
+
+    impl DialogHandler {
+        #[allow(clippy::too_many_arguments)]
+        fn on_file_dialog(
+            &self,
+            _browser: Option<&mut Browser>,
+            mode: FileDialogMode,
+            _title: Option<&CefString>,
+            _default_file_path: Option<&CefString>,
+            _accept_filters: Option<&mut CefStringList>,
+            _accept_extensions: Option<&mut CefStringList>,
+            _accept_descriptions: Option<&mut CefStringList>,
+            callback: Option<&mut FileDialogCallback>,
+        ) -> ::std::os::raw::c_int {
+            let answer = self.delegate.dialog_answer.borrow_mut().take();
+            log::debug!("file dialog {mode:?}; answer {answer:?}");
+            let (Some(dir), Some(callback)) = (answer, callback) else {
+                return 0;
+            };
+            let mut list = CefStringList::new();
+            list.append(&dir.to_string_lossy());
+            callback.cont(Some(&mut list));
+            1
+        }
+    }
 }
 
 wrap_client! {
@@ -117,9 +215,14 @@ wrap_client! {
         load: LoadHandler,
         display: DisplayHandler,
         request: RequestHandler,
+        dialog: DialogHandler,
     }
 
     impl Client {
+        fn dialog_handler(&self) -> Option<DialogHandler> {
+            Some(self.dialog.clone())
+        }
+
         fn render_handler(&self) -> Option<RenderHandler> {
             Some(self.render.clone())
         }
@@ -289,11 +392,14 @@ wrap_life_span_handler! {
             0
         }
 
-        fn on_before_close(&self, _browser: Option<&mut Browser>) {
+        fn on_before_close(&self, browser: Option<&mut Browser>) {
             let delegate = &self.view.delegate;
             delegate
                 .live_browsers
                 .set(delegate.live_browsers.get().saturating_sub(1));
+            if let Some(browser) = browser {
+                delegate.forget_browser(browser);
+            }
         }
     }
 }
@@ -348,7 +454,10 @@ wrap_load_handler! {
             let error_text = error_text.map(CefString::to_string).unwrap_or_default();
             let failed_url = failed_url.map(CefString::to_string).unwrap_or_default();
             let page = error_page(&failed_url, &error_text);
-            let uri = format!("data:text/html;base64,{}", base64(page.as_bytes()));
+            let uri = format!(
+                "data:text/html;base64,{}",
+                crate::crx::base64(page.as_bytes())
+            );
             frame.load_url(Some(&CefString::from(uri.as_str())));
         }
     }
@@ -373,33 +482,6 @@ fn escape_html(text: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-}
-
-/// Standard base64 with padding.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 wrap_display_handler! {
@@ -644,16 +726,7 @@ fn favicon_from(image: &mut Image) -> Option<Favicon> {
 
 #[cfg(test)]
 mod tests {
-    use super::{base64, escape_html};
-
-    #[test]
-    fn base64_matches_the_standard_alphabet_and_padding() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-    }
+    use super::escape_html;
 
     #[test]
     fn html_escaping_covers_the_four_characters() {

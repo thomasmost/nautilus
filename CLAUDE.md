@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-19 (handoff after the move onto osmena)._
+_Last updated: 2026-10-19 (Chrome extensions)._
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Cargo workspace (Rust 1.97.1 pinned in `rust-toolchain.toml`, edition 2024).
 
 | Crate                    | What it is |
 | ------------------------ | ---------- |
-| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s). `delegate.rs` turns CEF handlers into `EngineEvent`s, `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events. |
+| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s). `delegate.rs` turns CEF handlers into `EngineEvent`s, `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events. `extensions.rs` drives Chromium's extension system through a hidden `chrome://extensions` page (`crx.rs` reads store downloads), `popup.rs` opens an action's popup in an owned window. |
 | `crates/nautilus`        | `nautilus` — the binary: `brand.rs` (the `Brand`), `main.rs` (dispatches Chromium's helper processes first, then logging, clap, and `osmena_shell::run`), `helper.rs` (the `nautilus-helper` bin for macOS), `build.rs` (the Windows icon resource), and the cargo-packager metadata in its `Cargo.toml`. |
 | `xtask`                  | `cargo xtask icons`, through `osmena-xtask`. |
 
@@ -102,6 +102,54 @@ Ninja on `PATH`:
   to supply.
 - **Chromium's own page context menu stays Chromium's.** The chrome's
   menus are osmena's native popups; right-click on page content is CEF's.
+- **Extensions go through `chrome://extensions`.** CEF has no extension
+  API; the Chrome bootstrap's `chrome.developerPrivate` has everything.
+  `ExtensionManager` keeps one Chrome-style browser on that page in a
+  Views window that is never shown (a Chrome-style browser given a
+  native parent opens a Chromium window of its own, and windowless
+  browsers may not load that page) and runs scripts in it through the
+  DevTools protocol (`Runtime.evaluate` with `awaitPromise`; each script
+  is a promise of a plain object, and the result arrives in
+  `on_dev_tools_method_result`). `CefFrame::ExecuteJavaScript` is not
+  used there: on that browser it silently drops scripts after the first
+  seconds. The page's change listener still reports through a console
+  message. Loading an unpacked directory goes through `loadUnpacked`,
+  whose folder dialog CEF routes to whichever browser it attributes it
+  to, so every client the engine creates (tabs, the manager, popups,
+  Chromium's own browsers) carries the same `DelegateState::dialog_handler`,
+  which answers from one pending slot; with no answer pending CEF shows
+  its own dialog. "Load unpacked…" asks with `RunFileDialog` on the
+  focused tab's browser, whose window is visible (a dialog owned by the
+  hidden window would be invisible and modal). A store install downloads
+  the CRX with a CEF URL request, unpacks it on a worker thread (seconds
+  spent inside a CEF callback stop the external message pump from
+  asking for more work) under `chromium/extensions/<id>/`, writes the
+  publisher's `key` into the manifest (the proof whose hash is the signed
+  id; the store's own signing key is there too) so the id stays the
+  store's, and loads it unpacked. Chromium keeps unpacked extensions
+  across launches itself, in prefs it writes a few seconds later: a
+  forced kill right after an install loses it, a normal exit does not.
+- **Browsers Chromium opens on its own get the default client.** An
+  extension's `chrome.tabs.create`, or a link from the management page,
+  makes Chromium create a browser Nautilus cannot show;
+  `BrowserProcessHandler::default_client` gives it `StrayClient`, which
+  turns its first URL into a tab of the last focused window
+  (`DelegateState::request_tab_without_opener`) and closes it. Without a
+  default client such browsers would be unmanaged and block shutdown.
+- **Chromium's session is dropped at startup.** The management browser
+  is a Chrome window to Chromium's session service, which restores it as
+  a visible window after an unclean exit; `Engine::new` deletes
+  `Default/Sessions` before `cef::initialize`.
+- **DirectComposition is off.** With it on, the GPU process crashes
+  three times and Chromium falls back to software rendering whenever a
+  windowed Chrome-style browser exists beside the windowless tabs.
+- **Action popups are owned windows.** `Popups` opens a windowed
+  Alloy-style browser in a `WS_POPUP` window owned by the browser
+  window, placed under the button from the `ScreenRect` the shell
+  passes; the page reports its size through a `nautilus-popup-size:`
+  console message. The shell closes popups when its window regains
+  focus, moves, or resizes; Escape and `window.close()` close them too;
+  a reopen within 400 ms of a close is the toggle click and is ignored.
 - **Packaging metadata** is `[package.metadata.packager]` in
   `crates/nautilus/Cargo.toml`. cargo-packager resolves its paths against that
   crate's directory (hence `../../`). The `resources` globs pick up the CEF
@@ -147,13 +195,30 @@ Chromium (CEF 154), and the same day its model and chrome moved to osmena;
 this repository is the CEF engine crate and the binary. Public at
 <https://github.com/thomasmost/nautilus>.
 
-Verified on Windows: `cargo test --workspace`, clippy, formatting, icons
-unchanged; launch renders example.com with the Nautilus title and icon;
-before the osmena move, also Ctrl+T with a typed URL, Ctrl-click selection
-with the native tab menu, wheel scrolling, and a clean exit with no leftover
-processes. Not verified: typing into page fields, link hover status, Alt+Left,
-tab drags between windows, open-in-profile, the crashed-tab panel
-(`chrome://crash`), anything on macOS.
+Added the same day: Chrome extensions (see Conventions). Verified on
+Windows: a content script runs in a windowless tab; an extension loaded
+unpacked through the hidden management page is listed, persists across
+launches, and its pinned icon appears in the toolbar; clicking the icon
+opens the popup under it, sized to the page, with `chrome.storage` and
+`chrome.tabs` available in it, Escape closes it, clicking the icon again
+closes it, clicking the page closes it; a store install (uBlock Origin
+Lite) downloads, unpacks with the `key` that keeps the store id, loads at
+once, and is still there after a close within seconds of the install
+and a relaunch; no Chromium window is visible, before or after a forced
+kill; the settings window lists the extension with its switches. Not
+verified by hand: the puzzle menu's entries (unit-tested as data), the
+Extensions section's switches and buttons (enable, remove, "Load
+unpacked…" and its dialog, install by id), a tab Chromium opens on its
+own (`StrayClient`), and anything on macOS, where `INFO.extensions` is
+`None`.
+
+Verified on Windows earlier: `cargo test --workspace`, clippy, formatting,
+icons unchanged; launch renders example.com with the Nautilus title and
+icon; before the osmena move, also Ctrl+T with a typed URL, Ctrl-click
+selection with the native tab menu, wheel scrolling, and a clean exit
+with no leftover processes. Not verified: typing into page fields, link
+hover status, Alt+Left, tab drags between windows, open-in-profile, the
+crashed-tab panel (`chrome://crash`), anything on macOS.
 
 CI: the Windows job passed. The first macOS job failed in `nautilus-engine`:
 `cef::CursorHandle` is a Windows-only name in the `cef` crate; the fix in this
@@ -165,8 +230,12 @@ Open items, most useful first:
 1. macOS app bundle with the framework and the five helper apps (C3, T1).
 2. The renderer sandbox through CEF's `bootstrap.exe` (C1).
 3. Accelerated off-screen rendering (C2).
-4. The manual checklist items above that were never exercised.
-5. A freshly created profile can take more than 12 s before the first page
+4. The manual checklist items above that were never exercised, and the
+   extensions item (12) in full.
+5. Extensions on macOS: the management window is Views (portable), the
+   popups are Win32 (`popup.rs`); `INFO.extensions` is gated on
+   `cfg!(windows)`.
+6. A freshly created profile can take more than 12 s before the first page
    paints; nothing is wrong, but screenshots taken earlier show a white page.
 
 All three checkouts live side by side under `vibes/browser-project/`

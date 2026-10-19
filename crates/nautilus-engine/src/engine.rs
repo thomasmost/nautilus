@@ -1,7 +1,7 @@
 //! CEF initialisation, the subprocess entry point, the message-pump bridge
 //! to the application's event loop, and the event queue.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,15 +11,21 @@ use std::time::{Duration, Instant};
 use cef::args::Args;
 use cef::rc::Rc as _;
 use cef::{
-    App, BrowserProcessHandler, CefString, CommandLine, ImplApp, ImplBrowserProcessHandler,
-    ImplCommandLine, LogSeverity, Settings, WrapApp, WrapBrowserProcessHandler, api_hash, wrap_app,
-    wrap_browser_process_handler,
+    App, Browser, BrowserProcessHandler, CefString, Client, CommandLine, DialogHandler,
+    DisplayHandler, Frame as CefFrame, ImplApp, ImplBrowser, ImplBrowserHost,
+    ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplDisplayHandler, ImplFrame,
+    ImplLifeSpanHandler, LifeSpanHandler, LogSeverity, Settings, WrapApp,
+    WrapBrowserProcessHandler, WrapClient, WrapDisplayHandler, WrapLifeSpanHandler, api_hash,
+    wrap_app, wrap_browser_process_handler, wrap_client, wrap_display_handler,
+    wrap_life_span_handler,
 };
-use osmena_core::{EngineEvent, EngineInfo, PendingTab};
+use osmena_core::{EngineEvent, EngineInfo, ExtensionSource, ExtensionSupport, PendingTab};
 use osmena_engine::raw_window_handle::{DisplayHandle, WindowHandle};
 use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker};
+use url::Url;
 
 use crate::delegate::DelegateState;
+use crate::extensions::{ExtensionManager, UnpackQueue};
 use crate::host::TabHost;
 
 /// What the shell needs to know about this engine. The version is the
@@ -32,6 +38,17 @@ pub static INFO: EngineInfo = EngineInfo {
     // winit reports one wheel notch as one line on Windows; Chromium
     // scrolls about 100 px per notch.
     wheel_line_px: 100.0,
+    // Chromium's extension system, driven through the hidden management
+    // page (see `extensions.rs`); not wired up on macOS yet.
+    extensions: if cfg!(windows) {
+        Some(ExtensionSupport {
+            store_name: "Chrome Web Store",
+            store_url: "https://chromewebstore.google.com/",
+            store_item_id: crate::extensions::web_store_item_id,
+        })
+    } else {
+        None
+    },
 };
 
 /// Run this process as one of Chromium's helper processes if it is one.
@@ -47,7 +64,7 @@ pub fn run_subprocess() -> Option<i32> {
     load_framework(false);
     let _ = api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
     let args = Args::new();
-    let mut app = NautilusApp::new(None);
+    let mut app = NautilusApp::new(None, Rc::new(RefCell::new(None)));
     let code = cef::execute_process(
         Some(args.as_main_args()),
         Some(&mut app),
@@ -63,7 +80,7 @@ pub fn run_helper() -> i32 {
     load_framework(true);
     let _ = api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
     let args = Args::new();
-    let mut app = NautilusApp::new(None);
+    let mut app = NautilusApp::new(None, Rc::new(RefCell::new(None)));
     cef::execute_process(
         Some(args.as_main_args()),
         Some(&mut app),
@@ -97,6 +114,7 @@ fn load_framework(_helper: bool) {}
 /// per process, after [`run_subprocess`] returned `None`.
 pub struct Engine {
     delegate: Rc<DelegateState>,
+    extensions: Rc<ExtensionManager>,
     /// True while inside `do_message_loop_work`, whose callbacks may ask
     /// for another spin; that request is served on the next call.
     spinning: Cell<bool>,
@@ -127,6 +145,7 @@ impl Engine {
                 engine_dir.display()
             ))
         })?;
+        forget_chromium_session(&engine_dir);
         let cache_path = CefString::from(engine_dir.to_string_lossy().as_ref());
         let settings = Settings {
             no_sandbox: 1,
@@ -144,8 +163,11 @@ impl Engine {
             background_color: 0xFFFF_FFFF,
             ..Settings::default()
         };
-        let pump = Arc::new(PumpScheduler::new(waker));
-        let mut app = NautilusApp::new(Some(pump));
+        let pump = Arc::new(PumpScheduler::new(waker.clone()));
+        // Filled in once the engine exists, for the browsers Chromium
+        // creates on its own.
+        let shared_delegate = Rc::new(RefCell::new(None));
+        let mut app = NautilusApp::new(Some(pump), shared_delegate.clone());
         let args = Args::new();
         if cef::initialize(
             Some(args.as_main_args()),
@@ -158,14 +180,23 @@ impl Engine {
                 "Chromium failed to initialise (the CEF log on stderr has the reason)".to_string(),
             ));
         }
+        let delegate = Rc::new(DelegateState::default());
+        *shared_delegate.borrow_mut() = Some(delegate.clone());
+        let extensions =
+            ExtensionManager::start(delegate.clone(), &engine_dir, UnpackQueue::new(waker));
         Ok(Engine {
-            delegate: Rc::new(DelegateState::default()),
+            delegate,
+            extensions,
             spinning: Cell::new(false),
         })
     }
 
     pub(crate) fn delegate(&self) -> &Rc<DelegateState> {
         &self.delegate
+    }
+
+    pub(crate) fn extensions(&self) -> &Rc<ExtensionManager> {
+        &self.extensions
     }
 }
 
@@ -181,6 +212,9 @@ impl osmena_engine::Engine for Engine {
         if self.spinning.replace(true) {
             return;
         }
+        // Store downloads unpacked on worker threads are loaded here, on
+        // the UI thread.
+        self.extensions.poll_unpacked();
         cef::do_message_loop_work();
         self.spinning.set(false);
     }
@@ -212,14 +246,37 @@ impl osmena_engine::Engine for Engine {
     ) -> Result<TabHost, EngineError> {
         TabHost::new(self, window.as_raw(), scale)
     }
+
+    fn install_extension(&self, source: ExtensionSource) {
+        self.extensions.install(source);
+    }
+
+    fn set_extension_enabled(&self, extension: &str, enabled: bool) {
+        self.extensions.set_enabled(extension, enabled);
+    }
+
+    fn uninstall_extension(&self, extension: &str) {
+        self.extensions.uninstall(extension);
+    }
 }
 
 impl Drop for Engine {
     /// Every browser must be closed before CEF shuts down. The tab hosts
-    /// drop before the engine and ask their browsers to close; closing
-    /// completes on the message loop, so pump it until the last one is
-    /// gone (or give up after a moment).
+    /// drop before the engine and ask their browsers (and popups) to
+    /// close; the extension manager's goes here; closing completes on the
+    /// message loop, so pump it until the last one is gone (or give up
+    /// after a moment).
     fn drop(&mut self) {
+        // A recent extension change is still only in memory; see
+        // `ExtensionManager::settle_deadline`.
+        if let Some(settle) = self.extensions.settle_deadline() {
+            log::info!("waiting for Chromium to record the extension change");
+            while Instant::now() < settle {
+                cef::do_message_loop_work();
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        self.extensions.shutdown();
         let deadline = Instant::now() + Duration::from_secs(3);
         while self.delegate.live_browsers() > 0 && Instant::now() < deadline {
             cef::do_message_loop_work();
@@ -232,6 +289,21 @@ impl Drop for Engine {
             );
         }
         cef::shutdown();
+    }
+}
+
+/// Chromium saves the extension manager's window (a Chrome-style browser
+/// is a Chrome window to its session service) and, if the browser did not
+/// exit cleanly, restores it as a visible Chromium window at the next
+/// launch. Nautilus never wants Chromium's session restore (the shell has
+/// its own), so the saved session goes before Chromium starts.
+fn forget_chromium_session(engine_dir: &Path) {
+    let sessions = engine_dir.join("Default").join("Sessions");
+    if !sessions.is_dir() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_dir_all(&sessions) {
+        log::warn!("cannot remove {}: {e}", sessions.display());
     }
 }
 
@@ -316,6 +388,9 @@ impl PumpScheduler {
 wrap_app! {
     struct NautilusApp {
         pump: Option<Arc<PumpScheduler>>,
+        // The event queue, once the engine exists, for the browsers
+        // Chromium creates on its own.
+        delegate: Rc<RefCell<Option<Rc<DelegateState>>>>,
     }
 
     impl App {
@@ -332,6 +407,12 @@ wrap_app! {
             command_line.append_switch(Some(&"noerrdialogs".into()));
             command_line.append_switch(Some(&"hide-crash-restore-bubble".into()));
             command_line.append_switch(Some(&"disable-session-crashed-bubble".into()));
+            // The GPU process crashes repeatedly (and Chromium then falls
+            // back to software rendering for the session) when a windowed
+            // Chrome-style browser (the extension manager's) exists next
+            // to the windowless tabs with DirectComposition on; the tabs
+            // paint into memory and never use it.
+            command_line.append_switch(Some(&"disable-direct-composition".into()));
             #[cfg(target_os = "macos")]
             command_line.append_switch(Some(&"use-mock-keychain".into()));
         }
@@ -341,7 +422,7 @@ wrap_app! {
             if !pump.started.swap(true, Ordering::AcqRel) {
                 pump.start_timer_thread();
             }
-            Some(NautilusBrowserProcessHandler::new(pump))
+            Some(NautilusBrowserProcessHandler::new(pump, self.delegate.clone()))
         }
     }
 }
@@ -349,11 +430,98 @@ wrap_app! {
 wrap_browser_process_handler! {
     struct NautilusBrowserProcessHandler {
         pump: Arc<PumpScheduler>,
+        delegate: Rc<RefCell<Option<Rc<DelegateState>>>>,
     }
 
     impl BrowserProcessHandler {
         fn on_schedule_message_pump_work(&self, delay_ms: i64) {
             self.pump.schedule(delay_ms);
+        }
+
+        /// The client of a browser Chromium creates on its own (an
+        /// extension's `chrome.tabs.create`, a link the extension
+        /// manager's page opens): a browser Nautilus cannot show, so its
+        /// URL becomes a tab of the last focused window and it closes.
+        fn default_client(&self) -> Option<Client> {
+            let delegate = self.delegate.borrow().clone()?;
+            log::debug!("Chromium asked for a client for a browser of its own");
+            Some(StrayClient::new(
+                StrayLife::new(delegate.clone()),
+                StrayDisplay::new(delegate.clone(), Cell::new(false)),
+                delegate.dialog_handler(),
+            ))
+        }
+    }
+}
+
+wrap_client! {
+    struct StrayClient {
+        life: LifeSpanHandler,
+        display: DisplayHandler,
+        dialog: DialogHandler,
+    }
+
+    impl Client {
+        fn dialog_handler(&self) -> Option<DialogHandler> {
+            Some(self.dialog.clone())
+        }
+
+        fn life_span_handler(&self) -> Option<LifeSpanHandler> {
+            Some(self.life.clone())
+        }
+
+        fn display_handler(&self) -> Option<DisplayHandler> {
+            Some(self.display.clone())
+        }
+    }
+}
+
+wrap_life_span_handler! {
+    struct StrayLife {
+        delegate: Rc<DelegateState>,
+    }
+
+    impl LifeSpanHandler {
+        fn on_after_created(&self, _browser: Option<&mut Browser>) {
+            self.delegate.add_live(1);
+        }
+
+        fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            self.delegate.add_live(-1);
+        }
+    }
+}
+
+wrap_display_handler! {
+    struct StrayDisplay {
+        delegate: Rc<DelegateState>,
+        handled: Cell<bool>,
+    }
+
+    impl DisplayHandler {
+        fn on_address_change(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut CefFrame>,
+            url: Option<&CefString>,
+        ) {
+            if self.handled.get() || frame.is_some_and(|f| f.is_main() == 0) {
+                return;
+            }
+            let Some(url) = url.and_then(|u| Url::parse(&u.to_string()).ok()) else {
+                return;
+            };
+            if url.as_str() == "about:blank" {
+                return;
+            }
+            self.handled.set(true);
+            log::info!("Chromium opened {url} on its own; moving it to a tab");
+            if !self.delegate.request_tab_without_opener(url) {
+                log::warn!("no window to show it in");
+            }
+            if let Some(host) = browser.and_then(|b| b.host()) {
+                host.close_browser(1);
+            }
         }
     }
 }

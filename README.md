@@ -29,6 +29,11 @@ this repository holds only what is Chromium's.
 - **Sleek by default.** No system title bar: the tab strip is the title
   bar, with the window controls at its end. "Use the system title bar and
   borders" in Settings brings the frame back.
+- **Chrome extensions.** Install from the Chrome Web Store (open an
+  extension's page and pick "Install the extension on this page" from
+  the puzzle-piece menu, or paste its URL or id into Settings) or load
+  an unpacked directory; pin them to the toolbar, where their popups
+  open under the button; switch them off or remove them in Settings.
 - **Keyboard first.** Every control is a command with Chromium's shortcut
   (Cmd for Ctrl on macOS), chords work even while the address bar has
   focus, and Settings remaps them the way a game's controls screen does:
@@ -204,7 +209,24 @@ engine glue. Each item must pass.
     slot Ctrl+Y: New tab loses it and a note under the table says so.
     Right-click a slot to clear it; "Reset to defaults" puts everything
     back and the file lists the defaults.
-12. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+12. **Extensions.** The toolbar ends in a puzzle piece. Open
+    <https://chromewebstore.google.com/detail/ublock-origin-lite/ddkjiahejlhfcafbddmgiahcphecmpfh>,
+    click the puzzle piece: "Install the extension on this page" is
+    enabled; pick it. Within a few seconds the puzzle menu lists uBlock
+    Origin Lite; Settings (Ctrl+,) lists it under Extensions with
+    Enabled ticked, and the profile has
+    `chromium/extensions/ddkjiahejlhfcafbddmgiahcphecmpfh/manifest.json`
+    with a `key` field. Tick "In toolbar": its icon appears beside the
+    address bar (and the menu's "Pin to toolbar" submenu shows it
+    checked). Click the icon: the extension's popup opens under it, sized
+    to its content; Escape closes it, as does a click back into the
+    window; clicking the icon again while it is open closes it. Untick
+    Enabled: the icon goes; tick it again: it is back. "Load unpacked…"
+    opens a folder dialog; cancelling it is not an error. Remove: the
+    extension leaves the list, the menu, and the directory. Relaunch:
+    installed extensions are still there, and no Chromium window appears
+    (the management page runs in a window that is never shown).
+13. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging
@@ -265,6 +287,17 @@ Upstream causes and the features they block are tracked in
 - Without the system title bar, Windows 11's snap-layouts flyout on the
   maximize control is not available (snap by dragging still is), and the
   frameless window has not been tried on macOS.
+- Extensions: Windows only for now (the management page's hidden window
+  and the popups are Win32). Extension popups see Chromium's own tabs,
+  not Nautilus's: `chrome.tabs.query({active: true})` finds the hidden
+  management page, so a popup that acts on "the current tab" acts on
+  nothing. An action without a popup cannot be clicked. The Web Store
+  shows "Switch to Chrome" instead of an install button; install through
+  the puzzle menu or Settings. Store extensions do not update themselves.
+  Themes and apps are not listed. Chromium records an install, switch, or
+  removal in its preferences up to ten seconds later, so closing the
+  browser within that time keeps the process alive, windowless, until
+  it has.
 - No macOS application menu: winit's default menu is turned off so that
   Cmd+Q reaches Nautilus's own shortcut handling.
 - Restore previous windows on launch is stored in `settings.toml` but not yet

@@ -17,6 +17,17 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Chrome extensions. The toolbar ends in a puzzle-piece button whose
+  menu lists the installed extensions (click one for its popup), pins
+  them to the toolbar, installs the extension on the current Chrome Web
+  Store page, opens the store, loads an unpacked directory, and opens
+  the settings window, whose Extensions section switches each one on or
+  off, pins or removes it, and installs by store URL or id. Pinned
+  extensions sit beside the address bar; their popups open under the
+  button and close on Escape, on a click back into the window, or when
+  the window moves. Installs and removals take effect at once and
+  persist. Extensions from the store are unpacked under the profile's
+  `chromium/extensions/<id>/` and do not update themselves.
 - Browser windows open without the system title bar: the tab strip is
   the title bar (drag its empty space, double-click to maximize) and ends
   in the minimize, maximize, and close controls on Windows. "Use the
