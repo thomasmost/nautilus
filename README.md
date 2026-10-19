@@ -26,8 +26,13 @@ this repository holds only what is Chromium's.
   profile from its context menu.
 - **Your colour.** Settings offers a row of swatches that tint the tab strip
   and toolbar per profile.
-- **Keyboard first.** Every control is a command with a platform-native
-  shortcut, and chords work even while the address bar has focus.
+- **Sleek by default.** No system title bar: the tab strip is the title
+  bar, with the window controls at its end. "Use the system title bar and
+  borders" in Settings brings the frame back.
+- **Keyboard first.** Every control is a command with Chromium's shortcut
+  (Cmd for Ctrl on macOS), chords work even while the address bar has
+  focus, and Settings remaps them the way a game's controls screen does:
+  a primary and a secondary slot per action, click and press.
 - **Engine-agnostic design.** Only one crate imports CEF, and it implements
   osmena's `Engine` trait; the model and the UI are osmena's, shared with
   Paladin and unit-tested without an engine.
@@ -115,8 +120,12 @@ belongs to one running Nautilus at a time.
 Run with `cargo run` after any change to the chrome, input handling, or
 engine glue. Each item must pass.
 
-1. **Launch.** A window titled Nautilus opens with one tab at the homepage,
-   the page renders, and the title bar shows the shell logo.
+1. **Launch.** A window opens with one tab at the homepage and the page
+   renders. There is no system title bar: the tab strip ends in the ☰
+   menu and the minimize, maximize, and close controls, and the taskbar
+   shows the shell logo with the title Nautilus. Dragging the strip's
+   empty space moves the window, double-clicking it maximizes, and the
+   pointer becomes a resize arrow at every edge and corner.
 2. **Address bar.** Type `example.com` and press Enter: the page loads, the
    tab title becomes "Example Domain", and the address bar shows
    `https://example.com/`. Typing `localhost:8080` targets `http://`.
@@ -167,17 +176,34 @@ engine glue. Each item must pass.
    tabs, address bar, and page are independent, and closing one leaves the
    other working.
 10. **Shortcuts.** With Cmd on macOS or Ctrl on Windows: T new tab, W close
-   tab, Shift+W close window, N new window, L focus the address bar with
-   its text selected, R reload, period Stop, Shift+] and Shift+[ next and
-   previous tab (wrapping), comma opens settings, Q quits. Back and forward
-   are Cmd+[ and Cmd+] on macOS and Alt+Left and Alt+Right on Windows. A
-   chord held down fires once, and none of its key strokes reach the page.
-   Shortcuts also work while the address bar has focus.
+   tab (also Ctrl+F4 on Windows), Shift+T reopens the last closed tab,
+   Shift+W close window, N new window, L focus the address bar with its
+   text selected (also Alt+D on Windows), R reload (also F5 on Windows),
+   period Stop, Shift+] and Shift+[ on macOS or Tab and
+   Shift+Tab and PgDn/PgUp everywhere next and previous tab (wrapping),
+   1 to 8 the tab at that position and 9 the last tab, comma opens
+   settings, Q quits. Back and forward are Cmd+[ and Cmd+] on macOS and
+   Alt+Left and Alt+Right on Windows; the homepage is Cmd+Shift+H or
+   Alt+Home; F11 (Ctrl+Cmd+F on macOS) shows the page alone and again
+   brings the chrome back. A chord held down fires once, and none of its
+   key strokes reach the page. Shortcuts also work while the address bar
+   has focus.
 11. **Settings.** Settings (Cmd+, or chosen with the mouse from the menu)
     opens a window with Homepage, New tab URL, a row of chrome colour
-    swatches, and the restore checkbox. Edits are saved when a field loses
+    swatches, the "Use the system title bar and borders" checkbox, the
+    restore checkbox, and the Keyboard shortcuts table. Edits are saved when a field loses
     focus or the window closes; relaunching opens the new homepage. Click a
     swatch: every browser window's tab strip takes that colour at once.
+    **Title bar.** Tick "Use the system title bar and borders": every open
+    window gets the system frame at once on Windows (on macOS, the next
+    window opened); untick it and the strip is the title bar again.
+    **Shortcuts.** Click the primary slot of New tab: it reads "Press
+    keys…"; press Ctrl+Y (Cmd+Y): the slot shows it, `keymap.toml` in the
+    profile directory holds `new-tab = ["Ctrl+KeyY"]` (Meta on macOS), and
+    Ctrl+Y opens a tab while Ctrl+T no longer does. Give Reload's secondary
+    slot Ctrl+Y: New tab loses it and a note under the table says so.
+    Right-click a slot to clear it; "Reset to defaults" puts everything
+    back and the file lists the defaults.
 12. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
@@ -236,6 +262,9 @@ Upstream causes and the features they block are tracked in
 - No IME composition for page text fields yet: egui-winit only enables IME
   for its own fields.
 - No search engine: address-bar text that is not a URL is ignored.
+- Without the system title bar, Windows 11's snap-layouts flyout on the
+  maximize control is not available (snap by dragging still is), and the
+  frameless window has not been tried on macOS.
 - No macOS application menu: winit's default menu is turned off so that
   Cmd+Q reaches Nautilus's own shortcut handling.
 - Restore previous windows on launch is stored in `settings.toml` but not yet

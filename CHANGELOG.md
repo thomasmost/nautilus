@@ -17,6 +17,20 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Browser windows open without the system title bar: the tab strip is
+  the title bar (drag its empty space, double-click to maximize) and ends
+  in the minimize, maximize, and close controls on Windows. "Use the
+  system title bar and borders" in Settings restores the frame.
+- Chromium's keyboard shortcuts (Cmd for Ctrl on macOS): reopen the last
+  closed tab (Ctrl+Shift+T), jump to tab 1 to 8 and to the last tab
+  (Ctrl+1 to Ctrl+9), Ctrl+PgDn/PgUp between tabs, Ctrl+F4 closes a tab,
+  Alt+D focuses the address bar, Alt+Home (Cmd+Shift+H) goes to the
+  homepage, F11 (Ctrl+Cmd+F) shows the page full screen.
+- Keyboard shortcuts are remappable in Settings: a primary and a secondary
+  slot per action, click one and press the new keys; a shortcut already
+  in use moves over, and "Reset to defaults" undoes everything. The
+  result is `keymap.toml` in the profile directory.
+
 - The browser: Chromium 154 through the Chromium Embedded Framework, with
   Paladin's egui chrome and model. Windows and tabs, an address bar, back,
   forward, reload, and stop, the status overlay for hovered links, page
