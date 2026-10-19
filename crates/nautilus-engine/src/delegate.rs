@@ -86,6 +86,7 @@ impl DelegateState {
 
     /// The browser of the last focused tab, for dialogs the user should
     /// see.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn focused_browser(&self) -> Option<Browser> {
         self.focused_browser.borrow().clone()
     }
@@ -101,6 +102,7 @@ impl DelegateState {
     }
 
     /// Answer the next folder dialog with `dir` instead of showing it.
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn answer_next_dialog(&self, dir: PathBuf) {
         *self.dialog_answer.borrow_mut() = Some(dir);
     }

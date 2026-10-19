@@ -50,11 +50,13 @@ pub fn web_store_item_id(url: &Url) -> Option<String> {
 /// pump without further work requests, so nothing moves afterwards. The
 /// outcome comes back here, and the engine hands it to the manager on
 /// the next spin.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) struct UnpackQueue {
     outcomes: std::sync::Mutex<Vec<(String, Result<std::path::PathBuf, String>)>>,
     waker: std::sync::Arc<dyn osmena_engine::Waker>,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 impl UnpackQueue {
     pub(crate) fn new(waker: std::sync::Arc<dyn osmena_engine::Waker>) -> std::sync::Arc<Self> {
         std::sync::Arc::new(UnpackQueue {
