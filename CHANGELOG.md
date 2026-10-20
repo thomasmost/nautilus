@@ -25,6 +25,28 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- The page's context menu is now the same native menu as the rest of the
+  chrome, shaped like Chromium's: a link opens in a new tab (behind the
+  current one, beside it) or a new window, is saved, or has its address
+  copied; an image opens in a new tab, is saved, copied, or has its
+  address copied; a video or audio loops, shows its controls, is saved,
+  or has its address copied; selected text is copied, searched with the
+  configured engine, or printed; an editable field gets spelling
+  suggestions, Undo, Redo, Cut, Copy, Paste, Paste as plain text,
+  Delete, and Select all; a plain page gets Back, Forward, Reload, Save
+  as, Print, and View page source; Inspect opens Chromium's developer
+  tools on the element in a window of their own.
+- Downloads: a link to a file, and "Save … as" from the page menu, ask
+  where to save in the system dialog; progress and the outcome show in
+  the status overlay.
+- Middle-click and Ctrl-click open a link in a background tab beside the
+  current one (it used to take its place); Shift-click opens it in a new
+  window; Ctrl+Shift-click in a tab in front.
+- Address-bar text that is not a URL is searched, with Google by
+  default; the Search engine and Search URL fields in Settings (or
+  `[search]` in `settings.toml`, where `{query}` stands for the text)
+  change the provider. A command-line argument that is not a URL is
+  searched too.
 - Tab folders: "Move tab to folder…" in a tab's context menu (acting on
   the selection) names a folder ("Folder A", "Folder B", … by default,
   or an existing one) whose tabs sit behind one chip in the strip; the

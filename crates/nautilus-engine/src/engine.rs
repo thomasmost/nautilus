@@ -19,7 +19,9 @@ use cef::{
     wrap_app, wrap_browser_process_handler, wrap_client, wrap_display_handler,
     wrap_life_span_handler,
 };
-use osmena_core::{EngineEvent, EngineInfo, ExtensionSource, ExtensionSupport, PendingTab};
+use osmena_core::{
+    EngineEvent, EngineInfo, ExtensionSource, ExtensionSupport, PageTools, PendingTab,
+};
 use osmena_engine::raw_window_handle::{DisplayHandle, WindowHandle};
 use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker};
 use url::Url;
@@ -49,6 +51,9 @@ pub static INFO: EngineInfo = EngineInfo {
     } else {
         None
     },
+    // Downloads, the clipboard, printing, `view-source:` pages, and the
+    // developer tools are all Chromium's.
+    page_tools: PageTools::ALL,
 };
 
 /// Run this process as one of Chromium's helper processes if it is one.

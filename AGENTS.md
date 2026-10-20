@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-19 (Chrome extensions)._
+_Last updated: 2026-10-19 (the page context menu, downloads, developer tools)._
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Cargo workspace (Rust 1.97.1 pinned in `rust-toolchain.toml`, edition 2024).
 
 | Crate                    | What it is |
 | ------------------------ | ---------- |
-| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s). `delegate.rs` turns CEF handlers into `EngineEvent`s, `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events. `extensions.rs` drives Chromium's extension system through a hidden `chrome://extensions` page (`crx.rs` reads store downloads), `popup.rs` opens an action's popup in an owned window. |
+| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s, and the page commands). `delegate.rs` turns CEF handlers into `EngineEvent`s (the context menu and downloads among them), `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events, `devtools.rs` opens a tab's developer tools. `extensions.rs` drives Chromium's extension system through a hidden `chrome://extensions` page (`crx.rs` reads store downloads), `popup.rs` opens an action's popup in an owned window. |
 | `crates/nautilus`        | `nautilus` — the binary: `brand.rs` (the `Brand`), `main.rs` (dispatches Chromium's helper processes first, then logging, clap, and `osmena_shell::run`), `helper.rs` (the `nautilus-helper` bin for macOS), `build.rs` (the Windows icon resource), and the cargo-packager metadata in its `Cargo.toml`. |
 | `xtask`                  | `cargo xtask icons`, through `osmena-xtask`. |
 
@@ -94,14 +94,36 @@ Ninja on `PATH`:
   releases).
 - **Page-opened tabs are URLs.** `on_before_popup` and `on_open_urlfrom_tab`
   cancel Chromium's popup and report `EngineEvent::NewTabRequested` with a
-  `PendingTab` that holds the URL; `AdoptTab` creates a fresh browser at
-  it. The opener gets no `window` handle.
+  `PendingTab` that holds the URL (`background` for the
+  `NEW_BACKGROUND_TAB` disposition of a middle- or Ctrl-click), or
+  `NewWindowRequested` for `NEW_WINDOW` (Shift-click); `AdoptTab`
+  creates a fresh browser at it. The opener gets no `window` handle.
 - **Input to CEF is logical pixels.** `EngineInput` carries physical pixels
   relative to the page area; `TabHost::input` divides by the scale factor
   and tracks click counts and held buttons, which CEF expects the embedder
   to supply.
-- **Chromium's own page context menu stays Chromium's.** The chrome's
-  menus are osmena's native popups; right-click on page content is CEF's.
+- **The page context menu is osmena's; CEF's is declined.**
+  `TabContextMenuHandler::run_context_menu` cancels CEF's callback at
+  once, keeps the frame and point in `ViewState::context_menu`, and
+  reports a `PageContext` read off `CefContextMenuParams` (link, media
+  and its state flags, selection, editable flags, misspelling). The
+  shell shows osmena's menu and sends `PageCommand`s to
+  `TabHost::page_command`: the editing ones are `CefFrame` methods
+  (`undo` … `paste_and_match_style` … `select_all`), spelling goes
+  through the host (`replace_misspelling`, `add_word_to_dictionary`),
+  "Save" is `start_download`, "Copy image" is `download_image` with a
+  callback that reports `EngineEvent::ClipboardImage`, the media
+  toggles run a script at the point (`elementFromPoint`; CEF exposes
+  no media actions), "Print" is `print`, "View page source" is a new
+  tab at `view-source:` (CEF's own `view_source` opens a text editor),
+  and "Inspect" is `show_dev_tools` in a top-level window of its own
+  (`devtools.rs`), closed with the tab. `ContextMenuClosed` drops the
+  point.
+- **Downloads ask where to save.** `TabDownloadHandler` allows every
+  download, answers `on_before_download` with CEF's Save As dialog
+  (owned by the tab's window), and reports progress and the outcome as
+  `StatusChanged` text. Without a download handler an Alloy browser
+  silently drops downloads.
 - **Extensions go through `chrome://extensions`.** CEF has no extension
   API; the Chrome bootstrap's `chrome.developerPrivate` has everything.
   `ExtensionManager` keeps one Chrome-style browser on that page in a
@@ -201,6 +223,26 @@ What exists: Nautilus was started today as Paladin's feature set on
 Chromium (CEF 154), and the same day its model and chrome moved to osmena;
 this repository is the CEF engine crate and the binary. Public at
 <https://github.com/thomasmost/nautilus>.
+
+Added 2026-10-20: the page context menu (osmena's, over CEF's
+`ContextMenuParams`), downloads with the Save As dialog, developer tools
+on "Inspect", background tabs for middle- and Ctrl-click, new windows for
+Shift-click, and the address-bar search from osmena. Verified on Windows
+by scripted runs against a local test page (`drive.ps1` in the session
+scratchpad): every menu variant renders with its shortcuts; "Open link
+in new tab" opens the tab beside the current one and leaves it active;
+"Copy link address" pastes into the address bar; "Copy image" leaves a
+160×100 image on the clipboard; clicking a download link and "Save link
+as…" open the Save As dialog, and a download that fails (a 404) reports
+"Could not save …" in the status overlay; "Print…" opens the system
+print dialog; "View page source" opens a `view-source:` tab; "Inspect"
+opens DevTools in its own window on the element; a search typed in the
+address bar loads Google (which answered with its reCAPTCHA page for
+the fresh profile); Ctrl+Q with DevTools open exits with no process
+left. Not verified: the media entries (Loop, Show controls, save and
+copy of a video), spelling suggestions, "Paste as plain text" and the
+other editing entries by hand, Shift-click and middle-click on links, a
+download that completes, DevTools closing when its tab closes, macOS.
 
 Added the same day: Chrome extensions (see Conventions). Verified on
 Windows: a content script runs in a windowless tab; an extension loaded

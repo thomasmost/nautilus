@@ -18,6 +18,7 @@
 #[cfg_attr(not(windows), allow(dead_code))]
 mod crx;
 mod delegate;
+mod devtools;
 mod engine;
 mod extensions;
 mod frame;

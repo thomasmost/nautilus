@@ -13,19 +13,27 @@ use std::rc::Rc;
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, CefString, CefStringList, Client, CursorInfo, CursorType, DialogHandler,
-    DisplayHandler, DownloadImageCallback, Errorcode, FileDialogCallback, FileDialogMode,
-    Frame as CefFrame, Image, ImplBinaryValue, ImplBrowser, ImplBrowserHost, ImplClient,
-    ImplDialogHandler, ImplDisplayHandler, ImplDownloadImageCallback, ImplFileDialogCallback,
+    BeforeDownloadCallback, Browser, CefString, CefStringList, CefStringUserfree, Client,
+    ContextMenuHandler, ContextMenuMediaType, ContextMenuParams, CursorInfo, CursorType,
+    DialogHandler, DisplayHandler, DownloadHandler, DownloadImageCallback, DownloadItem,
+    DownloadItemCallback, Errorcode, FileDialogCallback, FileDialogMode, Frame as CefFrame, Image,
+    ImplBeforeDownloadCallback, ImplBinaryValue, ImplBrowser, ImplBrowserHost, ImplClient,
+    ImplContextMenuHandler, ImplContextMenuParams, ImplDialogHandler, ImplDisplayHandler,
+    ImplDownloadHandler, ImplDownloadImageCallback, ImplDownloadItem, ImplFileDialogCallback,
     ImplFrame, ImplImage, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler,
-    ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity, PaintElementType, Rect,
-    RenderHandler, RequestHandler, ScreenInfo, TerminationStatus, WrapClient, WrapDialogHandler,
-    WrapDisplayHandler, WrapDownloadImageCallback, WrapLifeSpanHandler, WrapLoadHandler,
-    WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_dialog_handler, wrap_display_handler,
+    ImplRequestHandler, ImplRunContextMenuCallback, LifeSpanHandler, LoadHandler, LogSeverity,
+    MenuModel, PaintElementType, Rect, RenderHandler, RequestHandler, RunContextMenuCallback,
+    ScreenInfo, TerminationStatus, WindowOpenDisposition, WrapClient, WrapContextMenuHandler,
+    WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback,
+    WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler, WrapRequestHandler, wrap_client,
+    wrap_context_menu_handler, wrap_dialog_handler, wrap_display_handler, wrap_download_handler,
     wrap_download_image_callback, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
     wrap_request_handler,
 };
-use osmena_core::{Cursor, EngineEvent, Favicon, LoadState, PendingTab, TabId};
+use osmena_core::{
+    Cursor, EditState, EngineEvent, LoadState, Media, MediaKind, Misspelling, PageContext,
+    PendingTab, RgbaImage, TabId,
+};
 use url::Url;
 
 use crate::frame::Frame;
@@ -119,7 +127,7 @@ impl DelegateState {
     pub(crate) fn request_tab_without_opener(&self, url: Url) -> bool {
         match self.last_focused.get() {
             Some(opener) => {
-                self.request_tab(opener, url);
+                self.request_tab(opener, url, false);
                 true
             }
             None => false,
@@ -133,13 +141,28 @@ impl DelegateState {
         self.live_browsers.set(count as usize);
     }
 
-    /// Record that `opener` asked for a new tab at `url` and report it.
-    fn request_tab(&self, opener: TabId, url: Url) {
+    /// Record that `opener` asked for a new tab at `url` and report it,
+    /// `background` when it should open beside the opener without taking
+    /// its place.
+    pub(crate) fn request_tab(&self, opener: TabId, url: Url, background: bool) {
         let pending = PendingTab(self.next_pending.get());
         self.next_pending.set(pending.0 + 1);
         self.pending.borrow_mut().insert(pending, url);
-        self.push(EngineEvent::NewTabRequested { opener, pending });
+        self.push(EngineEvent::NewTabRequested {
+            opener,
+            pending,
+            background,
+        });
     }
+}
+
+/// Where a tab's context menu was opened: the frame it was opened in and
+/// the point, in logical pixels from the view's top left, for the
+/// commands that act there (the media toggles, "Inspect").
+pub(crate) struct MenuPoint {
+    pub frame: Option<CefFrame>,
+    pub x: i32,
+    pub y: i32,
 }
 
 /// What one tab's handlers need: the tab id, the geometry CEF asks about,
@@ -158,25 +181,61 @@ pub(crate) struct ViewState {
     /// Set when the host asked the browser to close, so `do_close` can
     /// tell a close by the page (`window.close()`) from ours.
     pub closing: Cell<bool>,
+    /// Where the page's context menu was last opened, until the shell
+    /// says the menu closed.
+    pub context_menu: RefCell<Option<MenuPoint>>,
 }
 
 impl ViewState {
     fn push(&self, event: EngineEvent) {
         self.delegate.push(event);
     }
+
+    /// Page content asked for `url` somewhere else: a tab beside this one
+    /// that stays behind it (a middle- or Ctrl-click on a link), a new
+    /// window (Shift-click), or a tab in front (anything else,
+    /// `window.open` included).
+    fn open_elsewhere(&self, url: Option<&CefString>, disposition: WindowOpenDisposition) {
+        let Some(url) = url.and_then(|u| Url::parse(&u.to_string()).ok()) else {
+            return;
+        };
+        if disposition == WindowOpenDisposition::NEW_WINDOW {
+            self.push(EngineEvent::NewWindowRequested {
+                opener: self.tab,
+                url,
+            });
+        } else {
+            let background = disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB;
+            self.delegate.request_tab(self.tab, url, background);
+        }
+    }
 }
 
 /// Build the client for one tab.
 pub(crate) fn client_for(view: Rc<ViewState>) -> Client {
     let dialog = view.delegate.dialog_handler();
-    TabClient::new(
-        TabRenderHandler::new(view.clone()),
-        TabLifeSpanHandler::new(view.clone()),
-        TabLoadHandler::new(view.clone()),
-        TabDisplayHandler::new(view.clone()),
-        TabRequestHandler::new(view),
+    TabClient::new(Rc::new(TabHandlers {
+        render: TabRenderHandler::new(view.clone()),
+        life_span: TabLifeSpanHandler::new(view.clone()),
+        load: TabLoadHandler::new(view.clone()),
+        display: TabDisplayHandler::new(view.clone()),
+        request: TabRequestHandler::new(view.clone()),
+        context_menu: TabContextMenuHandler::new(view.clone()),
+        download: TabDownloadHandler::new(view),
         dialog,
-    )
+    }))
+}
+
+/// A tab's handlers, which share its [`ViewState`].
+struct TabHandlers {
+    render: RenderHandler,
+    life_span: LifeSpanHandler,
+    load: LoadHandler,
+    display: DisplayHandler,
+    request: RequestHandler,
+    context_menu: ContextMenuHandler,
+    download: DownloadHandler,
+    dialog: DialogHandler,
 }
 
 wrap_dialog_handler! {
@@ -212,37 +271,40 @@ wrap_dialog_handler! {
 
 wrap_client! {
     struct TabClient {
-        render: RenderHandler,
-        life_span: LifeSpanHandler,
-        load: LoadHandler,
-        display: DisplayHandler,
-        request: RequestHandler,
-        dialog: DialogHandler,
+        handlers: Rc<TabHandlers>,
     }
 
     impl Client {
         fn dialog_handler(&self) -> Option<DialogHandler> {
-            Some(self.dialog.clone())
+            Some(self.handlers.dialog.clone())
+        }
+
+        fn context_menu_handler(&self) -> Option<ContextMenuHandler> {
+            Some(self.handlers.context_menu.clone())
+        }
+
+        fn download_handler(&self) -> Option<DownloadHandler> {
+            Some(self.handlers.download.clone())
         }
 
         fn render_handler(&self) -> Option<RenderHandler> {
-            Some(self.render.clone())
+            Some(self.handlers.render.clone())
         }
 
         fn life_span_handler(&self) -> Option<LifeSpanHandler> {
-            Some(self.life_span.clone())
+            Some(self.handlers.life_span.clone())
         }
 
         fn load_handler(&self) -> Option<LoadHandler> {
-            Some(self.load.clone())
+            Some(self.handlers.load.clone())
         }
 
         fn display_handler(&self) -> Option<DisplayHandler> {
-            Some(self.display.clone())
+            Some(self.handlers.display.clone())
         }
 
         fn request_handler(&self) -> Option<RequestHandler> {
-            Some(self.request.clone())
+            Some(self.handlers.request.clone())
         }
     }
 }
@@ -362,7 +424,7 @@ wrap_life_span_handler! {
             _popup_id: ::std::os::raw::c_int,
             target_url: Option<&CefString>,
             _target_frame_name: Option<&CefString>,
-            _target_disposition: cef::WindowOpenDisposition,
+            target_disposition: WindowOpenDisposition,
             _user_gesture: ::std::os::raw::c_int,
             _popup_features: Option<&cef::PopupFeatures>,
             _window_info: Option<&mut cef::WindowInfo>,
@@ -371,12 +433,11 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<cef::DictionaryValue>>,
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
-            // A popup becomes an ordinary tab at its URL, opened by the
-            // model where it decides (`EngineAction::AdoptTab`). The page
-            // gets no handle to it (`window.open` returns null).
-            if let Some(url) = target_url.and_then(|u| Url::parse(&u.to_string()).ok()) {
-                self.view.delegate.request_tab(self.view.tab, url);
-            }
+            // A popup becomes an ordinary tab (or window) at its URL,
+            // opened by the model where it decides
+            // (`EngineAction::AdoptTab`). The page gets no handle to it
+            // (`window.open` returns null).
+            self.view.open_elsewhere(target_url, target_disposition);
             1
         }
 
@@ -633,13 +694,13 @@ wrap_request_handler! {
             _browser: Option<&mut Browser>,
             _frame: Option<&mut CefFrame>,
             target_url: Option<&CefString>,
-            _target_disposition: cef::WindowOpenDisposition,
+            target_disposition: WindowOpenDisposition,
             _user_gesture: ::std::os::raw::c_int,
         ) -> ::std::os::raw::c_int {
-            // Middle-click and Ctrl-click on links: a new tab at the URL.
-            if let Some(url) = target_url.and_then(|u| Url::parse(&u.to_string()).ok()) {
-                self.view.delegate.request_tab(self.view.tab, url);
-            }
+            // Middle-click and Ctrl-click on links (a tab behind this
+            // one), Shift-click (a window), Ctrl+Shift-click (a tab in
+            // front).
+            self.view.open_elsewhere(target_url, target_disposition);
             1
         }
 
@@ -674,6 +735,206 @@ wrap_request_handler! {
     }
 }
 
+wrap_context_menu_handler! {
+    struct TabContextMenuHandler {
+        view: Rc<ViewState>,
+    }
+
+    impl ContextMenuHandler {
+        /// The shell shows the page's context menu (osmena's, shaped
+        /// like Chromium's) from `EngineEvent::ContextMenuRequested`;
+        /// CEF's own menu is declined. What the user picks comes back as
+        /// a `PageCommand`, which the frame's editing methods and the
+        /// host's tools carry out, so CEF's callback is cancelled at
+        /// once and only the point is kept.
+        fn run_context_menu(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut CefFrame>,
+            params: Option<&mut ContextMenuParams>,
+            _model: Option<&mut MenuModel>,
+            callback: Option<&mut RunContextMenuCallback>,
+        ) -> ::std::os::raw::c_int {
+            let Some(params) = params else {
+                return 0;
+            };
+            if let Some(callback) = callback {
+                callback.cancel();
+            }
+            let (x, y) = (params.xcoord(), params.ycoord());
+            *self.view.context_menu.borrow_mut() = Some(MenuPoint {
+                frame: frame.map(|f| f.clone()),
+                x,
+                y,
+            });
+            let scale = self.view.scale.get();
+            self.view.push(EngineEvent::ContextMenuRequested {
+                tab: self.view.tab,
+                position: Some((x as f32 * scale, y as f32 * scale)),
+                context: page_context(params),
+            });
+            1
+        }
+    }
+}
+
+/// What CEF found under the pointer, in the model's terms.
+fn page_context(params: &ContextMenuParams) -> PageContext {
+    use cef::sys::cef_context_menu_edit_state_flags_t as Edit;
+    use cef::sys::cef_context_menu_media_state_flags_t as MediaFlag;
+    use cef::sys::cef_context_menu_type_flags_t as Kind;
+
+    let kinds = params.type_flags().as_ref().0;
+    let is = |kind: Kind| kinds & kind.0 != 0;
+    let link = is(Kind::CM_TYPEFLAG_LINK)
+        .then(|| text(params.link_url()))
+        .and_then(|url| Url::parse(&url).ok());
+    let media = if is(Kind::CM_TYPEFLAG_MEDIA) {
+        let media_type = params.media_type();
+        let kind = if media_type == ContextMenuMediaType::IMAGE {
+            Some(MediaKind::Image)
+        } else if media_type == ContextMenuMediaType::VIDEO {
+            Some(MediaKind::Video)
+        } else if media_type == ContextMenuMediaType::AUDIO {
+            Some(MediaKind::Audio)
+        } else {
+            None
+        };
+        let state = params.media_state_flags().as_ref().0;
+        let has = |flag: MediaFlag| state & flag.0 != 0;
+        kind.zip(Url::parse(&text(params.source_url())).ok())
+            .map(|(kind, src)| {
+                let toggles = kind != MediaKind::Image;
+                Media {
+                    kind,
+                    src,
+                    looping: (toggles && has(MediaFlag::CM_MEDIAFLAG_CAN_LOOP))
+                        .then(|| has(MediaFlag::CM_MEDIAFLAG_LOOP)),
+                    controls: (toggles && has(MediaFlag::CM_MEDIAFLAG_CAN_TOGGLE_CONTROLS))
+                        .then(|| has(MediaFlag::CM_MEDIAFLAG_CONTROLS)),
+                }
+            })
+    } else {
+        None
+    };
+    let selection = is(Kind::CM_TYPEFLAG_SELECTION).then(|| text(params.selection_text()));
+    let editable = (params.is_editable() != 0).then(|| {
+        let flags = params.edit_state_flags().as_ref().0;
+        let can = |flag: Edit| flags & flag.0 != 0;
+        EditState {
+            can_undo: can(Edit::CM_EDITFLAG_CAN_UNDO),
+            can_redo: can(Edit::CM_EDITFLAG_CAN_REDO),
+            can_cut: can(Edit::CM_EDITFLAG_CAN_CUT),
+            can_copy: can(Edit::CM_EDITFLAG_CAN_COPY),
+            can_paste: can(Edit::CM_EDITFLAG_CAN_PASTE),
+            can_delete: can(Edit::CM_EDITFLAG_CAN_DELETE),
+            can_select_all: can(Edit::CM_EDITFLAG_CAN_SELECT_ALL),
+        }
+    });
+    let word = text(params.misspelled_word());
+    let misspelling = (!word.is_empty()).then(|| {
+        let mut suggestions = CefStringList::new();
+        params.dictionary_suggestions(Some(&mut suggestions));
+        Misspelling {
+            word,
+            suggestions: suggestions.into_iter().map(|s| s.to_string()).collect(),
+        }
+    });
+    PageContext {
+        link,
+        media,
+        selection,
+        editable,
+        misspelling,
+    }
+}
+
+/// A string CEF hands back, as Rust text.
+fn text(s: CefStringUserfree) -> String {
+    CefString::from(&s).to_string()
+}
+
+wrap_download_handler! {
+    struct TabDownloadHandler {
+        view: Rc<ViewState>,
+    }
+
+    impl DownloadHandler {
+        fn can_download(
+            &self,
+            _browser: Option<&mut Browser>,
+            _url: Option<&CefString>,
+            _request_method: Option<&CefString>,
+        ) -> ::std::os::raw::c_int {
+            1
+        }
+
+        /// Every download (a link to a file, "Save … as") asks where to
+        /// save, in the system's dialog, owned by the tab's window.
+        fn on_before_download(
+            &self,
+            _browser: Option<&mut Browser>,
+            _download_item: Option<&mut DownloadItem>,
+            _suggested_name: Option<&CefString>,
+            callback: Option<&mut BeforeDownloadCallback>,
+        ) -> ::std::os::raw::c_int {
+            let Some(callback) = callback else {
+                return 0;
+            };
+            callback.cont(None, 1);
+            1
+        }
+
+        /// Progress and the outcome show in the status overlay.
+        fn on_download_updated(
+            &self,
+            _browser: Option<&mut Browser>,
+            download_item: Option<&mut DownloadItem>,
+            _callback: Option<&mut DownloadItemCallback>,
+        ) {
+            let Some(item) = download_item else {
+                return;
+            };
+            // The chosen path once the dialog is answered, else the
+            // suggested name, else the URL's last segment (a download
+            // that fails before the dialog has neither).
+            let last_segment = |text: String| {
+                text.rsplit(['/', '\\'])
+                    .find(|part| !part.is_empty())
+                    .map(|part| part.split('?').next().unwrap_or(part).to_string())
+                    .unwrap_or_default()
+            };
+            let mut name = last_segment(text(item.full_path()));
+            if name.is_empty() {
+                name = text(item.suggested_file_name());
+            }
+            if name.is_empty() {
+                name = last_segment(text(item.url()));
+            }
+            let status = if item.is_complete() != 0 {
+                format!("Saved {name}")
+            } else if item.is_canceled() != 0 {
+                return;
+            } else if item.is_interrupted() != 0 {
+                format!("Could not save {name}")
+            } else if item.is_in_progress() != 0 {
+                let percent = item.percent_complete();
+                if percent >= 0 {
+                    format!("Saving {name}\u{2026} {percent}%")
+                } else {
+                    format!("Saving {name}\u{2026}")
+                }
+            } else {
+                return;
+            };
+            self.view.push(EngineEvent::StatusChanged {
+                tab: self.view.tab,
+                text: status,
+            });
+        }
+    }
+}
+
 wrap_download_image_callback! {
     struct FaviconCallback {
         view: Rc<ViewState>,
@@ -689,7 +950,7 @@ wrap_download_image_callback! {
             let Some(image) = image else {
                 return;
             };
-            if let Some(favicon) = favicon_from(image) {
+            if let Some(favicon) = image_from(image) {
                 self.view.push(EngineEvent::FaviconChanged {
                     tab: self.view.tab,
                     favicon,
@@ -699,8 +960,33 @@ wrap_download_image_callback! {
     }
 }
 
+// The image the user asked to copy ("Copy image"), once Chromium has
+// it: the shell puts it on the clipboard.
+wrap_download_image_callback! {
+    pub(crate) struct ClipboardImageCallback {
+        view: Rc<ViewState>,
+    }
+
+    impl DownloadImageCallback {
+        fn on_download_image_finished(
+            &self,
+            image_url: Option<&CefString>,
+            _http_status_code: ::std::os::raw::c_int,
+            image: Option<&mut Image>,
+        ) {
+            match image.and_then(image_from) {
+                Some(image) => self.view.push(EngineEvent::ClipboardImage(image)),
+                None => log::warn!(
+                    "cannot copy the image at {}",
+                    image_url.map(CefString::to_string).unwrap_or_default()
+                ),
+            }
+        }
+    }
+}
+
 /// Chromium's image at scale 1 as straight RGBA8.
-fn favicon_from(image: &mut Image) -> Option<Favicon> {
+fn image_from(image: &mut Image) -> Option<RgbaImage> {
     if image.is_empty() != 0 {
         return None;
     }
@@ -719,7 +1005,7 @@ fn favicon_from(image: &mut Image) -> Option<Favicon> {
         log::warn!("favicon bitmap has unexpected size");
         return None;
     }
-    Some(Favicon {
+    Some(RgbaImage {
         width: width as u32,
         height: height as u32,
         rgba: rgba.into(),

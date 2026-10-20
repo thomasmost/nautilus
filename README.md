@@ -37,6 +37,13 @@ this repository holds only what is Chromium's.
 - **Tab folders and bookmark groups.** Fold a selection of tabs behind
   one chip in the strip, or bookmark it as a named group to reopen from
   the menu.
+- **Chromium's right-click menu.** Open a link in a new tab or window,
+  save or copy it, copy or save an image, loop a video, copy, paste, or
+  search selected text, print, view the source, or inspect an element in
+  Chromium's developer tools; Ctrl-click and middle-click open links in
+  background tabs, Shift-click in a new window.
+- **Search from the address bar.** Text that is not a URL is searched,
+  with Google unless Settings names another engine.
 - **Keyboard first.** Every control is a command with Chromium's shortcut
   (Cmd for Ctrl on macOS), chords work even while the address bar has
   focus, and Settings remaps them the way a game's controls screen does:
@@ -137,6 +144,10 @@ engine glue. Each item must pass.
 2. **Address bar.** Type `example.com` and press Enter: the page loads, the
    tab title becomes "Example Domain", and the address bar shows
    `https://example.com/`. Typing `localhost:8080` targets `http://`.
+   Type `rust programming language` and press Enter: a Google search for
+   it loads. Settings has Search engine and Search URL fields; change
+   the URL to `https://duckduckgo.com/?q={query}` and the next search
+   goes there.
 3. **History.** Navigate to a second page, then use Back and Forward: the
    buttons enable and disable with the history and the pages change. Reload
    reloads the current page; while a page loads, a Stop button appears
@@ -175,10 +186,28 @@ engine glue. Each item must pass.
    selects a word; typing in the address bar does not reach the page.
    Hovering a link shows its URL in the status overlay at the bottom left
    and the pointer becomes a hand; over text it becomes an I-beam. A
-   `<select>` opens its list over the page and picks on click. Right-click
-   on the page opens Chromium's own context menu at the pointer.
-8. **Page-opened tabs.** Middle-click a link, or let a page call
-   `window.open`: a new tab opens at the URL in the same window.
+   `<select>` opens its list over the page and picks on click.
+   **Page menu.** Right-click a link: a native menu at the pointer offers
+   Open link in new tab, Open link in new window, Save link as…, Copy
+   link address, and Inspect. "Open link in new tab" adds a tab right
+   after this one without leaving this one; "Copy link address" then
+   Ctrl+V in the address bar pastes the URL. Right-click an image: Open
+   image in new tab, Save image as…, Copy image, Copy image address.
+   Right-click a text field: Undo, Redo, Cut, Copy, Paste, Paste as
+   plain text, Delete, Select all, with their shortcuts, and the
+   spelling suggestions for a misspelled word. Select some text and
+   right-click it: Copy, Search Google for "…", Print…. Right-click
+   empty page: Back, Forward, Reload (with their shortcuts), Save as…,
+   Print…, View page source, Inspect. "Save link as…" opens the system's
+   Save As dialog and, once saved, the status overlay reads "Saved
+   <name>". "View page source" opens a `view-source:` tab. "Inspect"
+   opens Chromium's developer tools in a window of their own, on the
+   element; closing the tab closes them.
+8. **Page-opened tabs.** Middle-click or Ctrl-click a link: a new tab
+   opens at the URL right after the current one, which stays active
+   (Ctrl+Shift-click activates the new tab). Shift-click a link: it
+   opens in a new window. Let a page call `window.open`: a new tab opens
+   at the URL in the same window and becomes active.
 9. **Windows and menu.** Cmd+N (Ctrl+N on Windows), or New window chosen
    with the mouse from the "☰" menu, opens a second window; each window's
    tabs, address bar, and page are independent, and closing one leaves the
@@ -301,7 +330,9 @@ Upstream causes and the features they block are tracked in
   (the call returns null), so pages that script the new window do not work.
 - No IME composition for page text fields yet: egui-winit only enables IME
   for its own fields.
-- No search engine: address-bar text that is not a URL is ignored.
+- A download's progress shows only in the status overlay; there is no
+  downloads list, and a download in progress is cancelled when the
+  browser exits.
 - Without the system title bar, Windows 11's snap-layouts flyout on the
   maximize control is not available (snap by dragging still is), and the
   frameless window has not been tried on macOS.
@@ -331,7 +362,6 @@ Upstream causes and the features they block are tracked in
 - [ ] macOS app bundle with the framework and helper apps
 - [ ] Renderer sandbox (`bootstrap.exe` on Windows, helper layout on macOS)
 - [ ] Accelerated off-screen rendering (shared textures)
-- [ ] A search engine for address-bar text that is not a URL
 - [ ] IME composition for page text fields
 - [ ] Restore previous windows on launch (the setting is stored but not acted on)
-- [ ] Downloads, bookmarks, history
+- [ ] A downloads list, history

@@ -7,16 +7,17 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use cef::{
-    Browser, BrowserSettings, CefString, ImplBrowser, ImplBrowserHost, ImplFrame, KeyEvent,
-    KeyEventType, MouseButtonType, MouseEvent, WindowInfo,
+    Browser, BrowserSettings, CefString, Frame as CefFrame, ImplBrowser, ImplBrowserHost,
+    ImplFrame, KeyEvent, KeyEventType, MouseButtonType, MouseEvent, WindowInfo,
 };
 use dpi::PhysicalSize;
-use osmena_core::{ButtonAction, EngineInput, MouseButton, PendingTab, TabId};
+use osmena_core::{ButtonAction, EngineInput, MouseButton, PageCommand, PendingTab, TabId};
 use osmena_engine::{EngineError, FrameRef, PagePaint, ScreenRect, TabHost as TabHostApi};
 use raw_window_handle::RawWindowHandle;
 use url::Url;
 
-use crate::delegate::{DelegateState, ViewState, client_for};
+use crate::delegate::{ClipboardImageCallback, DelegateState, ViewState, client_for};
+use crate::devtools;
 use crate::engine::Engine;
 use crate::extensions::ExtensionManager;
 use crate::frame::Frame;
@@ -156,6 +157,7 @@ impl TabHostApi for TabHost {
             origin: self.origin.clone(),
             frame: RefCell::new(Frame::default()),
             closing: Cell::new(false),
+            context_menu: RefCell::new(None),
         });
         let mut client = client_for(view.clone());
         let window_info = WindowInfo::default().set_as_windowless(self.parent);
@@ -191,11 +193,15 @@ impl TabHostApi for TabHost {
         true
     }
 
-    /// Close the tab's browser. It finishes closing on the message loop.
+    /// Close the tab's browser, and its developer tools if they are
+    /// open. It finishes closing on the message loop.
     fn close_tab(&mut self, tab: TabId) {
         if let Some(entry) = self.tabs.remove(&tab) {
             entry.view.closing.set(true);
             if let Some(host) = entry.browser.host() {
+                if host.has_dev_tools() != 0 {
+                    host.close_dev_tools();
+                }
                 host.close_browser(1);
             }
         }
@@ -410,6 +416,71 @@ impl TabHostApi for TabHost {
         self.popups.close_all();
     }
 
+    /// Carry out a choice from the page's context menu. The editing
+    /// commands go to the frame the menu was opened in; the rest are the
+    /// browser host's tools, at the point the menu was opened.
+    fn page_command(&self, tab: TabId, command: PageCommand) {
+        let Some(entry) = self.tabs.get(&tab) else {
+            log::warn!("no engine tab for {tab:?}");
+            return;
+        };
+        let Some(host) = entry.browser.host() else {
+            return;
+        };
+        let menu = entry.view.context_menu.borrow();
+        let point = menu.as_ref().map(|m| (m.x, m.y));
+        let Some(frame) = menu
+            .as_ref()
+            .and_then(|m| m.frame.clone())
+            .or_else(|| entry.browser.main_frame())
+        else {
+            return;
+        };
+        let cef_text = |s: &str| CefString::from(s);
+        match command {
+            PageCommand::Undo => frame.undo(),
+            PageCommand::Redo => frame.redo(),
+            PageCommand::Cut => frame.cut(),
+            PageCommand::Copy => frame.copy(),
+            PageCommand::Paste => frame.paste(),
+            PageCommand::PasteAsPlainText => frame.paste_and_match_style(),
+            PageCommand::Delete => frame.del(),
+            PageCommand::SelectAll => frame.select_all(),
+            PageCommand::ReplaceMisspelling(word) => {
+                host.replace_misspelling(Some(&cef_text(&word)));
+            }
+            PageCommand::AddToDictionary(word) => {
+                host.add_word_to_dictionary(Some(&cef_text(&word)));
+            }
+            PageCommand::Save(url) => host.start_download(Some(&cef_text(url.as_str()))),
+            PageCommand::CopyImage(url) => {
+                let mut callback = ClipboardImageCallback::new(entry.view.clone());
+                host.download_image(Some(&cef_text(url.as_str())), 0, 0, 0, Some(&mut callback));
+            }
+            PageCommand::SetMediaLoop(on) => set_media_property(&frame, point, "loop", on),
+            PageCommand::SetMediaControls(on) => {
+                set_media_property(&frame, point, "controls", on);
+            }
+            PageCommand::Print => host.print(),
+            PageCommand::ViewSource => {
+                // Chromium renders `view-source:` pages in any browser;
+                // CEF's own `ViewSource` would open a text editor instead.
+                let url = CefString::from(&frame.url()).to_string();
+                match Url::parse(&format!("view-source:{url}")) {
+                    Ok(source) => self.delegate.request_tab(tab, source, false),
+                    Err(e) => log::warn!("cannot view the source of {url}: {e}"),
+                }
+            }
+            PageCommand::Inspect => devtools::open(&self.delegate, &host, point),
+        }
+    }
+
+    fn context_menu_closed(&self, tab: TabId) {
+        if let Some(entry) = self.tabs.get(&tab) {
+            entry.view.context_menu.borrow_mut().take();
+        }
+    }
+
     /// The tab's latest frame, if it painted one yet.
     fn paint_page(&self, tab: TabId, sink: &mut dyn FnMut(PagePaint<'_>)) {
         let Some(entry) = self.tabs.get(&tab) else {
@@ -438,6 +509,23 @@ impl Drop for TabHost {
             self.close_tab(tab);
         }
     }
+}
+
+/// Set `property` (`loop`, `controls`) of the media element at `point`
+/// (logical pixels from the view's top left) in `frame`. Chromium does
+/// this for its own menu inside the renderer; CEF exposes no way in, so
+/// the page's script does it. The point is the view's; a media element
+/// in a sub-frame whose origin differs is missed.
+fn set_media_property(frame: &CefFrame, point: Option<(i32, i32)>, property: &str, on: bool) {
+    let Some((x, y)) = point else {
+        return;
+    };
+    let script = format!(
+        "(function(x,y){{var e=document.elementFromPoint(x,y);\
+         while(e&&!(e instanceof HTMLMediaElement))e=e.parentElement;\
+         if(e)e.{property}={on};}})({x},{y})"
+    );
+    frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
 }
 
 fn dip_size(width: u32, height: u32, scale: f32) -> (i32, i32) {
