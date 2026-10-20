@@ -151,6 +151,8 @@ impl Engine {
             ))
         })?;
         forget_chromium_session(&engine_dir);
+        #[cfg(target_os = "macos")]
+        crate::mac_app::adopt_cef_app_protocol();
         let cache_path = CefString::from(engine_dir.to_string_lossy().as_ref());
         let settings = Settings {
             no_sandbox: 1,
@@ -166,6 +168,9 @@ impl Engine {
             log_severity: LogSeverity::WARNING,
             // Opaque white behind pages that paint nothing.
             background_color: 0xFFFF_FFFF,
+            browser_subprocess_path: helper_path()
+                .map(|p| CefString::from(p.to_string_lossy().as_ref()))
+                .unwrap_or_default(),
             ..Settings::default()
         };
         let pump = Arc::new(PumpScheduler::new(waker.clone()));
@@ -298,6 +303,42 @@ impl Drop for Engine {
         }
         cef::shutdown();
     }
+}
+
+/// macOS: the helper executable Chromium runs its processes from, when
+/// this is the browser inside its app bundle (`cargo xtask bundle-mac`):
+/// `Contents/Frameworks/<Name> Helper.app/Contents/MacOS/<Name> Helper`
+/// beside the framework, where `<Name>` is this executable's file name.
+/// That is the path Chromium derives itself from the bundle; naming it
+/// keeps the layout explicit and the `(Renderer)`, `(GPU)`, `(Plugin)`,
+/// and `(Alerts)` variants are derived from it. `None` (the default) when
+/// the helper is not there, and on other platforms, where the browser
+/// executable runs the helpers itself.
+#[cfg(target_os = "macos")]
+fn helper_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let name = exe.file_name()?.to_str()?;
+    let helper = format!("{name} Helper");
+    let path = exe
+        .parent()?
+        .join("../Frameworks")
+        .join(format!("{helper}.app"))
+        .join("Contents/MacOS")
+        .join(&helper);
+    if path.is_file() {
+        Some(path)
+    } else {
+        log::warn!(
+            "no helper app at {}: Chromium's processes cannot start outside the app bundle",
+            path.display()
+        );
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn helper_path() -> Option<std::path::PathBuf> {
+    None
 }
 
 /// Chromium saves the extension manager's window (a Chrome-style browser

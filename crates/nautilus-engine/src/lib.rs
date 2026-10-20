@@ -25,6 +25,8 @@ mod frame;
 mod host;
 mod input;
 mod keycodes;
+#[cfg(target_os = "macos")]
+mod mac_app;
 mod popup;
 
 pub use crate::engine::{Engine, INFO, run_helper, run_subprocess};

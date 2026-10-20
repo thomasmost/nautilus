@@ -79,16 +79,17 @@ jobs:
   package:
     name: package ${{ matrix.os }}
     needs: check
-    # Packaging runs on pushes to main only. macOS is not packaged yet
-    # (README.md, Packaging): CEF needs a bundle layout cargo-packager does
-    # not produce.
+    # Packaging runs on pushes to main only: the Windows installer from
+    # cargo-packager, and the macOS app bundle from `cargo xtask
+    # bundle-mac`, which is then started once on the runner as a smoke
+    # test (README.md, Packaging).
     if: github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2025]
+        os: [windows-2025, macos-15]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -113,14 +114,83 @@ jobs:
           path: .cef
           key: cef-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
-      - run: cargo install cargo-packager --version 0.11.8 --locked
-      - run: cargo build --release -p nautilus
-      - run: cargo packager --release -p nautilus
-
-      - uses: actions/upload-artifact@v7
+      # Windows: the NSIS installer.
+      - if: runner.os == 'Windows'
+        run: cargo install cargo-packager --version 0.11.8 --locked
+      - if: runner.os == 'Windows'
+        run: cargo build --release -p nautilus
+      - if: runner.os == 'Windows'
+        run: cargo packager --release -p nautilus
+      - if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
         with:
           name: nautilus-${{ matrix.os }}
           path: |
             target/release/*-setup.exe
             target/release/nautilus.pdb
           if-no-files-found: error
+
+      # macOS: the app bundle (built, laid out, and ad-hoc signed by the
+      # xtask), its symbols, and a smoke run: the bundle is started on
+      # a local page with `--exit-after`, must exit cleanly within the
+      # time, and must have read the page's title (so Chromium's helper
+      # processes ran from the bundle and rendered it).
+      - if: runner.os == 'macOS'
+        run: cargo xtask bundle-mac
+      - if: runner.os == 'macOS'
+        name: Symbols
+        run: dsymutil target/release/nautilus -o target/release/Nautilus.dSYM
+      - if: runner.os == 'macOS'
+        name: Smoke test
+        id: smoke
+        continue-on-error: true
+        shell: bash
+        env:
+          RUST_BACKTRACE: "1"
+        run: |
+          set +e
+          app=target/release/Nautilus.app
+          page="file://$PWD/ci/smoke.html"
+          "$app/Contents/MacOS/Nautilus" --profile ci-smoke --exit-after 30 "$page" > smoke.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 150); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 1
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "::error::the browser did not exit within 150 s"
+            kill -9 "$pid"
+            cat smoke.log
+            exit 1
+          fi
+          wait "$pid"
+          code=$?
+          cat smoke.log
+          echo "exit code $code"
+          if [ "$code" -ne 0 ]; then
+            echo "::error::the browser exited with code $code"
+            exit 1
+          fi
+          if ! grep -q '"Nautilus smoke test"' smoke.log; then
+            echo "::error::the page's title never reached the browser"
+            exit 1
+          fi
+      - if: runner.os == 'macOS'
+        name: Zip the bundle
+        run: |
+          cd target/release
+          ditto -c -k --keepParent Nautilus.app Nautilus-macos.zip
+          ditto -c -k --keepParent Nautilus.dSYM Nautilus.dSYM.zip
+      - if: runner.os == 'macOS' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nautilus-${{ matrix.os }}
+          path: |
+            target/release/Nautilus-macos.zip
+            target/release/Nautilus.dSYM.zip
+            smoke.log
+          if-no-files-found: error
+      - if: runner.os == 'macOS' && steps.smoke.outcome == 'failure'
+        run: |
+          echo "::error::the smoke test failed; the bundle was uploaded anyway"
+          exit 1

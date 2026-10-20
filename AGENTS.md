@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-19 (the page context menu, downloads, developer tools)._
+_Last updated: 2026-10-20 (the macOS bundle, the application protocol, Cmd editing keys)._
 
 ## Architecture
 
@@ -14,9 +14,9 @@ Cargo workspace (Rust 1.97.1 pinned in `rust-toolchain.toml`, edition 2024).
 
 | Crate                    | What it is |
 | ------------------------ | ---------- |
-| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s, and the page commands). `delegate.rs` turns CEF handlers into `EngineEvent`s (the context menu and downloads among them), `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events, `devtools.rs` opens a tab's developer tools. `extensions.rs` drives Chromium's extension system through a hidden `chrome://extensions` page (`crx.rs` reads store downloads), `popup.rs` opens an action's popup in an owned window. |
+| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s, and the page commands). `delegate.rs` turns CEF handlers into `EngineEvent`s (the context menu and downloads among them), `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events, `devtools.rs` opens a tab's developer tools, `mac_app.rs` gives winit's `NSApplication` the protocol CEF requires. `extensions.rs` drives Chromium's extension system through a hidden `chrome://extensions` page (`crx.rs` reads store downloads), `popup.rs` opens an action's popup in an owned window. |
 | `crates/nautilus`        | `nautilus` — the binary: `brand.rs` (the `Brand`), `main.rs` (dispatches Chromium's helper processes first, then logging, clap, and `osmena_shell::run`), `helper.rs` (the `nautilus-helper` bin for macOS), `build.rs` (the Windows icon resource), and the cargo-packager metadata in its `Cargo.toml`. |
-| `xtask`                  | `cargo xtask icons`, through `osmena-xtask`. |
+| `xtask`                  | `cargo xtask icons`, through `osmena-xtask`, and `cargo xtask bundle-mac` (`bundle_mac.rs`: the macOS app bundle). |
 
 The osmena crates (`osmena-core`, `osmena-engine`, `osmena-shell`,
 `osmena-xtask`) are git dependencies pinned by revision in the workspace
@@ -43,18 +43,25 @@ surface (the `glutin` feature of `osmena-engine`).
 Run from the repo root, with `CEF_PATH` set (see `README.md`) and CMake and
 Ninja on `PATH`:
 
-- `cargo run -- [--profile <name>] [<url>...]` — run the browser. The
+- `cargo run -- [--profile <name>] [<url>...]` — run the browser
+  (Windows; on macOS Chromium runs only from the bundle, below). The
   workspace sets `default-members = ["crates/nautilus"]`, so plain `cargo
   build`/`cargo test` touch only the binary; pass `--workspace` for the rest.
+  `--exit-after <seconds>` (hidden, osmena's) quits after logging the tabs.
+- `cargo xtask bundle-mac` — macOS: build the release binaries and lay out
+  `target/release/Nautilus.app` (framework, helper apps, property lists,
+  ad-hoc signature); needs `CEF_PATH`. Run the browser from inside it:
+  `target/release/Nautilus.app/Contents/MacOS/Nautilus [args]`.
 - `cargo test --workspace` — unit tests (nothing starts Chromium).
 - `cargo clippy --workspace --all-targets -- -D warnings` — lint.
 - `cargo fmt --all` — format; CI runs `cargo fmt --all --check`.
 - `cargo xtask icons` — regenerate `assets/icons/` from `assets/logo.svg`.
 - Packaging (see `README.md`): `cargo build --release -p nautilus`, then
-  `cargo packager --release -p nautilus` (Windows; macOS bundling is not
-  done yet). The release profile keeps line tables
-  (`debug = "line-tables-only"`), so the build also leaves `nautilus.pdb`;
-  CI uploads it with the installer.
+  `cargo packager --release -p nautilus` (Windows), or `cargo xtask
+  bundle-mac` (macOS; CI zips the bundle, runs it once as a smoke test
+  on `ci/smoke.html`, and uploads it with its dSYM). The release profile
+  keeps line tables (`debug = "line-tables-only"`), so the build also
+  leaves `nautilus.pdb`; CI uploads it with the installer.
 
 ## Conventions
 
@@ -92,6 +99,28 @@ Ninja on `PATH`:
   `export-cef-dir` for the matching version, and re-checking the handler
   signatures (they are generated from CEF's headers and change between
   releases).
+- **macOS runs from the bundle, and the bundle's names matter.**
+  Chromium derives the helper apps' paths from the main executable's
+  file name (`<Name> Helper.app` beside the framework, then the
+  `(Renderer)` and other variants from that), so `bundle_mac.rs` names
+  the executable and the helpers after `PRODUCT` ("Nautilus") and
+  `Engine::new` also names `browser_subprocess_path` from
+  `current_exe()` when the helper is there (`helper_path`). The
+  framework is loaded at run time (`load_framework` in `engine.rs`,
+  `../Frameworks` from the browser, `../../..` from a helper).
+  `cargo run` cannot start Chromium on macOS. Before `cef::initialize`,
+  `mac_app::adopt_cef_app_protocol` adds `isHandlingSendEvent` /
+  `setHandlingSendEvent:` and a flag-setting `sendEvent:` to winit's
+  `NSApplication` subclass at run time (CEF requires the protocol; winit
+  already owns the application object).
+- **macOS editing shortcuts are the embedder's.** Blink leaves Cmd+Z,
+  Shift+Cmd+Z, Cmd+X, Cmd+C, Cmd+V, Shift+Cmd+V, and Cmd+A to the
+  browser's Edit menu on macOS (it handles Ctrl+… itself elsewhere).
+  `TabKeyboardHandler::on_key_event`, which CEF calls for a key the
+  renderer did not handle, carries them out on the focused frame
+  (`unhandled_key` in `delegate.rs`); on other platforms it does
+  nothing. The handler is declared once per platform because the
+  binding's `os_event` type differs.
 - **Page-opened tabs are URLs.** `on_before_popup` and `on_open_urlfrom_tab`
   cancel Chromium's popup and report `EngineEvent::NewTabRequested` with a
   `PendingTab` that holds the URL (`background` for the
@@ -217,12 +246,40 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
-## Status and handoff (2026-10-19)
+## Status and handoff (2026-10-20)
 
-What exists: Nautilus was started today as Paladin's feature set on
-Chromium (CEF 154), and the same day its model and chrome moved to osmena;
-this repository is the CEF engine crate and the binary. Public at
+What exists: Nautilus was started on 2026-10-19 as Paladin's feature set
+on Chromium (CEF 154), and the same day its model and chrome moved to
+osmena; this repository is the CEF engine crate and the binary. Public at
 <https://github.com/thomasmost/nautilus>.
+
+Added 2026-10-20 (evening), from a code review of the macOS side against
+the Windows build: the macOS app bundle (`cargo xtask bundle-mac`, the
+CI package job for macOS with its smoke test and artifact), the
+`CefAppProtocol` adoption, the explicit helper path, and the Cmd editing
+shortcuts in pages. None of it has run on a Mac by hand; CI's smoke test
+is the only macOS run so far (check the latest `package macos-15` job
+before QA: a green smoke step means the bundle starts, loads a page in
+a renderer process from a helper app, and exits cleanly). What the
+review could not settle without a Mac, in the order to try: (1) the
+bundle opens from Finder after `xattr -dr com.apple.quarantine`; (2) a
+page renders and scrolls (the GL 3.3 core context through CGL, the
+frame upload); (3) right-click on a tab, on the page, and the ☰ menu:
+muda's `popUpMenuPositioningItem` runs a nested run loop while winit's
+handler is on the stack (winit queues events that arrive meanwhile, so
+no re-entrancy is expected, but the engine's wake-ups land in that
+queue too); (4) typing in a page field, then Cmd+C/V/X/A/Z there;
+(5) Cmd-shortcuts of the keymap (Cmd+T, Cmd+W, Cmd+Q) and that none of
+them leak into the page; (6) the frameless window: traffic lights over
+the strip, dragging the strip, double-click; (7) "Inspect" (DevTools
+opens in a window Chromium creates itself from a `WindowInfo` with no
+parent view), "Print…" and "Save link as…" (system dialogs over an
+off-screen browser); (8) Ctrl-click, Cmd-click, and Shift-click on
+links; (9) a second window and tab drags; (10) Cmd+Q and the Dock's
+Quit both exit with no `Nautilus Helper` process left. Extensions are
+off on macOS (`INFO.extensions` is `None`). Known gaps on macOS, not
+bugs: no `.dmg`, ad-hoc signature only, no application menu (Cmd+H,
+Cmd+M do nothing), `cargo run` cannot start Chromium.
 
 Added 2026-10-20: the page context menu (osmena's, over CEF's
 `ContextMenuParams`), downloads with the Save As dialog, developer tools
@@ -269,14 +326,16 @@ with no leftover processes. Not verified: typing into page fields, link
 hover status, Alt+Left, tab drags between windows, open-in-profile, the
 crashed-tab panel (`chrome://crash`), anything on macOS.
 
-CI: the Windows job passed. The first macOS job failed in `nautilus-engine`:
-`cef::CursorHandle` is a Windows-only name in the `cef` crate; the fix in this
-repository's history uses the platform typedef instead and is unverified on
-macOS (no Mac was available). macOS also needs the app bundle before it can
-run at all (C3 in `docs/upstream-issues.md`).
+CI: both check jobs pass; the package job builds the Windows installer
+and the macOS bundle. The `cef` crate's generated handler signatures
+differ by platform (`CursorHandle` on Windows, bare pointers on macOS;
+the keyboard handler's `os_event` likewise), so a handler that compiles
+on Windows can fail on the macOS job: `delegate.rs` keeps the
+platform-typed aliases and per-platform declarations for those.
 
 Open items, most useful first:
-1. macOS app bundle with the framework and the five helper apps (C3, T1).
+1. The macOS manual run (above), then a `.dmg` and a Developer ID
+   signature.
 2. The renderer sandbox through CEF's `bootstrap.exe` (C1).
 3. Accelerated off-screen rendering (C2).
 4. The manual checklist items above that were never exercised, and the

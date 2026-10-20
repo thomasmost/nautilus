@@ -61,7 +61,7 @@ this repository holds only what is Chromium's.
 | Shell     | [osmena](https://github.com/thomasmost/osmena): the model, the egui 0.34 chrome on winit 0.30, the settings window, pinned by git revision |
 | Chrome GL | osmena's glutin surface (Chromium paints into memory, so the chrome owns the GL context) |
 | Pages     | CEF off-screen rendering: each tab paints BGRA frames that osmena draws as a texture |
-| Packaging | cargo-packager: `.app` and `.dmg` on macOS (not yet wired up, see Packaging), NSIS installer on Windows |
+| Packaging | `cargo xtask bundle-mac` for the macOS `.app` (CI zips it), cargo-packager's NSIS installer on Windows |
 | CI        | GitHub Actions on macOS and Windows runners                       |
 
 ## Workspace layout
@@ -108,8 +108,19 @@ On Windows the build copies the CEF runtime files (`libcef.dll`, the
 `.pak` resources, `locales/`, and the rest) next to the binaries in
 `target/<profile>/`, so `cargo run` works from the tree.
 
-1. **Build and run:** `cargo run` opens a window at the homepage. Pass URLs
-   to open them as tabs, or `--profile <name>` to use another profile.
+On macOS Chromium runs only from an app bundle (the framework and its
+helper apps have to sit at fixed places around the executable), so
+`cargo run` cannot start it there. Build the bundle instead and run it:
+
+```sh
+cargo xtask bundle-mac            # builds the release binaries first
+open target/release/Nautilus.app  # or, with arguments:
+target/release/Nautilus.app/Contents/MacOS/Nautilus --profile dev https://example.com
+```
+
+1. **Build and run:** `cargo run` (Windows) or the bundle (macOS, above)
+   opens a window at the homepage. Pass URLs to open them as tabs, or
+   `--profile <name>` to use another profile.
 2. **Icons:** edit `assets/logo.svg`, run `cargo xtask icons`, and commit
    the regenerated files in `assets/icons/`. CI fails if they are stale.
 
@@ -195,7 +206,10 @@ engine glue. Each item must pass.
    image in new tab, Save image as…, Copy image, Copy image address.
    Right-click a text field: Undo, Redo, Cut, Copy, Paste, Paste as
    plain text, Delete, Select all, with their shortcuts, and the
-   spelling suggestions for a misspelled word. Select some text and
+   spelling suggestions for a misspelled word. On macOS, Cmd+Z, Cmd+X,
+   Cmd+C, Cmd+V, Shift+Cmd+V, and Cmd+A pressed in the field do what
+   those entries do (Nautilus carries them out itself; there is no
+   Edit menu). Select some text and
    right-click it: Copy, Search Google for "…", Print…. Right-click
    empty page: Back, Forward, Reload (with their shortcuts), Save as…,
    Print…, View page source, Inspect. "Save link as…" opens the system's
@@ -278,8 +292,38 @@ engine glue. Each item must pass.
 
 ## Packaging
 
-`cargo install cargo-packager --version 0.11.8 --locked` once, then on
-Windows:
+### macOS
+
+```sh
+cargo xtask bundle-mac
+```
+
+builds the release binaries (`nautilus` and `nautilus-helper`), lays out
+`target/release/Nautilus.app` the way CEF needs it (`Chromium Embedded
+Framework.framework` under `Contents/Frameworks`, copied from the CEF
+distribution at `CEF_PATH`, and the five helper apps beside it, `Nautilus
+Helper`, `… (GPU)`, `… (Renderer)`, `… (Plugin)`, `… (Alerts)`, each a
+copy of `nautilus-helper`), writes the property lists, and signs the
+bundle ad hoc (Apple silicon runs no unsigned code; there is no
+Developer ID yet). CI builds it on every push to `main`, starts it once
+on the runner as a smoke test (a local page with `--exit-after`: the
+browser must exit cleanly and must have read the page's title, which
+proves the helper processes ran from the bundle), and uploads the
+workflow artifact `nautilus-macos-15` with `Nautilus-macos.zip`,
+`Nautilus.dSYM.zip` (the symbols, for crash logs) and the smoke test's
+log. A bundle downloaded from CI carries the quarantine attribute and,
+being signed ad hoc, is refused as "damaged" when opened; clear the
+attribute first:
+
+```sh
+xattr -dr com.apple.quarantine Nautilus.app
+```
+
+There is no `.dmg` yet.
+
+### Windows
+
+`cargo install cargo-packager --version 0.11.8 --locked` once, then:
 
 ```bash
 cargo build --release -p nautilus
@@ -295,15 +339,6 @@ that the build copied into `target/release/` (the `resources` globs in
 builds it on every push to `main` and uploads it as the workflow artifact
 `nautilus-windows-2025`, together with `nautilus.pdb` (the release profile
 keeps line tables) so a crash in an installed build can be symbolized.
-
-**macOS is not packaged yet.** CEF on macOS needs a specific bundle
-layout: `Chromium Embedded Framework.framework` under `Contents/Frameworks`
-and one helper app per process kind (`Nautilus Helper`, `... (GPU)`,
-`... (Renderer)`, `... (Plugin)`, `... (Alerts)`), each wrapping the
-`nautilus-helper` binary, which cargo-packager does not produce. The code
-is ready for it (`nautilus-helper`, the framework loader in
-`nautilus_engine::run_subprocess`); the bundling step is on the roadmap.
-Until then `cargo run` on macOS fails to load the framework.
 
 ### Windows prerequisites
 
@@ -336,6 +371,9 @@ Upstream causes and the features they block are tracked in
 - Without the system title bar, Windows 11's snap-layouts flyout on the
   maximize control is not available (snap by dragging still is), and the
   frameless window has not been tried on macOS.
+- macOS has not been run by hand yet: the bundle is built and started
+  once by CI, nothing more (see the handoff in `CLAUDE.md` for what to
+  try first).
 - Extensions: Windows only for now (the management page's hidden window
   and the popups are Win32). Extension popups see Chromium's own tabs,
   not Nautilus's: `chrome.tabs.query({active: true})` finds the hidden
@@ -348,7 +386,11 @@ Upstream causes and the features they block are tracked in
   browser within that time keeps the process alive, windowless, until
   it has.
 - No macOS application menu: winit's default menu is turned off so that
-  Cmd+Q reaches Nautilus's own shortcut handling.
+  Cmd+Q reaches Nautilus's own shortcut handling. Chromium serves the
+  editing shortcuts in pages (Cmd+C and the rest) from the Edit menu on
+  macOS, so Nautilus carries those out itself for a key the page did
+  not handle; other menu-driven shortcuts (Cmd+H to hide, Cmd+M to
+  minimize) do nothing.
 - Restore previous windows on launch is stored in `settings.toml` but not yet
   acted on.
 - No bookmarks, history UI, downloads UI, extensions, sync, or auto-update.
@@ -359,7 +401,7 @@ Upstream causes and the features they block are tracked in
 
 ## Todo
 
-- [ ] macOS app bundle with the framework and helper apps
+- [ ] macOS `.dmg`, and a Developer ID signature in place of the ad-hoc one
 - [ ] Renderer sandbox (`bootstrap.exe` on Windows, helper layout on macOS)
 - [ ] Accelerated off-screen rendering (shared textures)
 - [ ] IME composition for page text fields

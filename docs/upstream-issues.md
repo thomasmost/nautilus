@@ -43,9 +43,10 @@ smooth video and scrolling at 4K. **Workaround:** the software path.
 CEF on macOS loads `Chromium Embedded Framework.framework` from the bundle
 and runs helper processes from per-kind helper apps; `cargo run` of a bare
 binary cannot start. The `cef` crate's `bundle-cef-app` builds such a
-bundle for its examples. **Blocks:** running and packaging on macOS.
-**Workaround:** none yet; `nautilus-helper` and the framework loader are
-in place for the bundling step.
+bundle for its examples. **Blocks:** `cargo run` on macOS.
+**Workaround (2026-10-20):** `cargo xtask bundle-mac` builds the bundle
+(`xtask/src/bundle_mac.rs`); developing on macOS means rebuilding the
+bundle and running the executable inside it.
 
 ## egui and winit
 
@@ -63,4 +64,6 @@ keyboard focus, so winit sends no `Ime` events while the page has focus.
 
 cargo-packager builds a single-executable `.app`; CEF's layout (framework
 in `Contents/Frameworks`, five helper apps) needs a custom step. **Blocks:**
-the macOS `.dmg`. **Workaround:** none yet (see C3).
+the macOS `.dmg` through cargo-packager. **Workaround (2026-10-20):** the
+bundle is laid out by `cargo xtask bundle-mac` without cargo-packager; a
+`.dmg` would be `hdiutil` over that bundle.

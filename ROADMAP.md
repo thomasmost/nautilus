@@ -7,8 +7,9 @@ Chromium instead of Servo, and keeps Paladin's model and chrome.
 
 Everything Paladin does, on CEF: windows and tabs with multi-selection and
 moves, native menus, profiles, chrome colours, crashed-tab isolation, the
-Windows installer. Shipped on Windows on 2026-10-19; macOS needs the app
-bundle (framework and helper apps) before it runs there.
+Windows installer. Shipped on Windows on 2026-10-19; the macOS app
+bundle (framework and helper apps) is built by `cargo xtask bundle-mac`
+since 2026-10-20 and started once by CI, and awaits its first manual run.
 
 Design: `docs/design-plans/2026-10-19-nautilus-chromium-browser.md`.
 

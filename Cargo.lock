@@ -1799,6 +1799,7 @@ dependencies = [
  "dpi",
  "keyboard-types",
  "log",
+ "objc2 0.6.5",
  "osmena-core",
  "osmena-engine",
  "png",
@@ -2209,7 +2210,7 @@ dependencies = [
 [[package]]
 name = "osmena-chrome"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b24292bed2568aacf599069cba49580973822178#b24292bed2568aacf599069cba49580973822178"
+source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
 dependencies = [
  "dpi",
  "egui",
@@ -2229,7 +2230,7 @@ dependencies = [
 [[package]]
 name = "osmena-core"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b24292bed2568aacf599069cba49580973822178#b24292bed2568aacf599069cba49580973822178"
+source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
 dependencies = [
  "directories",
  "keyboard-types",
@@ -2241,7 +2242,7 @@ dependencies = [
 [[package]]
 name = "osmena-engine"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b24292bed2568aacf599069cba49580973822178#b24292bed2568aacf599069cba49580973822178"
+source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
 dependencies = [
  "dpi",
  "glow",
@@ -2256,7 +2257,7 @@ dependencies = [
 [[package]]
 name = "osmena-shell"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b24292bed2568aacf599069cba49580973822178#b24292bed2568aacf599069cba49580973822178"
+source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
 dependencies = [
  "arboard",
  "clap",
@@ -2277,7 +2278,7 @@ dependencies = [
 [[package]]
 name = "osmena-xtask"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b24292bed2568aacf599069cba49580973822178#b24292bed2568aacf599069cba49580973822178"
+source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
 dependencies = [
  "icns",
  "ico",

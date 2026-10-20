@@ -8,6 +8,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- macOS: Cmd+Z, Shift+Cmd+Z, Cmd+X, Cmd+C, Cmd+V, Shift+Cmd+V, and
+  Cmd+A in a page now undo, redo, cut, copy, paste, paste as plain
+  text, and select all. Chromium leaves those to the application's Edit
+  menu on macOS, and Nautilus has none; they are now carried out on the
+  focused frame when the page itself did not handle the key.
+- macOS: the application object now implements the protocol CEF
+  requires of it (`CefAppProtocol`: whether `sendEvent:` is on the
+  stack), which Chromium's main-thread message pump consults.
 - Closing the browser after installing an extension in that session
   crashed inside Chromium's shutdown: the extension manager's hidden
   window never closed (its delegate answered "cannot close") and CEF
@@ -25,6 +33,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- macOS: `cargo xtask bundle-mac` builds `Nautilus.app` (the release
+  binaries, CEF's framework, the five helper apps, the property lists,
+  an ad-hoc signature). CI builds it on every push to `main`, starts it
+  once as a smoke test, and uploads it with its symbols as the
+  `nautilus-macos-15` artifact. Before this, Nautilus could not start on
+  macOS at all.
+- `--exit-after <seconds>` (hidden) quits through the normal path after
+  logging the open tabs, for smoke tests of a build.
 - The page's context menu is now the same native menu as the rest of the
   chrome, shaped like Chromium's: a link opens in a new tab (behind the
   current one, beside it) or a new window, is saved, or has its address

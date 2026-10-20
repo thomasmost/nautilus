@@ -20,15 +20,16 @@ use cef::{
     ImplBeforeDownloadCallback, ImplBinaryValue, ImplBrowser, ImplBrowserHost, ImplClient,
     ImplContextMenuHandler, ImplContextMenuParams, ImplDialogHandler, ImplDisplayHandler,
     ImplDownloadHandler, ImplDownloadImageCallback, ImplDownloadItem, ImplFileDialogCallback,
-    ImplFrame, ImplImage, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler,
-    ImplRequestHandler, ImplRunContextMenuCallback, LifeSpanHandler, LoadHandler, LogSeverity,
-    MenuModel, PaintElementType, Rect, RenderHandler, RequestHandler, RunContextMenuCallback,
-    ScreenInfo, TerminationStatus, WindowOpenDisposition, WrapClient, WrapContextMenuHandler,
-    WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback,
+    ImplFrame, ImplImage, ImplKeyboardHandler, ImplLifeSpanHandler, ImplLoadHandler,
+    ImplRenderHandler, ImplRequestHandler, ImplRunContextMenuCallback, KeyEvent, KeyEventType,
+    KeyboardHandler, LifeSpanHandler, LoadHandler, LogSeverity, MenuModel, PaintElementType, Rect,
+    RenderHandler, RequestHandler, RunContextMenuCallback, ScreenInfo, TerminationStatus,
+    WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDialogHandler,
+    WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback, WrapKeyboardHandler,
     WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler, WrapRequestHandler, wrap_client,
     wrap_context_menu_handler, wrap_dialog_handler, wrap_display_handler, wrap_download_handler,
-    wrap_download_image_callback, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
-    wrap_request_handler,
+    wrap_download_image_callback, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
+    wrap_render_handler, wrap_request_handler,
 };
 use osmena_core::{
     Cursor, EditState, EngineEvent, LoadState, Media, MediaKind, Misspelling, PageContext,
@@ -37,6 +38,7 @@ use osmena_core::{
 use url::Url;
 
 use crate::frame::Frame;
+use crate::input;
 
 /// The native cursor handle `on_cursor_change` receives. The `cef` crate's
 /// generated handler signature names `CursorHandle` on Windows and Linux
@@ -222,6 +224,7 @@ pub(crate) fn client_for(view: Rc<ViewState>) -> Client {
         request: TabRequestHandler::new(view.clone()),
         context_menu: TabContextMenuHandler::new(view.clone()),
         download: TabDownloadHandler::new(view),
+        keyboard: TabKeyboardHandler::new(),
         dialog,
     }))
 }
@@ -235,6 +238,7 @@ struct TabHandlers {
     request: RequestHandler,
     context_menu: ContextMenuHandler,
     download: DownloadHandler,
+    keyboard: KeyboardHandler,
     dialog: DialogHandler,
 }
 
@@ -285,6 +289,10 @@ wrap_client! {
 
         fn download_handler(&self) -> Option<DownloadHandler> {
             Some(self.handlers.download.clone())
+        }
+
+        fn keyboard_handler(&self) -> Option<KeyboardHandler> {
+            Some(self.handlers.keyboard.clone())
         }
 
         fn render_handler(&self) -> Option<RenderHandler> {
@@ -854,6 +862,118 @@ fn text(s: CefStringUserfree) -> String {
     CefString::from(&s).to_string()
 }
 
+// The keyboard handler's `os_event` is a Windows `MSG` there and a bare
+// pointer (an `NSEvent`) on macOS; the signature must match the
+// binding's exactly, so the handler is declared once per platform and
+// the work is in `unhandled_key`.
+#[cfg(not(target_os = "macos"))]
+wrap_keyboard_handler! {
+    struct TabKeyboardHandler;
+
+    impl KeyboardHandler {
+        fn on_key_event(
+            &self,
+            browser: Option<&mut Browser>,
+            event: Option<&KeyEvent>,
+            _os_event: Option<&mut cef::sys::MSG>,
+        ) -> ::std::os::raw::c_int {
+            unhandled_key(browser, event)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+wrap_keyboard_handler! {
+    struct TabKeyboardHandler;
+
+    impl KeyboardHandler {
+        fn on_key_event(
+            &self,
+            browser: Option<&mut Browser>,
+            event: Option<&KeyEvent>,
+            _os_event: *mut u8,
+        ) -> ::std::os::raw::c_int {
+            unhandled_key(browser, event)
+        }
+    }
+}
+
+/// A key the page did not handle. On macOS the editing chords (Cmd+Z,
+/// Shift+Cmd+Z, Cmd+X, Cmd+C, Cmd+V, Shift+Cmd+V, Cmd+A) are the
+/// application's Edit menu's, not the renderer's: Blink leaves them to
+/// the browser, which Chromium serves from its menu. Nautilus has no
+/// application menu, so they are carried out here on the focused frame,
+/// after the page had its chance (a page that handles the key itself is
+/// not second-guessed). Windows and Linux renderers handle these chords
+/// themselves, so nothing happens there.
+fn unhandled_key(browser: Option<&mut Browser>, event: Option<&KeyEvent>) -> ::std::os::raw::c_int {
+    let Some(event) = event else {
+        return 0;
+    };
+    let Some(command) = mac_edit_command(event) else {
+        return 0;
+    };
+    let Some(frame) = browser.and_then(|b| b.focused_frame()) else {
+        return 0;
+    };
+    match command {
+        EditCommand::Undo => frame.undo(),
+        EditCommand::Redo => frame.redo(),
+        EditCommand::Cut => frame.cut(),
+        EditCommand::Copy => frame.copy(),
+        EditCommand::Paste => frame.paste(),
+        EditCommand::PastePlain => frame.paste_and_match_style(),
+        EditCommand::SelectAll => frame.select_all(),
+    }
+    1
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditCommand {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    PastePlain,
+    SelectAll,
+}
+
+/// The macOS editing command a Cmd chord stands for, if it is one and
+/// this is macOS (elsewhere the renderer handled it already, or it is
+/// not a shortcut).
+fn mac_edit_command(event: &KeyEvent) -> Option<EditCommand> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    if event.type_ != KeyEventType::RAWKEYDOWN && event.type_ != KeyEventType::KEYDOWN {
+        return None;
+    }
+    edit_command(event.modifiers, event.windows_key_code)
+}
+
+/// The editing command for a Cmd chord: `modifiers` are CEF event
+/// flags, `key` the Windows virtual-key code CEF derives on every
+/// platform.
+fn edit_command(modifiers: u32, key: i32) -> Option<EditCommand> {
+    let command = modifiers & input::FLAG_COMMAND != 0;
+    let other = modifiers & (input::FLAG_CONTROL | input::FLAG_ALT) != 0;
+    if !command || other {
+        return None;
+    }
+    let shift = modifiers & input::FLAG_SHIFT != 0;
+    match (key, shift) {
+        (0x5A, false) => Some(EditCommand::Undo),
+        (0x5A, true) => Some(EditCommand::Redo),
+        (0x58, false) => Some(EditCommand::Cut),
+        (0x43, false) => Some(EditCommand::Copy),
+        (0x56, false) => Some(EditCommand::Paste),
+        (0x56, true) => Some(EditCommand::PastePlain),
+        (0x41, false) => Some(EditCommand::SelectAll),
+        _ => None,
+    }
+}
+
 wrap_download_handler! {
     struct TabDownloadHandler {
         view: Rc<ViewState>,
@@ -1014,7 +1134,8 @@ fn image_from(image: &mut Image) -> Option<RgbaImage> {
 
 #[cfg(test)]
 mod tests {
-    use super::escape_html;
+    use super::{EditCommand, edit_command, escape_html};
+    use crate::input::{FLAG_ALT, FLAG_COMMAND, FLAG_CONTROL, FLAG_SHIFT};
 
     #[test]
     fn html_escaping_covers_the_four_characters() {
@@ -1022,5 +1143,38 @@ mod tests {
             escape_html("<a href=\"x\">&</a>"),
             "&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;"
         );
+    }
+
+    #[test]
+    fn cmd_chords_name_the_edit_menu_commands() {
+        assert_eq!(edit_command(FLAG_COMMAND, 0x43), Some(EditCommand::Copy));
+        assert_eq!(edit_command(FLAG_COMMAND, 0x56), Some(EditCommand::Paste));
+        assert_eq!(
+            edit_command(FLAG_COMMAND | FLAG_SHIFT, 0x56),
+            Some(EditCommand::PastePlain)
+        );
+        assert_eq!(edit_command(FLAG_COMMAND, 0x58), Some(EditCommand::Cut));
+        assert_eq!(
+            edit_command(FLAG_COMMAND, 0x41),
+            Some(EditCommand::SelectAll)
+        );
+        assert_eq!(edit_command(FLAG_COMMAND, 0x5A), Some(EditCommand::Undo));
+        assert_eq!(
+            edit_command(FLAG_COMMAND | FLAG_SHIFT, 0x5A),
+            Some(EditCommand::Redo)
+        );
+    }
+
+    #[test]
+    fn other_chords_are_left_alone() {
+        // Ctrl+C is the renderer's own on Windows and Linux.
+        assert_eq!(edit_command(FLAG_CONTROL, 0x43), None);
+        // Cmd+Option+C and Cmd+Ctrl+C mean something else.
+        assert_eq!(edit_command(FLAG_COMMAND | FLAG_ALT, 0x43), None);
+        assert_eq!(edit_command(FLAG_COMMAND | FLAG_CONTROL, 0x43), None);
+        // Shift+Cmd+C is not a shortcut here.
+        assert_eq!(edit_command(FLAG_COMMAND | FLAG_SHIFT, 0x43), None);
+        assert_eq!(edit_command(FLAG_COMMAND, 0x42), None);
+        assert_eq!(edit_command(0, 0x43), None);
     }
 }

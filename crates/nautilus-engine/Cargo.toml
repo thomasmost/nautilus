@@ -26,6 +26,10 @@ png = "0.18"
 # key too, so the right one is found by hashing.
 sha2 = "0.10"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Giving winit's NSApplication the protocol CEF requires (mac_app.rs).
+objc2 = "0.6"
+
 [target.'cfg(windows)'.dependencies]
 # The hidden window that hosts the extension manager, and placing the
 # action popups.
