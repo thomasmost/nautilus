@@ -1800,6 +1800,8 @@ dependencies = [
  "keyboard-types",
  "log",
  "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "osmena-core",
  "osmena-engine",
  "png",
@@ -2210,7 +2212,7 @@ dependencies = [
 [[package]]
 name = "osmena-chrome"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
+source = "git+https://github.com/thomasmost/osmena?rev=9da59b507c08c98b40bf472e50b6a6d3e80e0d9f#9da59b507c08c98b40bf472e50b6a6d3e80e0d9f"
 dependencies = [
  "dpi",
  "egui",
@@ -2230,7 +2232,7 @@ dependencies = [
 [[package]]
 name = "osmena-core"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
+source = "git+https://github.com/thomasmost/osmena?rev=9da59b507c08c98b40bf472e50b6a6d3e80e0d9f#9da59b507c08c98b40bf472e50b6a6d3e80e0d9f"
 dependencies = [
  "directories",
  "keyboard-types",
@@ -2242,7 +2244,7 @@ dependencies = [
 [[package]]
 name = "osmena-engine"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
+source = "git+https://github.com/thomasmost/osmena?rev=9da59b507c08c98b40bf472e50b6a6d3e80e0d9f#9da59b507c08c98b40bf472e50b6a6d3e80e0d9f"
 dependencies = [
  "dpi",
  "glow",
@@ -2257,7 +2259,7 @@ dependencies = [
 [[package]]
 name = "osmena-shell"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
+source = "git+https://github.com/thomasmost/osmena?rev=9da59b507c08c98b40bf472e50b6a6d3e80e0d9f#9da59b507c08c98b40bf472e50b6a6d3e80e0d9f"
 dependencies = [
  "arboard",
  "clap",
@@ -2278,7 +2280,7 @@ dependencies = [
 [[package]]
 name = "osmena-xtask"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=b1d27c58a1f97df47e3cc1d567b5d198007d5519#b1d27c58a1f97df47e3cc1d567b5d198007d5519"
+source = "git+https://github.com/thomasmost/osmena?rev=9da59b507c08c98b40bf472e50b6a6d3e80e0d9f#9da59b507c08c98b40bf472e50b6a6d3e80e0d9f"
 dependencies = [
  "icns",
  "ico",
@@ -4162,23 +4164,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "osmena-chrome"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "osmena-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "osmena-engine"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "osmena-shell"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "osmena-xtask"
-version = "0.1.0"

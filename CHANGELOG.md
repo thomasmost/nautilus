@@ -8,6 +8,12 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- macOS: the tab context menu, the page context menu, and the ☰ menu
+  opened along the bottom edge of the window instead of at the pointer
+  (osmena's fix: its menu code mirrored the y coordinate for an AppKit
+  view with its origin at the bottom, but winit's view has its origin at
+  the top).
+
 - macOS: Cmd+Z, Shift+Cmd+Z, Cmd+X, Cmd+C, Cmd+V, Shift+Cmd+V, and
   Cmd+A in a page now undo, redo, cut, copy, paste, paste as plain
   text, and select all. Chromium leaves those to the application's Edit
@@ -33,6 +39,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- macOS: Chrome extensions, as on Windows. The puzzle-piece menu and the
+  pinned actions appear in the toolbar, the Web Store install, unpacked
+  loading, and the Extensions section of Settings work through the same
+  hidden management page, and an action's popup opens under its button
+  in a borderless window of the browser window's.
 - macOS: `cargo xtask bundle-mac` builds `Nautilus.app` (the release
   binaries, CEF's framework, the five helper apps, the property lists,
   an ad-hoc signature). CI builds it on every push to `main`, starts it

@@ -21,8 +21,9 @@
 //! path. Chromium remembers unpacked extensions across launches, so
 //! nothing is needed at startup beyond the listing.
 //!
-//! Everything here is Windows only until the popups exist for macOS;
-//! elsewhere `INFO.extensions` is `None` and the shell shows nothing.
+//! Everything here runs where the action popups have a window
+//! (`popup.rs`: Windows and macOS); elsewhere `INFO.extensions` is
+//! `None` and the shell shows nothing.
 
 use url::Url;
 
@@ -50,13 +51,13 @@ pub fn web_store_item_id(url: &Url) -> Option<String> {
 /// pump without further work requests, so nothing moves afterwards. The
 /// outcome comes back here, and the engine hands it to the manager on
 /// the next spin.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub(crate) struct UnpackQueue {
     outcomes: std::sync::Mutex<Vec<(String, Result<std::path::PathBuf, String>)>>,
     waker: std::sync::Arc<dyn osmena_engine::Waker>,
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 impl UnpackQueue {
     pub(crate) fn new(waker: std::sync::Arc<dyn osmena_engine::Waker>) -> std::sync::Arc<Self> {
         std::sync::Arc::new(UnpackQueue {
@@ -83,13 +84,13 @@ impl UnpackQueue {
     }
 }
 
-#[cfg(windows)]
-pub(crate) use windows::ExtensionManager;
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) use native::ExtensionManager;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) use stub::ExtensionManager;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod stub {
     use std::path::Path;
     use std::rc::Rc;
@@ -136,8 +137,8 @@ mod stub {
     }
 }
 
-#[cfg(windows)]
-mod windows {
+#[cfg(any(windows, target_os = "macos"))]
+mod native {
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};

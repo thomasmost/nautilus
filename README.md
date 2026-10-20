@@ -371,11 +371,12 @@ Upstream causes and the features they block are tracked in
 - Without the system title bar, Windows 11's snap-layouts flyout on the
   maximize control is not available (snap by dragging still is), and the
   frameless window has not been tried on macOS.
-- macOS has not been run by hand yet: the bundle is built and started
-  once by CI, nothing more (see the handoff in `CLAUDE.md` for what to
-  try first).
-- Extensions: Windows only for now (the management page's hidden window
-  and the popups are Win32). Extension popups see Chromium's own tabs,
+- macOS has had one run by hand (2026-10-20: launch, a page, the
+  extension manager starting and shutting down); the rest of the manual
+  checklist is untried there (see the handoff in `CLAUDE.md`).
+- Extensions: an action popup on macOS is a borderless child window of
+  the browser window (`popup.rs`); it was built from the Windows
+  behaviour and not yet clicked by hand. Extension popups see Chromium's own tabs,
   not Nautilus's: `chrome.tabs.query({active: true})` finds the hidden
   management page, so a popup that acts on "the current tab" acts on
   nothing. An action without a popup cannot be clicked. The Web Store

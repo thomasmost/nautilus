@@ -41,8 +41,9 @@ pub static INFO: EngineInfo = EngineInfo {
     // scrolls about 100 px per notch.
     wheel_line_px: 100.0,
     // Chromium's extension system, driven through the hidden management
-    // page (see `extensions.rs`); not wired up on macOS yet.
-    extensions: if cfg!(windows) {
+    // page (see `extensions.rs`), where the action popups have a window
+    // (`popup.rs`: Windows and macOS).
+    extensions: if cfg!(any(windows, target_os = "macos")) {
         Some(ExtensionSupport {
             store_name: "Chrome Web Store",
             store_url: "https://chromewebstore.google.com/",

@@ -5,15 +5,17 @@
 //! popup closes on Escape, when the page closes itself, and when the
 //! shell says so (the window took focus back, moved, or resized).
 //!
-//! Windows only, like the extension manager; elsewhere nothing opens.
+//! The window is the platform's: a `WS_POPUP` window CEF creates on
+//! Windows, a borderless child `NSWindow` of the browser window on macOS
+//! (`platform`). Elsewhere nothing opens, like the extension manager.
 
-#[cfg(windows)]
-pub(crate) use windows::Popups;
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) use native::Popups;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) use stub::Popups;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod stub {
     use std::rc::Rc;
 
@@ -39,8 +41,8 @@ mod stub {
     }
 }
 
-#[cfg(windows)]
-mod windows {
+#[cfg(any(windows, target_os = "macos"))]
+mod native {
     use std::cell::RefCell;
     use std::rc::Rc;
     use std::time::{Duration, Instant};
@@ -50,15 +52,11 @@ mod windows {
         Browser, BrowserSettings, CefString, Client, DisplayHandler, Frame, ImplBrowser,
         ImplBrowserHost, ImplClient, ImplDisplayHandler, ImplFrame, ImplKeyboardHandler,
         ImplLifeSpanHandler, ImplLoadHandler, KeyEvent, KeyEventType, KeyboardHandler,
-        LifeSpanHandler, LoadHandler, LogSeverity, Rect, RuntimeStyle, WindowInfo, WrapClient,
-        WrapDisplayHandler, WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, wrap_client,
+        LifeSpanHandler, LoadHandler, LogSeverity, WrapClient, WrapDisplayHandler,
+        WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, wrap_client,
         wrap_display_handler, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
     };
     use osmena_engine::ScreenRect;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-        WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
-    };
 
     use crate::delegate::DelegateState;
 
@@ -114,11 +112,15 @@ mod windows {
         browser: Browser,
         anchor: ScreenRect,
         scale: f32,
+        window: platform::PopupWindow,
     }
 
     #[derive(Default)]
     struct Inner {
         open: Option<Open>,
+        /// Windows whose browser was told to close and has not reported
+        /// `on_before_close` yet; each goes when its browser does.
+        closing: Vec<(String, platform::PopupWindow)>,
         /// The popup that closed last, and when, for the reopen debounce.
         closed: Option<(String, Instant)>,
     }
@@ -158,21 +160,11 @@ mod windows {
             // Tiny until the page says how big it wants to be; the
             // window is owned by the browser window, so it stays above it
             // and off the taskbar.
-            let (width, height) = ((MIN_SIZE * scale) as i32, (MIN_SIZE * scale) as i32);
-            let (x, y) = place(anchor, width, height);
-            let window_info = WindowInfo {
-                style: WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VISIBLE,
-                ex_style: WS_EX_TOOLWINDOW,
-                parent_window: self.owner,
-                bounds: Rect {
-                    x,
-                    y,
-                    width,
-                    height,
-                },
-                windowless_rendering_enabled: 0,
-                runtime_style: RuntimeStyle::ALLOY,
-                ..WindowInfo::default()
+            let size = (MIN_SIZE * scale) as i32;
+            let bounds = place(anchor, size, size);
+            let Some((window_info, window)) = platform::create(self.owner, bounds, scale) else {
+                log::error!("could not make a window for the popup of extension {id}");
+                return;
             };
             let mut client = PopupClient::new(
                 PopupLife::new(self.delegate.clone(), self.inner.clone(), id.to_string()),
@@ -194,6 +186,7 @@ mod windows {
             );
             let Some(browser) = browser else {
                 log::error!("Chromium could not open the popup of extension {id}");
+                window.close();
                 return;
             };
             log::info!("opened the popup of extension {id} at {url}");
@@ -205,15 +198,21 @@ mod windows {
                 browser,
                 anchor,
                 scale,
+                window,
             });
         }
 
         pub(crate) fn close_all(&self) {
             let open = self.inner.borrow_mut().open.take();
-            if let Some(open) = open
-                && let Some(host) = open.browser.host()
-            {
-                host.close_browser(1);
+            if let Some(open) = open {
+                open.window.hide();
+                self.inner
+                    .borrow_mut()
+                    .closing
+                    .push((open.id.clone(), open.window));
+                if let Some(host) = open.browser.host() {
+                    host.close_browser(1);
+                }
             }
         }
     }
@@ -221,44 +220,46 @@ mod windows {
     impl Drop for Popups {
         fn drop(&mut self) {
             self.close_all();
+            let closing = std::mem::take(&mut self.inner.borrow_mut().closing);
+            for (_, window) in closing {
+                window.close();
+            }
         }
     }
 
     /// Where a popup of `width` by `height` goes: under the anchor, its
     /// right edge on the anchor's right edge, never off the left of the
     /// screen.
-    fn place(anchor: ScreenRect, width: i32, height: i32) -> (i32, i32) {
-        let _ = height;
-        let x = (anchor.x + anchor.width - width).max(0);
-        let y = anchor.y + anchor.height + GAP;
-        (x, y)
+    fn place(anchor: ScreenRect, width: i32, height: i32) -> ScreenRect {
+        ScreenRect {
+            x: (anchor.x + anchor.width - width).max(0),
+            y: anchor.y + anchor.height + GAP,
+            width,
+            height,
+        }
     }
 
     /// The page asked for `css_width` by `css_height`: resize the window.
     fn resize(open: &Open, css_width: f32, css_height: f32) {
         let width = (css_width.clamp(MIN_SIZE, MAX_WIDTH) * open.scale).round() as i32;
         let height = (css_height.clamp(MIN_SIZE, MAX_HEIGHT) * open.scale).round() as i32;
-        let (x, y) = place(open.anchor, width, height);
-        let Some(host) = open.browser.host() else {
-            return;
-        };
-        let hwnd = host.window_handle().0;
-        if hwnd.is_null() {
-            return;
+        let bounds = place(open.anchor, width, height);
+        platform::resize(&open.window, &open.browser, bounds, open.scale);
+    }
+
+    /// Escape closes the popup, as it does in other browsers.
+    fn escape_closes(browser: Option<&mut Browser>, event: Option<&KeyEvent>) -> i32 {
+        const VK_ESCAPE: ::std::os::raw::c_int = 0x1B;
+        let escape = event.is_some_and(|e| {
+            e.type_ == KeyEventType::RAWKEYDOWN && e.windows_key_code == VK_ESCAPE
+        });
+        if !escape {
+            return 0;
         }
-        // SAFETY: the handle is the live window CEF created for this
-        // browser; CEF handles the resize of its content from WM_SIZE.
-        unsafe {
-            SetWindowPos(
-                hwnd.cast(),
-                std::ptr::null_mut(),
-                x,
-                y,
-                width,
-                height,
-                SWP_NOZORDER | SWP_NOACTIVATE,
-            );
+        if let Some(host) = browser.and_then(|b| b.host()) {
+            host.close_browser(1);
         }
+        1
     }
 
     wrap_client! {
@@ -308,8 +309,14 @@ mod windows {
             fn on_before_close(&self, _browser: Option<&mut Browser>) {
                 self.delegate.add_live(-1);
                 let mut inner = self.inner.borrow_mut();
-                if inner.open.as_ref().is_some_and(|open| open.id == self.id) {
-                    inner.open = None;
+                if inner.open.as_ref().is_some_and(|open| open.id == self.id)
+                    && let Some(open) = inner.open.take()
+                {
+                    open.window.close();
+                }
+                if let Some(at) = inner.closing.iter().position(|(id, _)| *id == self.id) {
+                    let (_, window) = inner.closing.remove(at);
+                    window.close();
                 }
                 inner.closed = Some((self.id.clone(), Instant::now()));
             }
@@ -375,11 +382,14 @@ mod windows {
         }
     }
 
+    // The keyboard handler's `os_event` is a Windows `MSG` there and a
+    // bare pointer (an `NSEvent`) on macOS; the signature must match the
+    // binding's exactly, so the handler is declared once per platform.
+    #[cfg(windows)]
     wrap_keyboard_handler! {
         struct PopupKeys;
 
         impl KeyboardHandler {
-            /// Escape closes the popup, as it does in other browsers.
             fn on_pre_key_event(
                 &self,
                 browser: Option<&mut Browser>,
@@ -387,18 +397,246 @@ mod windows {
                 _os_event: Option<&mut cef::sys::MSG>,
                 _is_keyboard_shortcut: Option<&mut ::std::os::raw::c_int>,
             ) -> ::std::os::raw::c_int {
-                const VK_ESCAPE: ::std::os::raw::c_int = 0x1B;
-                let escape = event.is_some_and(|e| {
-                    e.type_ == KeyEventType::RAWKEYDOWN && e.windows_key_code == VK_ESCAPE
-                });
-                if !escape {
-                    return 0;
-                }
-                if let Some(host) = browser.and_then(|b| b.host()) {
-                    host.close_browser(1);
-                }
-                1
+                escape_closes(browser, event)
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    wrap_keyboard_handler! {
+        struct PopupKeys;
+
+        impl KeyboardHandler {
+            fn on_pre_key_event(
+                &self,
+                browser: Option<&mut Browser>,
+                event: Option<&KeyEvent>,
+                _os_event: *mut u8,
+                _is_keyboard_shortcut: Option<&mut ::std::os::raw::c_int>,
+            ) -> ::std::os::raw::c_int {
+                escape_closes(browser, event)
+            }
+        }
+    }
+
+    /// Windows: CEF creates the popup as a `WS_POPUP` window owned by
+    /// the browser window and destroys it with the browser; nothing is
+    /// held here.
+    #[cfg(windows)]
+    mod platform {
+        use cef::{Browser, ImplBrowser, ImplBrowserHost, Rect, RuntimeStyle, WindowInfo};
+        use osmena_engine::ScreenRect;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+            WS_EX_TOOLWINDOW, WS_POPUP, WS_VISIBLE,
+        };
+
+        pub(super) struct PopupWindow;
+
+        impl PopupWindow {
+            pub(super) fn hide(&self) {}
+
+            pub(super) fn close(self) {}
+        }
+
+        /// The `WindowInfo` for a popup at `bounds` (physical screen
+        /// pixels), owned by the browser window `owner`.
+        pub(super) fn create(
+            owner: cef::sys::cef_window_handle_t,
+            bounds: ScreenRect,
+            _scale: f32,
+        ) -> Option<(WindowInfo, PopupWindow)> {
+            let window_info = WindowInfo {
+                style: WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VISIBLE,
+                ex_style: WS_EX_TOOLWINDOW,
+                parent_window: owner,
+                bounds: Rect {
+                    x: bounds.x,
+                    y: bounds.y,
+                    width: bounds.width,
+                    height: bounds.height,
+                },
+                windowless_rendering_enabled: 0,
+                runtime_style: RuntimeStyle::ALLOY,
+                ..WindowInfo::default()
+            };
+            Some((window_info, PopupWindow))
+        }
+
+        /// Move the popup's window to `bounds` (physical screen pixels).
+        pub(super) fn resize(
+            _window: &PopupWindow,
+            browser: &Browser,
+            bounds: ScreenRect,
+            _scale: f32,
+        ) {
+            let Some(host) = browser.host() else {
+                return;
+            };
+            let hwnd = host.window_handle().0;
+            if hwnd.is_null() {
+                return;
+            }
+            // SAFETY: the handle is the live window CEF created for this
+            // browser; CEF handles the resize of its content from WM_SIZE.
+            unsafe {
+                SetWindowPos(
+                    hwnd.cast(),
+                    std::ptr::null_mut(),
+                    bounds.x,
+                    bounds.y,
+                    bounds.width,
+                    bounds.height,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+
+    /// macOS: a borderless `NSWindow` of our own, a child of the browser
+    /// window (so it moves with it and stays above it), holding CEF's
+    /// browser view as its content. A plain borderless window refuses to
+    /// become key, and the popup's page needs the keyboard, so the window
+    /// is a subclass that accepts it.
+    #[cfg(target_os = "macos")]
+    mod platform {
+        use cef::{Browser, Rect, RuntimeStyle, WindowInfo};
+        use objc2::rc::Retained;
+        use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
+        use objc2_app_kit::{
+            NSBackingStoreType, NSPopUpMenuWindowLevel, NSScreen, NSView, NSWindow,
+            NSWindowOrderingMode, NSWindowStyleMask,
+        };
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        use osmena_engine::ScreenRect;
+
+        define_class!(
+            // SAFETY: NSWindow has no subclassing requirements beyond
+            // being used on the main thread, and the type has no Drop.
+            #[unsafe(super(NSWindow))]
+            #[thread_kind = MainThreadOnly]
+            #[name = "NautilusPopupWindow"]
+            struct KeyableWindow;
+
+            impl KeyableWindow {
+                #[unsafe(method(canBecomeKeyWindow))]
+                fn can_become_key_window(&self) -> bool {
+                    true
+                }
+            }
+        );
+
+        pub(super) struct PopupWindow {
+            window: Retained<KeyableWindow>,
+            owner: Retained<NSWindow>,
+        }
+
+        impl PopupWindow {
+            pub(super) fn hide(&self) {
+                self.window.orderOut(None);
+            }
+
+            pub(super) fn close(self) {
+                self.owner.removeChildWindow(&self.window);
+                self.window.orderOut(None);
+                self.window.close();
+            }
+        }
+
+        /// A window at `bounds` (physical screen pixels, from the top
+        /// left) under the browser window whose content view is `owner`,
+        /// and the `WindowInfo` that puts CEF's view into it.
+        pub(super) fn create(
+            owner: cef::sys::cef_window_handle_t,
+            bounds: ScreenRect,
+            scale: f32,
+        ) -> Option<(WindowInfo, PopupWindow)> {
+            let mtm = MainThreadMarker::new()?;
+            if owner.is_null() {
+                return None;
+            }
+            // SAFETY: the handle is the live content view of the browser
+            // window, given to the tab host by the shell.
+            let owner_view: &NSView = unsafe { &*owner.cast::<NSView>() };
+            let owner_window = owner_view.window()?;
+            let frame = screen_frame(bounds, scale, mtm);
+            let window = KeyableWindow::alloc(mtm).set_ivars(());
+            // SAFETY: a designated initialiser of NSWindow with plain
+            // arguments; the window is released by its `Retained`, not
+            // by `close` (see `setReleasedWhenClosed`).
+            let window: Retained<KeyableWindow> = unsafe {
+                msg_send![
+                    super(window),
+                    initWithContentRect: frame,
+                    styleMask: NSWindowStyleMask::Borderless,
+                    backing: NSBackingStoreType::Buffered,
+                    defer: false
+                ]
+            };
+            // SAFETY: the window is ours and not yet shown.
+            unsafe { window.setReleasedWhenClosed(false) };
+            window.setLevel(NSPopUpMenuWindowLevel);
+            window.setHasShadow(true);
+            window.setMovable(false);
+            // SAFETY: both windows are live and on the main thread.
+            unsafe { owner_window.addChildWindow_ordered(&window, NSWindowOrderingMode::Above) };
+            window.makeKeyAndOrderFront(None);
+            let content = window.contentView()?;
+            let size = content.bounds().size;
+            let window_info = WindowInfo {
+                parent_view: Retained::as_ptr(&content).cast_mut().cast(),
+                bounds: Rect {
+                    x: 0,
+                    y: 0,
+                    width: size.width as i32,
+                    height: size.height as i32,
+                },
+                windowless_rendering_enabled: 0,
+                runtime_style: RuntimeStyle::ALLOY,
+                ..WindowInfo::default()
+            };
+            Some((
+                window_info,
+                PopupWindow {
+                    window,
+                    owner: owner_window,
+                },
+            ))
+        }
+
+        /// Move the window to `bounds` (physical screen pixels); CEF's
+        /// view follows the content view (it autoresizes with it).
+        pub(super) fn resize(
+            window: &PopupWindow,
+            _browser: &Browser,
+            bounds: ScreenRect,
+            scale: f32,
+        ) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            window
+                .window
+                .setFrame_display(screen_frame(bounds, scale, mtm), true);
+        }
+
+        /// `bounds` (physical pixels from the top left of the main
+        /// display, the shell's and winit's convention) as an AppKit
+        /// frame (points from the bottom left of the main display).
+        fn screen_frame(bounds: ScreenRect, scale: f32, mtm: MainThreadMarker) -> NSRect {
+            let scale = f64::from(scale.max(0.01));
+            let main_height = NSScreen::screens(mtm)
+                .firstObject()
+                .map(|screen| screen.frame().size.height)
+                .unwrap_or(0.0);
+            let width = f64::from(bounds.width) / scale;
+            let height = f64::from(bounds.height) / scale;
+            let x = f64::from(bounds.x) / scale;
+            let top = f64::from(bounds.y) / scale;
+            NSRect::new(
+                NSPoint::new(x, main_height - top - height),
+                NSSize::new(width, height),
+            )
         }
     }
 
@@ -414,9 +652,14 @@ mod windows {
                 width: 26,
                 height: 26,
             };
-            assert_eq!(place(anchor, 300, 200), (226, 68));
+            let placed = place(anchor, 300, 200);
+            assert_eq!(
+                (placed.x, placed.y, placed.width, placed.height),
+                (226, 68, 300, 200)
+            );
             let near_left = ScreenRect { x: 10, ..anchor };
-            assert_eq!(place(near_left, 300, 200), (0, 68));
+            let placed = place(near_left, 300, 200);
+            assert_eq!((placed.x, placed.y), (0, 68));
         }
     }
 }

@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-20 (the macOS bundle, the application protocol, Cmd editing keys)._
+_Last updated: 2026-10-20 (extensions on macOS; first run by hand on a Mac)._
 
 ## Architecture
 
@@ -202,12 +202,18 @@ Ninja on `PATH`:
   three times and Chromium falls back to software rendering whenever a
   windowed Chrome-style browser exists beside the windowless tabs.
 - **Action popups are owned windows.** `Popups` opens a windowed
-  Alloy-style browser in a `WS_POPUP` window owned by the browser
-  window, placed under the button from the `ScreenRect` the shell
-  passes; the page reports its size through a `nautilus-popup-size:`
-  console message. The shell closes popups when its window regains
-  focus, moves, or resizes; Escape and `window.close()` close them too;
-  a reopen within 400 ms of a close is the toggle click and is ignored.
+  Alloy-style browser in a window owned by the browser window, placed
+  under the button from the `ScreenRect` the shell passes: on Windows a
+  `WS_POPUP` window CEF creates, on macOS a borderless `NSWindow` of
+  our own (a subclass that accepts key status, which a borderless
+  window refuses) added as a child window of the browser's, with CEF's
+  view as its content (`popup.rs`, `platform`). The shell's rectangle is
+  physical pixels from the top left of the main display, winit's
+  convention; macOS flips it to AppKit's bottom-left points. The page
+  reports its size through a `nautilus-popup-size:` console message.
+  The shell closes popups when its window regains focus, moves, or
+  resizes; Escape and `window.close()` close them too; a reopen within
+  400 ms of a close is the toggle click and is ignored.
 - **Packaging metadata** is `[package.metadata.packager]` in
   `crates/nautilus/Cargo.toml`. cargo-packager resolves its paths against that
   crate's directory (hence `../../`). The `resources` globs pick up the CEF
@@ -276,10 +282,26 @@ opens in a window Chromium creates itself from a `WindowInfo` with no
 parent view), "Print…" and "Save link as…" (system dialogs over an
 off-screen browser); (8) Ctrl-click, Cmd-click, and Shift-click on
 links; (9) a second window and tab drags; (10) Cmd+Q and the Dock's
-Quit both exit with no `Nautilus Helper` process left. Extensions are
-off on macOS (`INFO.extensions` is `None`). Known gaps on macOS, not
-bugs: no `.dmg`, ad-hoc signature only, no application menu (Cmd+H,
-Cmd+M do nothing), `cargo run` cannot start Chromium.
+Quit both exit with no `Nautilus Helper` process left. Known gaps on
+macOS, not bugs: no `.dmg`, ad-hoc signature only, no application menu
+(Cmd+H, Cmd+M do nothing), `cargo run` cannot start Chromium.
+
+Added 2026-10-20 (night), the first run on a Mac (Apple silicon,
+macOS 15): the bundle built from this checkout starts, renders
+example.com, shows the puzzle piece, and exits cleanly with
+`--exit-after` and no helper left; the extension manager's hidden Views
+window initialises, lists, and is destroyed at shutdown on macOS as on
+Windows. Two parity gaps found against the Windows build and fixed:
+the tab, page, and ☰ menus opened at the window's bottom edge (osmena's
+`native_menu.rs`: muda mirrors y for an unflipped NSView, winit's is
+flipped; y is mirrored first now), and extensions were off (`popup.rs`
+now has a macOS window; `INFO.extensions` and the manager are gated on
+Windows or macOS). Not verified by hand on macOS: the menus' new
+position and the popup window itself (clicking the puzzle piece and a
+pinned action, the popup taking the keyboard, Escape and focus closing
+it, its size following the page); scripted input and screenshots from
+the terminal were blocked by Accessibility and Screen Recording
+permissions. Those are the first things to try.
 
 Added 2026-10-20: the page context menu (osmena's, over CEF's
 `ContextMenuParams`), downloads with the Save As dialog, developer tools
@@ -340,16 +362,15 @@ Open items, most useful first:
 3. Accelerated off-screen rendering (C2).
 4. The manual checklist items above that were never exercised, and the
    extensions item (12) in full.
-5. Extensions on macOS: the management window is Views (portable), the
-   popups are Win32 (`popup.rs`); `INFO.extensions` is gated on
-   `cfg!(windows)`.
+5. Extensions on macOS by hand: the popup window (above), then the
+   checklist item (12) in full.
 6. A freshly created profile can take more than 12 s before the first page
    paints; nothing is wrong, but screenshots taken earlier show a white page.
 
 All three checkouts live side by side under `vibes/browser-project/`
 (`osmena`, `paladin`, `nautilus`); Paladin's Servo and stylo fork checkouts
 stay at `~/vibes/servo` and `~/vibes/stylo`. `~/.cargo/config.toml` on the
-development Windows box carries a `[patch."https://github.com/thomasmost/osmena"]`
+development Windows box and on the Mac carries a `[patch."https://github.com/thomasmost/osmena"]`
 table pointing at the osmena checkout, so both browsers build against
 uncommitted osmena changes; while it is active `cargo` rewrites the
 browsers' `Cargo.lock` with path sources for the osmena crates. Before

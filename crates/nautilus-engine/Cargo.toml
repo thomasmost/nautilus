@@ -27,8 +27,23 @@ png = "0.18"
 sha2 = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Giving winit's NSApplication the protocol CEF requires (mac_app.rs).
+# Giving winit's NSApplication the protocol CEF requires (mac_app.rs),
+# and the borderless window that holds an extension's action popup
+# (popup.rs).
 objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSGraphics",
+    "NSResponder",
+    "NSScreen",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSGeometry",
+] }
 
 [target.'cfg(windows)'.dependencies]
 # The hidden window that hosts the extension manager, and placing the
