@@ -14,7 +14,7 @@ use cef::{
     App, Browser, BrowserProcessHandler, CefString, Client, CommandLine, DialogHandler,
     DisplayHandler, Frame as CefFrame, ImplApp, ImplBrowser, ImplBrowserHost,
     ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplDisplayHandler, ImplFrame,
-    ImplLifeSpanHandler, LifeSpanHandler, LogSeverity, Settings, WrapApp,
+    ImplLifeSpanHandler, LifeSpanHandler, LogSeverity, RenderProcessHandler, Settings, WrapApp,
     WrapBrowserProcessHandler, WrapClient, WrapDisplayHandler, WrapLifeSpanHandler, api_hash,
     wrap_app, wrap_browser_process_handler, wrap_client, wrap_display_handler,
     wrap_life_span_handler,
@@ -195,6 +195,10 @@ impl Engine {
         *shared_delegate.borrow_mut() = Some(delegate.clone());
         let extensions =
             ExtensionManager::start(delegate.clone(), &engine_dir, UnpackQueue::new(waker));
+        delegate.set_extensions(&extensions);
+        if let Ok(id) = std::env::var("NAUTILUS_TEST_INSTALL") {
+            extensions.install(osmena_core::ExtensionSource::Store { id });
+        }
         Ok(Engine {
             delegate,
             extensions,
@@ -465,6 +469,11 @@ wrap_app! {
             command_line.append_switch(Some(&"disable-direct-composition".into()));
             #[cfg(target_os = "macos")]
             command_line.append_switch(Some(&"use-mock-keychain".into()));
+        }
+
+        /// Every renderer gets the store shim (`store.rs`).
+        fn render_process_handler(&self) -> Option<RenderProcessHandler> {
+            Some(crate::store::StoreRenderer::new())
         }
 
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {

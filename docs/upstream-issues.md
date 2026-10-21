@@ -58,6 +58,21 @@ keyboard focus, so winit sends no `Ime` events while the page has focus.
 `Ime` arm in `BrowserWindow::handle_event` is ready; the engine side
 (`ime_set_composition`, `ime_commit_text`) is implemented.
 
+### C4: Chromium's extension dialogs crash a windowless browser
+
+`chrome.webstorePrivate.beginInstallWithManifest3` (the store's "Add to
+Chrome"), `chrome.management.uninstall`, and the enable prompts show
+dialogs modal to the tab's native window (`ExtensionInstallPrompt` →
+`constrained_window::CreateBrowserModalDialogViews` →
+`GetModalDialogHost(parent)`); an off-screen browser has no native
+window, the host lookup dereferences null, and the browser process
+dies. Seen with CEF 154 on Windows (the user's crash of 2026-10-20,
+resolved with CEF's release symbols). **Blocks:** Chromium's own install
+and uninstall flows from store pages. **Workaround (2026-10-21):**
+`store.rs` replaces those API methods in store pages' main frames with
+ones that route the request to Nautilus's extension manager and answer
+the page without a dialog.
+
 ## Toolchain and packaging
 
 ### T1: cargo-packager has no macOS helper-app support

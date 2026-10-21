@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-20 (extensions on macOS; first run by hand on a Mac)._
+_Last updated: 2026-10-21 (the store shim; Windows key events)._
 
 ## Architecture
 
@@ -14,7 +14,7 @@ Cargo workspace (Rust 1.97.1 pinned in `rust-toolchain.toml`, edition 2024).
 
 | Crate                    | What it is |
 | ------------------------ | ---------- |
-| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s, and the page commands). `delegate.rs` turns CEF handlers into `EngineEvent`s (the context menu and downloads among them), `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events, `devtools.rs` opens a tab's developer tools, `mac_app.rs` gives winit's `NSApplication` the protocol CEF requires. `extensions.rs` drives Chromium's extension system through a hidden `chrome://extensions` page (`crx.rs` reads store downloads), `popup.rs` opens an action's popup in an owned window. |
+| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s, and the page commands). `delegate.rs` turns CEF handlers into `EngineEvent`s (the context menu and downloads among them), `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events, `devtools.rs` opens a tab's developer tools, `mac_app.rs` gives winit's `NSApplication` the protocol CEF requires. `extensions.rs` drives Chromium's extension system through a hidden `chrome://extensions` page (`crx.rs` reads store downloads), `popup.rs` opens an action's popup in an owned window, `store.rs` reroutes the Chrome Web Store's own install buttons to the manager from inside the renderer. |
 | `crates/nautilus`        | `nautilus` — the binary: `brand.rs` (the `Brand`), `main.rs` (dispatches Chromium's helper processes first, then logging, clap, and `osmena_shell::run`), `helper.rs` (the `nautilus-helper` bin for macOS), `build.rs` (the Windows icon resource), and the cargo-packager metadata in its `Cargo.toml`. |
 | `xtask`                  | `cargo xtask icons`, through `osmena-xtask`, and `cargo xtask bundle-mac` (`bundle_mac.rs`: the macOS app bundle). |
 
@@ -197,6 +197,23 @@ Ninja on `PATH`:
   shutdown crashes with it alive. Implement such callbacks explicitly
   (`ManagerWindowDelegate::can_close` returns 1); `Engine::drop` waits for
   the manager's window to be destroyed as well as for every browser.
+- **Store pages never reach Chromium's extension dialogs.** "Add to
+  Chrome" calls `chrome.webstorePrivate.beginInstallWithManifest3`,
+  whose install prompt is modal to the tab's native window; a
+  windowless browser has none and Chromium crashes on the null host
+  (C4 in `docs/upstream-issues.md`). `store.rs` is the render-process
+  handler: in every main-frame V8 context of a store page it binds a
+  function on `window` and evaluates a shim that replaces that method,
+  `completeInstall`, `install`, `requestExtension`,
+  `management.uninstall`, and `management.setEnabled` with functions
+  that call it and answer the page at once ("user_cancelled" for the
+  install). The function sends a process message; `TabClient::
+  on_process_message_received` checks the frame is the main frame of a
+  store page again and hands the `StoreRequest` to the extension
+  manager through `DelegateState::store_request`. Two `cef` crate
+  facts this relies on: `V8Context::eval` does nothing unless both
+  `retval` and `exception` are `Some(&mut None)`, and doc comments are
+  not accepted inside `wrap_*!` macro invocations.
 - **Browsers Chromium opens on its own get the default client.** An
   extension's `chrome.tabs.create`, or a link from the management page,
   makes Chromium create a browser Nautilus cannot show;
@@ -262,7 +279,7 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
-## Status and handoff (2026-10-20)
+## Status and handoff (2026-10-21)
 
 What exists: Nautilus was started on 2026-10-19 as Paladin's feature set
 on Chromium (CEF 154), and the same day its model and chrome moved to
@@ -295,6 +312,24 @@ links; (9) a second window and tab drags; (10) Cmd+Q and the Dock's
 Quit both exit with no `Nautilus Helper` process left. Known gaps on
 macOS, not bugs: no `.dmg`, ad-hoc signature only, no application menu
 (Cmd+H, Cmd+M do nothing), `cargo run` cannot start Chromium.
+
+Added 2026-10-21, from the user's reports on the installed Windows
+build: (a) "Add to Chrome" on the Proton Pass store page crashed the
+browser every time; a debugger attached to the live process plus CEF's
+release symbols (`cef_binary_<version>_windows64_release_symbols`,
+900 MB, the `.pdb` must sit at a short path) gave the stack through
+`WebstorePrivateBeginInstallWithManifest3Function` into the null modal
+dialog host; fixed by the store shim (see Conventions, C4). Verified on
+Windows by evaluating the store's API call in the page under cdb: the
+shim answered "user_cancelled", the manager downloaded and loaded
+Proton Pass, its onboarding tab opened, no crash. Not verified by hand:
+the real button click (the store showed "Switch to Chrome" to the
+scripted fresh profile but "Add to Chrome" to the user's), "Remove
+from Chrome" and the enable switch on a store page, macOS. (b) Typing
+into page fields produced capitals and wrong punctuation: CEF on
+Windows types `windows_key_code` of a `CHAR` event (see Conventions);
+fixed, and `code` was empty on every key event (native key code 0),
+fixed with a scan-code table. Verified with a logging test page.
 
 Added 2026-10-20 (night), the first run on a Mac (Apple silicon,
 macOS 15): the bundle built from this checkout starts, renders

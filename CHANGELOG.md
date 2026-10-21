@@ -8,6 +8,15 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- "Add to Chrome" on a Chrome Web Store page crashed the browser.
+  The store calls Chromium's `webstorePrivate` API, which answers with
+  the install dialog modal to the tab's native window; a windowless
+  browser has none and Chromium dereferenced null. Store pages now get
+  a shim in the renderer that routes "Add to Chrome", "Remove from
+  Chrome", and the enable switch to Nautilus's own extension manager,
+  the same path as the puzzle menu; the page is told the dialog was
+  cancelled and the extension appears in the puzzle menu seconds
+  later.
 - Windows: typing into a page produced upper-case letters whatever the
   Shift and Caps Lock state, and wrong characters for punctuation keys.
   CEF on Windows reads the character a `Char` key event types from its

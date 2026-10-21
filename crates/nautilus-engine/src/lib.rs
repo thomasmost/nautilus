@@ -28,6 +28,7 @@ mod keycodes;
 #[cfg(target_os = "macos")]
 mod mac_app;
 mod popup;
+mod store;
 
 pub use crate::engine::{Engine, INFO, run_helper, run_subprocess};
 pub use crate::extensions::web_store_item_id;

@@ -9,7 +9,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use cef::rc::Rc as _;
 use cef::{
@@ -22,23 +22,26 @@ use cef::{
     ImplDownloadHandler, ImplDownloadImageCallback, ImplDownloadItem, ImplFileDialogCallback,
     ImplFrame, ImplImage, ImplKeyboardHandler, ImplLifeSpanHandler, ImplLoadHandler,
     ImplRenderHandler, ImplRequestHandler, ImplRunContextMenuCallback, KeyEvent, KeyEventType,
-    KeyboardHandler, LifeSpanHandler, LoadHandler, LogSeverity, MenuModel, PaintElementType, Rect,
-    RenderHandler, RequestHandler, RunContextMenuCallback, ScreenInfo, TerminationStatus,
-    WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDialogHandler,
-    WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback, WrapKeyboardHandler,
-    WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler, WrapRequestHandler, wrap_client,
-    wrap_context_menu_handler, wrap_dialog_handler, wrap_display_handler, wrap_download_handler,
-    wrap_download_image_callback, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
-    wrap_render_handler, wrap_request_handler,
+    KeyboardHandler, LifeSpanHandler, LoadHandler, LogSeverity, MenuModel, PaintElementType,
+    ProcessId, ProcessMessage, Rect, RenderHandler, RequestHandler, RunContextMenuCallback,
+    ScreenInfo, TerminationStatus, WindowOpenDisposition, WrapClient, WrapContextMenuHandler,
+    WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback,
+    WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
+    WrapRequestHandler, wrap_client, wrap_context_menu_handler, wrap_dialog_handler,
+    wrap_display_handler, wrap_download_handler, wrap_download_image_callback,
+    wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
+    wrap_request_handler,
 };
 use osmena_core::{
-    Cursor, EditState, EngineEvent, LoadState, Media, MediaKind, Misspelling, PageContext,
-    PendingTab, RgbaImage, TabId,
+    Cursor, EditState, EngineEvent, ExtensionSource, LoadState, Media, MediaKind, Misspelling,
+    PageContext, PendingTab, RgbaImage, TabId,
 };
 use url::Url;
 
+use crate::extensions::ExtensionManager;
 use crate::frame::Frame;
 use crate::input;
+use crate::store::StoreRequest;
 
 /// The native cursor handle `on_cursor_change` receives. The `cef` crate's
 /// generated handler signature names `CursorHandle` on Windows and Linux
@@ -70,6 +73,9 @@ pub(crate) struct DelegateState {
     /// browser Chromium routes it to (the extension manager's `loadUnpacked`
     /// opens one; CEF does not always attribute it to that browser).
     dialog_answer: RefCell<Option<PathBuf>>,
+    /// The extension manager, for what store pages ask (`store.rs`); it
+    /// holds this state, hence weak.
+    extensions: RefCell<Weak<ExtensionManager>>,
 }
 
 impl DelegateState {
@@ -113,6 +119,26 @@ impl DelegateState {
 
     /// Answer the next folder dialog with `dir` instead of showing it.
     #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn set_extensions(&self, manager: &Rc<ExtensionManager>) {
+        *self.extensions.borrow_mut() = Rc::downgrade(manager);
+    }
+
+    /// A store page's own button was used: the extension manager does
+    /// what the puzzle menu would.
+    pub(crate) fn store_request(&self, request: StoreRequest) {
+        let Some(manager) = self.extensions.borrow().upgrade() else {
+            log::warn!("a store page asked to {request}, but there is no extension manager");
+            return;
+        };
+        log::info!("a store page asked to {request}");
+        match request {
+            StoreRequest::Install(id) => manager.install(ExtensionSource::Store { id }),
+            StoreRequest::Uninstall(id) => manager.uninstall(&id),
+            StoreRequest::Enable(id) => manager.set_enabled(&id, true),
+            StoreRequest::Disable(id) => manager.set_enabled(&id, false),
+        }
+    }
+
     pub(crate) fn answer_next_dialog(&self, dir: PathBuf) {
         *self.dialog_answer.borrow_mut() = Some(dir);
     }
@@ -223,9 +249,10 @@ pub(crate) fn client_for(view: Rc<ViewState>) -> Client {
         display: TabDisplayHandler::new(view.clone()),
         request: TabRequestHandler::new(view.clone()),
         context_menu: TabContextMenuHandler::new(view.clone()),
-        download: TabDownloadHandler::new(view),
+        download: TabDownloadHandler::new(view.clone()),
         keyboard: TabKeyboardHandler::new(),
         dialog,
+        view,
     }))
 }
 
@@ -240,6 +267,7 @@ struct TabHandlers {
     download: DownloadHandler,
     keyboard: KeyboardHandler,
     dialog: DialogHandler,
+    view: Rc<ViewState>,
 }
 
 wrap_dialog_handler! {
@@ -313,6 +341,24 @@ wrap_client! {
 
         fn request_handler(&self) -> Option<RequestHandler> {
             Some(self.handlers.request.clone())
+        }
+
+        /// The store shim's request (`store.rs`).
+        fn on_process_message_received(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut CefFrame>,
+            _source_process: ProcessId,
+            message: Option<&mut ProcessMessage>,
+        ) -> ::std::os::raw::c_int {
+            let (Some(frame), Some(message)) = (frame, message) else {
+                return 0;
+            };
+            let Some(request) = crate::store::request_from_message(frame, message) else {
+                return 0;
+            };
+            self.handlers.view.delegate.store_request(request);
+            1
         }
     }
 }
@@ -483,11 +529,18 @@ wrap_load_handler! {
     impl LoadHandler {
         fn on_loading_state_change(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             is_loading: ::std::os::raw::c_int,
             can_go_back: ::std::os::raw::c_int,
             can_go_forward: ::std::os::raw::c_int,
         ) {
+            if is_loading == 0
+                && let Ok(script) = std::env::var("NAUTILUS_TEST_PAGE_SCRIPT")
+                && let Some(frame) = browser.and_then(|b| b.main_frame())
+            {
+                log::info!("TEST HOOK: running the page script");
+                frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
+            }
             let tab = self.view.tab;
             self.view.push(EngineEvent::LoadStateChanged {
                 tab,

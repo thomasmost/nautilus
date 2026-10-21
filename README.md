@@ -29,9 +29,10 @@ this repository holds only what is Chromium's.
 - **Sleek by default.** No system title bar: the tab strip is the title
   bar, with the window controls at its end. "Use the system title bar and
   borders" in Settings brings the frame back.
-- **Chrome extensions.** Install from the Chrome Web Store (open an
-  extension's page and pick "Install the extension on this page" from
-  the puzzle-piece menu, or paste its URL or id into Settings) or load
+- **Chrome extensions.** Install from the Chrome Web Store (click
+  "Add to Chrome" on an extension's page, pick "Install the extension
+  on this page" from the puzzle-piece menu, or paste its URL or id into
+  Settings) or load
   an unpacked directory; pin them to the toolbar, where their popups
   open under the button; switch them off or remove them in Settings.
 - **Tab folders and bookmark groups.** Fold a selection of tabs behind
@@ -258,7 +259,9 @@ engine glue. Each item must pass.
 12. **Extensions.** The toolbar ends in a puzzle piece. Open
     <https://chromewebstore.google.com/detail/ublock-origin-lite/ddkjiahejlhfcafbddmgiahcphecmpfh>,
     click the puzzle piece: "Install the extension on this page" is
-    enabled; pick it. Within a few seconds the puzzle menu lists uBlock
+    enabled; pick it (or, when the store shows its "Add to Chrome"
+    button, click that: the page says the install was cancelled, and
+    the install still happens). Within a few seconds the puzzle menu lists uBlock
     Origin Lite; Settings (Ctrl+,) lists it under Extensions with
     Enabled ticked, and the profile has
     `chromium/extensions/ddkjiahejlhfcafbddmgiahcphecmpfh/manifest.json`
@@ -380,8 +383,10 @@ Upstream causes and the features they block are tracked in
   not Nautilus's: `chrome.tabs.query({active: true})` finds the hidden
   management page, so a popup that acts on "the current tab" acts on
   nothing. An action without a popup cannot be clicked. The Web Store
-  shows "Switch to Chrome" instead of an install button; install through
-  the puzzle menu or Settings. Store extensions do not update themselves.
+  may show "Switch to Chrome" instead of an install button (install
+  through the puzzle menu or Settings then); when it shows "Add to
+  Chrome", the button installs through Nautilus but the page reports
+  the install as cancelled. Store extensions do not update themselves.
   Themes and apps are not listed. Chromium records an install, switch, or
   removal in its preferences up to ten seconds later, so closing the
   browser within that time keeps the process alive, windowless, until
