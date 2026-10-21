@@ -121,6 +121,16 @@ Ninja on `PATH`:
   (`unhandled_key` in `delegate.rs`); on other platforms it does
   nothing. The handler is declared once per platform because the
   binding's `os_event` type differs.
+- **Key events follow each platform's native message.** On Windows CEF
+  builds a `ui::KeyEvent` from a `CefKeyEvent` (`TranslateUiKeyEvent` in
+  its platform delegate): a `CHAR` event's character is read from
+  `windows_key_code` (as `WM_CHAR`'s `wParam`; `character` is ignored),
+  a key-down's DOM `key` from the virtual-key code and the layout, and
+  the DOM `code` from `native_key_code`, which must be the scan code
+  with `0xE000` for extended keys. `input::key_events` and
+  `keycodes.rs` follow that: `0x41` on the down event and `'a'` on the
+  `CHAR` event for the A key. On macOS CEF reads `native_key_code`
+  (the `kVK_*` code) and `character` and ignores `windows_key_code`.
 - **Page-opened tabs are URLs.** `on_before_popup` and `on_open_urlfrom_tab`
   cancel Chromium's popup and report `EngineEvent::NewTabRequested` with a
   `PendingTab` that holds the URL (`background` for the

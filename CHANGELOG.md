@@ -8,6 +8,16 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- Windows: typing into a page produced upper-case letters whatever the
+  Shift and Caps Lock state, and wrong characters for punctuation keys.
+  CEF on Windows reads the character a `Char` key event types from its
+  `windows_key_code` field (as `WM_CHAR` carries it), and Nautilus put the
+  key's virtual-key code there; the `Char` event now carries the
+  character.
+- Windows: key events reached pages with an empty `code` (so a page
+  telling keys apart by position, a game or an editor, saw none of them).
+  CEF derives `code` from the native key code, which Nautilus left at 0;
+  it now carries the key's scan code.
 - macOS: the tab context menu, the page context menu, and the ☰ menu
   opened along the bottom edge of the window instead of at the pointer
   (osmena's fix: its menu code mirrored the y coordinate for an AppKit

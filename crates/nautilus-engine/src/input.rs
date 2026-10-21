@@ -68,6 +68,14 @@ pub(crate) enum KeyEventKind {
 /// for a press that produces text a `Char` event carrying it, as the
 /// platform's own key handling would (`WM_KEYDOWN` then `WM_CHAR` on
 /// Windows). Chords with Ctrl or Cmd produce no text.
+///
+/// The `Char` event carries the character in `windows_key_code` as well:
+/// that is `WM_CHAR`'s `wParam`, and CEF on Windows reads the typed
+/// character from there (`CefKeyEvent::FromCharacter(windows_key_code)`
+/// in its platform delegate), not from `character`. With the virtual-key
+/// code there instead, every letter typed into a page arrived as its
+/// upper-case virtual key (`a` is `0x41`, `A`) and punctuation as the
+/// characters that happen to share its codes.
 pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEventSpec> {
     let mut modifiers = modifier_flags(input.modifiers);
     if input.repeat {
@@ -100,7 +108,7 @@ pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEventSpec> {
                 events.push(KeyEventSpec {
                     kind: KeyEventKind::Char,
                     modifiers,
-                    windows_key_code,
+                    windows_key_code: i32::from(character),
                     native_key_code,
                     character,
                     unmodified_character: character,
@@ -165,6 +173,25 @@ mod tests {
         assert_eq!(events[0].windows_key_code, 0x41);
         assert_eq!(events[1].kind, KeyEventKind::Char);
         assert_eq!(events[1].character, u16::from(b'a'));
+        // CEF on Windows types `windows_key_code` of a Char event.
+        assert_eq!(events[1].windows_key_code, i32::from(b'a'));
+    }
+
+    #[test]
+    fn a_char_event_carries_the_character_not_the_virtual_key() {
+        let events = key_events(&press(
+            Key::Character(";".into()),
+            Code::Semicolon,
+            Modifiers::empty(),
+        ));
+        assert_eq!(events[0].windows_key_code, 0xBA);
+        assert_eq!(events[1].windows_key_code, i32::from(b';'));
+        let events = key_events(&press(
+            Key::Character("é".into()),
+            Code::KeyE,
+            Modifiers::empty(),
+        ));
+        assert_eq!(events[1].windows_key_code, i32::from('é' as u16));
     }
 
     #[test]
@@ -199,7 +226,9 @@ mod tests {
         input.repeat = true;
         let events = key_events(&input);
         assert_eq!(events[0].modifiers, FLAG_SHIFT | FLAG_IS_REPEAT);
+        assert_eq!(events[0].windows_key_code, 0x41);
         assert_eq!(events[1].character, u16::from(b'A'));
+        assert_eq!(events[1].windows_key_code, 0x41);
     }
 
     #[test]
