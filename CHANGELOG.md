@@ -6,6 +6,12 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- The tab strip fades from the chrome colour at its top into the
+  toolbar at its bottom edge instead of meeting it along a hard line
+  (osmena).
+
 ### Fixed
 
 - "Add to Chrome" on a Chrome Web Store page crashed the browser.
