@@ -2212,7 +2212,7 @@ dependencies = [
 [[package]]
 name = "osmena-chrome"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=54cbdb2dfbe310d060b5602b1183ee44a701ce5d#54cbdb2dfbe310d060b5602b1183ee44a701ce5d"
+source = "git+https://github.com/thomasmost/osmena?rev=0c4d71db86bd7843d9ae194605eb05a92730dd80#0c4d71db86bd7843d9ae194605eb05a92730dd80"
 dependencies = [
  "dpi",
  "egui",
@@ -2232,7 +2232,7 @@ dependencies = [
 [[package]]
 name = "osmena-core"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=54cbdb2dfbe310d060b5602b1183ee44a701ce5d#54cbdb2dfbe310d060b5602b1183ee44a701ce5d"
+source = "git+https://github.com/thomasmost/osmena?rev=0c4d71db86bd7843d9ae194605eb05a92730dd80#0c4d71db86bd7843d9ae194605eb05a92730dd80"
 dependencies = [
  "directories",
  "keyboard-types",
@@ -2244,7 +2244,7 @@ dependencies = [
 [[package]]
 name = "osmena-engine"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=54cbdb2dfbe310d060b5602b1183ee44a701ce5d#54cbdb2dfbe310d060b5602b1183ee44a701ce5d"
+source = "git+https://github.com/thomasmost/osmena?rev=0c4d71db86bd7843d9ae194605eb05a92730dd80#0c4d71db86bd7843d9ae194605eb05a92730dd80"
 dependencies = [
  "dpi",
  "glow",
@@ -2259,7 +2259,7 @@ dependencies = [
 [[package]]
 name = "osmena-shell"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=54cbdb2dfbe310d060b5602b1183ee44a701ce5d#54cbdb2dfbe310d060b5602b1183ee44a701ce5d"
+source = "git+https://github.com/thomasmost/osmena?rev=0c4d71db86bd7843d9ae194605eb05a92730dd80#0c4d71db86bd7843d9ae194605eb05a92730dd80"
 dependencies = [
  "arboard",
  "clap",
@@ -2268,6 +2268,7 @@ dependencies = [
  "egui-winit",
  "egui_glow",
  "glow",
+ "keyboard-types",
  "log",
  "osmena-chrome",
  "osmena-core",
@@ -2280,7 +2281,7 @@ dependencies = [
 [[package]]
 name = "osmena-xtask"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=54cbdb2dfbe310d060b5602b1183ee44a701ce5d#54cbdb2dfbe310d060b5602b1183ee44a701ce5d"
+source = "git+https://github.com/thomasmost/osmena?rev=0c4d71db86bd7843d9ae194605eb05a92730dd80#0c4d71db86bd7843d9ae194605eb05a92730dd80"
 dependencies = [
  "icns",
  "ico",

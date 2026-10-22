@@ -50,9 +50,10 @@ pub struct TabHost {
     /// The page area's top-left on screen, logical pixels; shared with
     /// every tab's view state.
     origin: Rc<Cell<(i32, i32)>>,
-    /// Keyboard modifier flags from the last key event, for mouse events.
-    key_flags: Cell<u32>,
-    /// Mouse buttons currently held, as CEF event flags.
+    /// Mouse buttons currently held, as CEF event flags. The keyboard
+    /// modifiers are not kept here: every pointer event brings its own
+    /// from the shell, whose window state knows about a modifier
+    /// released while the window was not focused.
     button_flags: Cell<u32>,
     last_click: RefCell<Option<LastClick>>,
     last_pointer: Cell<(i32, i32)>,
@@ -84,7 +85,6 @@ impl TabHost {
             scale: Cell::new(scale),
             content_size: Cell::new((1024, 768)),
             origin: Rc::new(Cell::new((0, 0))),
-            key_flags: Cell::new(0),
             button_flags: Cell::new(0),
             last_click: RefCell::new(None),
             last_pointer: Cell::new((0, 0)),
@@ -314,10 +314,11 @@ impl TabHostApi for TabHost {
             y: to_dip(y),
             modifiers: flags,
         };
-        let flags = self.key_flags.get() | self.button_flags.get();
+        let buttons = self.button_flags.get();
         match input {
-            EngineInput::MouseMove { x, y } => {
+            EngineInput::MouseMove { x, y, modifiers } => {
                 self.last_pointer.set((to_dip(x), to_dip(y)));
+                let flags = input::modifier_flags(modifiers) | buttons;
                 host.send_mouse_move_event(Some(&mouse(x, y, flags)), 0);
             }
             EngineInput::MouseLeft => {
@@ -325,7 +326,7 @@ impl TabHostApi for TabHost {
                 let event = MouseEvent {
                     x,
                     y,
-                    modifiers: flags,
+                    modifiers: buttons,
                 };
                 host.send_mouse_move_event(Some(&event), 1);
             }
@@ -334,20 +335,22 @@ impl TabHostApi for TabHost {
                 button,
                 x,
                 y,
+                modifiers,
             } => {
                 let Some(kind) = button_type(button) else {
                     return;
                 };
+                let keys = input::modifier_flags(modifiers);
                 let (count, flags) = match action {
                     ButtonAction::Down => {
                         let count = self.click_count(button, x, y);
                         self.button_flags
                             .set(self.button_flags.get() | input::button_flag(button));
-                        (count, self.key_flags.get() | self.button_flags.get())
+                        (count, keys | self.button_flags.get())
                     }
                     ButtonAction::Up => {
                         // The flags of a release still name the button.
-                        let flags = self.key_flags.get() | self.button_flags.get();
+                        let flags = keys | self.button_flags.get();
                         self.button_flags
                             .set(self.button_flags.get() & !input::button_flag(button));
                         let count = self
@@ -365,7 +368,14 @@ impl TabHostApi for TabHost {
                     count,
                 );
             }
-            EngineInput::Wheel { dx, dy, x, y } => {
+            EngineInput::Wheel {
+                dx,
+                dy,
+                x,
+                y,
+                modifiers,
+            } => {
+                let flags = input::modifier_flags(modifiers) | buttons;
                 host.send_mouse_wheel_event(
                     Some(&mouse(x, y, flags)),
                     (dx / f64::from(scale)).round() as i32,
@@ -373,7 +383,6 @@ impl TabHostApi for TabHost {
                 );
             }
             EngineInput::Key(key) => {
-                self.key_flags.set(input::modifier_flags(key.modifiers));
                 for spec in input::key_events(&key) {
                     let event = KeyEvent {
                         type_: match spec.kind {
@@ -498,6 +507,7 @@ impl TabHostApi for TabHost {
             height,
             bgra: &pixels,
             fresh,
+            dirty: &[],
         }));
     }
 }

@@ -8,6 +8,8 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- The back and forward buttons of a mouse go back and forward in the
+  active tab (osmena).
 - A macOS build for Intel Macs. CI packages an Intel bundle
   (`nautilus-macos-15-intel`, `Nautilus-macos-x86_64.zip`) next to the
   Apple silicon one, which is now named `Nautilus-macos-arm64.zip`.
@@ -25,6 +27,21 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- Clicking a link sometimes downloaded it instead of opening it, and
+  sometimes opened it in a background tab, after the user had switched
+  windows with Alt+Tab or closed a tab with Ctrl+W. Nautilus stamped
+  mouse events with the modifiers of the last key event it saw, and
+  Windows sends no Alt release when Alt+Tab takes the focus (nor does
+  a closed tab get its Ctrl release), so the next click on a link was
+  an Alt+click (save link) or a Ctrl+click (open in background). Mouse
+  events now carry the modifiers from the window's own state (osmena).
+- A mouse button held in a page when the window lost focus, or when a
+  keyboard tab switch happened mid-drag, stayed down in that page; the
+  shell now releases it there (osmena).
+- The window redrew continuously, spinning Chromium's message loop each
+  time, while the address bar had focus (osmena).
+- A folder's drop-down list stayed open after a click on the page
+  (osmena).
 - Tabs never showed their page's favicon: the list of icon URLs CEF
   hands the engine came out empty through the `cef` crate's clone
   (`docs/upstream-issues.md` C5); it is read through the raw list now.
