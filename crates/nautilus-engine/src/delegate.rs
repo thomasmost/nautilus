@@ -1243,9 +1243,16 @@ fn image_from(image: &mut Image) -> Option<RgbaImage> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditCommand, edit_command, escape_html, strings_of};
+    #[cfg(not(target_os = "macos"))]
+    use super::strings_of;
+    use super::{EditCommand, edit_command, escape_html};
+    #[cfg(not(target_os = "macos"))]
     use cef::CefStringList;
 
+    /// Calls into libcef, which on macOS is loaded at run time from the
+    /// app bundle (`LibraryLoader` in `engine.rs`): a test binary there
+    /// has no library to call and crashes, so the test runs elsewhere.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_lent_string_list_is_read_through_its_handle() {
         let mut list = CefStringList::new();
