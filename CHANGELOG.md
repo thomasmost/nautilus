@@ -8,6 +8,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- Tabs in the strip are all one standard width instead of each taking
+  its title's width; when they no longer fit they all shrink alike,
+  down to a minimum, and only then does the strip scroll. Titles that
+  do not fit are elided, and a narrow inactive tab shows its close
+  control only while hovered (osmena).
 - The tab strip fades from the chrome colour at its top into the
   toolbar at its bottom edge instead of meeting it along a hard line
   (osmena).
