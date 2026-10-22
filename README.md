@@ -391,6 +391,14 @@ Upstream causes and the features they block are tracked in
   removal in its preferences up to ten seconds later, so closing the
   browser within that time keeps the process alive, windowless, until
   it has.
+- **No H.264 video or AAC audio.** The CEF binaries Nautilus builds
+  against are open-source Chromium builds without the patented codecs
+  (Chrome ships them under Google's licence). Pages that serve only
+  H.264 show their player's "missing codecs" message; VP8, VP9, AV1,
+  Opus, and Vorbis play, so YouTube and most large services work. The
+  fix is a CEF built from source with `proprietary_codecs=true`, a
+  full Chromium build per platform redone on every CEF bump; not
+  planned.
 - No macOS application menu: winit's default menu is turned off so that
   Cmd+Q reaches Nautilus's own shortcut handling. Chromium serves the
   editing shortcuts in pages (Cmd+C and the rest) from the Edit menu on

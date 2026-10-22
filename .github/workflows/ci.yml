@@ -28,6 +28,12 @@ jobs:
         include:
           - os: macos-15
             check-icons: true
+          # Intel Macs. GitHub retires its Intel runners with the
+          # macOS 15 image, expected in fall 2027; decide in 2027
+          # whether the Intel build is still worth keeping (README,
+          # Known limitations).
+          - os: macos-15-intel
+            check-icons: false
           - os: windows-2025
             check-icons: false
     steps:
@@ -80,16 +86,17 @@ jobs:
     name: package ${{ matrix.os }}
     needs: check
     # Packaging runs on pushes to main only: the Windows installer from
-    # cargo-packager, and the macOS app bundle from `cargo xtask
-    # bundle-mac`, which is then started once on the runner as a smoke
-    # test (README.md, Packaging).
+    # cargo-packager, and the macOS app bundles (Apple silicon from
+    # macos-15, Intel from macos-15-intel) from `cargo xtask
+    # bundle-mac`, each started once on its runner as a smoke test
+    # (README.md, Packaging).
     if: github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2025, macos-15]
+        os: [windows-2025, macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -175,19 +182,22 @@ jobs:
             echo "::error::the page's title never reached the browser"
             exit 1
           fi
+      # The zips carry the architecture (`arm64` or `x86_64`) so the
+      # two macOS artifacts' files tell apart once downloaded.
       - if: runner.os == 'macOS'
         name: Zip the bundle
         run: |
           cd target/release
-          ditto -c -k --keepParent Nautilus.app Nautilus-macos.zip
-          ditto -c -k --keepParent Nautilus.dSYM Nautilus.dSYM.zip
+          arch=$(uname -m)
+          ditto -c -k --keepParent Nautilus.app "Nautilus-macos-$arch.zip"
+          ditto -c -k --keepParent Nautilus.dSYM "Nautilus-$arch.dSYM.zip"
       - if: runner.os == 'macOS' && always()
         uses: actions/upload-artifact@v7
         with:
           name: nautilus-${{ matrix.os }}
           path: |
-            target/release/Nautilus-macos.zip
-            target/release/Nautilus.dSYM.zip
+            target/release/Nautilus-macos-*.zip
+            target/release/Nautilus-*.dSYM.zip
             smoke.log
           if-no-files-found: error
       - if: runner.os == 'macOS' && steps.smoke.outcome == 'failure'

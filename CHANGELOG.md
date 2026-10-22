@@ -6,6 +6,12 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- A macOS build for Intel Macs. CI packages an Intel bundle
+  (`nautilus-macos-15-intel`, `Nautilus-macos-x86_64.zip`) next to the
+  Apple silicon one, which is now named `Nautilus-macos-arm64.zip`.
+
 ### Changed
 
 - Tabs in the strip are all one standard width instead of each taking

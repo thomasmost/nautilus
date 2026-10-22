@@ -329,6 +329,16 @@ come with that line), and a clipboard check: a page's
 succeed on a click in a windowless tab (the user reported copy
 buttons failing; not reproduced, site unknown).
 
+Added 2026-10-21 (evening): the Intel macOS build, as a third entry in
+both CI matrices (`macos-15-intel`); the zips carry the architecture.
+Nothing in the code is architecture-specific: the cef crate fetches
+the CEF distribution for the build's target and the bundling xtask
+names the framework directory by `target_arch`. Not verified by hand
+(no Intel Mac; the Intel bundle runs under Rosetta on Apple silicon).
+GitHub retires the Intel runners with the macOS 15 image, expected in
+fall 2027: decide in 2027 whether to keep the build (README,
+Packaging).
+
 Added 2026-10-21, from the user's reports on the installed Windows
 build: (a) "Add to Chrome" on the Proton Pass store page crashed the
 browser every time; a debugger attached to the live process plus CEF's
