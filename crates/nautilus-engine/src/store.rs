@@ -194,10 +194,6 @@ wrap_render_process_handler! {
                 return;
             };
             let url = CefString::from(&frame.url()).to_string();
-            {
-                let (mut r, mut e) = (None, None);
-                context.eval(Some(&CefString::from(format!("console.log('nautilus-diag context main={} url={url}')", frame.is_main()).as_str())), None, 0, Some(&mut r), Some(&mut e));
-            }
             if frame.is_main() == 0 {
                 return;
             }

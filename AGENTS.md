@@ -214,6 +214,11 @@ Ninja on `PATH`:
   facts this relies on: `V8Context::eval` does nothing unless both
   `retval` and `exception` are `Some(&mut None)`, and doc comments are
   not accepted inside `wrap_*!` macro invocations.
+- **A string list CEF lends a handler is read through its handle.**
+  `CefStringList::clone` of a lent list is empty (C5 in
+  `docs/upstream-issues.md`), so `strings_of` in `delegate.rs` reads
+  `cef::sys::cef_string_list_value` directly; favicons come through
+  it. Never `list.clone().into_iter()` on a handler argument.
 - **Browsers Chromium opens on its own get the default client.** An
   extension's `chrome.tabs.create`, or a link from the management page,
   makes Chromium create a browser Nautilus cannot show;
@@ -312,6 +317,17 @@ links; (9) a second window and tab drags; (10) Cmd+Q and the Dock's
 Quit both exit with no `Nautilus Helper` process left. Known gaps on
 macOS, not bugs: no `.dmg`, ad-hoc signature only, no application menu
 (Cmd+H, Cmd+M do nothing), `cargo run` cannot start Chromium.
+
+Added 2026-10-21 (later): favicons (never shown: the `cef` crate's
+string-list clone, C5; fixed with `strings_of`), a log line naming
+every download with its MIME type and `Content-Disposition` (the
+user reports a link in Gmail sometimes downloading instead of
+opening; a scripted walk of ups.com links, a Google redirect, and a
+`target=_blank` link found no download, so the next report should
+come with that line), and a clipboard check: a page's
+`navigator.clipboard.writeText` and `execCommand("copy")` both
+succeed on a click in a windowless tab (the user reported copy
+buttons failing; not reproduced, site unknown).
 
 Added 2026-10-21, from the user's reports on the installed Windows
 build: (a) "Add to Chrome" on the Proton Pass store page crashed the

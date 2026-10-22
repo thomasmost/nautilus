@@ -649,9 +649,8 @@ wrap_display_handler! {
             let Some(host) = browser.host() else {
                 return;
             };
-            // The first listed icon; Chromium orders them by preference. The
-            // clone shares the borrowed list; iterating consumes the clone.
-            let Some(first) = icon_urls.clone().into_iter().next() else {
+            // The first listed icon; Chromium orders them by preference.
+            let Some(first) = strings_of(icon_urls).into_iter().next() else {
                 return;
             };
             let mut callback = FaviconCallback::new(self.view.clone());
@@ -1047,10 +1046,20 @@ wrap_download_handler! {
         fn on_before_download(
             &self,
             _browser: Option<&mut Browser>,
-            _download_item: Option<&mut DownloadItem>,
-            _suggested_name: Option<&CefString>,
+            download_item: Option<&mut DownloadItem>,
+            suggested_name: Option<&CefString>,
             callback: Option<&mut BeforeDownloadCallback>,
         ) -> ::std::os::raw::c_int {
+            if let Some(item) = download_item {
+                // What is being saved and why it is a download, for the log.
+                log::info!(
+                    "download {:?} ({}, {:?}) from {}",
+                    suggested_name.map(CefString::to_string).unwrap_or_default(),
+                    CefString::from(&item.mime_type()),
+                    CefString::from(&item.content_disposition()).to_string(),
+                    CefString::from(&item.url())
+                );
+            }
             let Some(callback) = callback else {
                 return 0;
             };
@@ -1158,6 +1167,35 @@ wrap_download_image_callback! {
     }
 }
 
+/// The strings of a list CEF lent to a handler, read through the list's
+/// raw handle. The obvious `list.clone().into_iter()` yields nothing:
+/// the cef crate (154.5.0) clones a borrowed list by copying the
+/// opaque struct behind its pointer, and the copy has no handle to
+/// read from (`docs/upstream-issues.md`).
+pub(crate) fn strings_of(list: &mut CefStringList) -> Vec<String> {
+    let handle: *mut cef::sys::_cef_string_list_t = list.into();
+    if handle.is_null() {
+        return Vec::new();
+    }
+    // SAFETY: `handle` is the live list CEF passed to the handler, and
+    // `value` is a zeroed string the list fills with its own copy,
+    // which `cef_string_utf16_clear` releases once read.
+    unsafe {
+        let count = cef::sys::cef_string_list_size(handle);
+        (0..count)
+            .filter_map(|index| {
+                let mut value: cef::sys::cef_string_utf16_t = std::mem::zeroed();
+                if cef::sys::cef_string_list_value(handle, index, &mut value) == 0 {
+                    return None;
+                }
+                let string = CefString::from(std::ptr::from_ref(&value)).to_string();
+                cef::sys::cef_string_utf16_clear(&mut value);
+                Some(string)
+            })
+            .collect()
+    }
+}
+
 /// Chromium's image at scale 1 as straight RGBA8.
 fn image_from(image: &mut Image) -> Option<RgbaImage> {
     if image.is_empty() != 0 {
@@ -1187,7 +1225,20 @@ fn image_from(image: &mut Image) -> Option<RgbaImage> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditCommand, edit_command, escape_html};
+    use super::{EditCommand, edit_command, escape_html, strings_of};
+    use cef::CefStringList;
+
+    #[test]
+    fn a_lent_string_list_is_read_through_its_handle() {
+        let mut list = CefStringList::new();
+        assert!(list.append("https://a.test/icon.png"));
+        assert!(list.append("https://a.test/icon.svg"));
+        assert_eq!(
+            strings_of(&mut list),
+            ["https://a.test/icon.png", "https://a.test/icon.svg"]
+        );
+        assert!(strings_of(&mut CefStringList::new()).is_empty());
+    }
     use crate::input::{FLAG_ALT, FLAG_COMMAND, FLAG_CONTROL, FLAG_SHIFT};
 
     #[test]

@@ -48,6 +48,18 @@ bundle for its examples. **Blocks:** `cargo run` on macOS.
 (`xtask/src/bundle_mac.rs`); developing on macOS means rebuilding the
 bundle and running the executable inside it.
 
+### C5: the `cef` crate's clone of a lent string list is empty
+
+A handler argument such as `on_favicon_urlchange`'s `icon_urls` is a
+`CefStringList` wrapping the pointer CEF lent; `CefStringList::clone`
+copies the opaque struct behind the pointer, and the copy has no handle,
+so `list.clone().into_iter()` (the only iteration the crate offers, and
+it consumes the list) yields nothing. `cef` 154.5.0; no upstream issue
+found. **Blocks:** nothing now. **Workaround (2026-10-21):**
+`strings_of` in `delegate.rs` reads such a list through
+`cef::sys::cef_string_list_size` and `cef_string_list_value`. Favicons
+never showed before it.
+
 ## egui and winit
 
 ### E1: IME is enabled only for egui's own text fields

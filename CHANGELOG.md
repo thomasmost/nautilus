@@ -14,6 +14,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- Tabs never showed their page's favicon: the list of icon URLs CEF
+  hands the engine came out empty through the `cef` crate's clone
+  (`docs/upstream-issues.md` C5); it is read through the raw list now.
 - "Add to Chrome" on a Chrome Web Store page crashed the browser.
   The store calls Chromium's `webstorePrivate` API, which answers with
   the install dialog modal to the tab's native window; a windowless
