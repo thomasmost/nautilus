@@ -308,13 +308,20 @@ distribution at `CEF_PATH`, and the five helper apps beside it, `Nautilus
 Helper`, `… (GPU)`, `… (Renderer)`, `… (Plugin)`, `… (Alerts)`, each a
 copy of `nautilus-helper`), writes the property lists, and signs the
 bundle ad hoc (Apple silicon runs no unsigned code; there is no
-Developer ID yet). CI builds it on every push to `main`, starts it once
-on the runner as a smoke test (a local page with `--exit-after`: the
-browser must exit cleanly and must have read the page's title, which
-proves the helper processes ran from the bundle), and uploads the
-workflow artifact `nautilus-macos-15` with `Nautilus-macos.zip`,
-`Nautilus.dSYM.zip` (the symbols, for crash logs) and the smoke test's
-log. A bundle downloaded from CI carries the quarantine attribute and,
+Developer ID yet). CI builds it on every push to `main` for both Mac
+architectures, on an Apple silicon runner and on an Intel one (CEF
+ships a distribution for each, and the cef crate picks the one for
+the build's target), starts each once on its runner as a smoke test
+(a local page with `--exit-after`: the browser must exit cleanly and
+must have read the page's title, which proves the helper processes
+ran from the bundle), and uploads the workflow artifacts
+`nautilus-macos-15` (Apple silicon) and `nautilus-macos-15-intel`
+(Intel), each with `Nautilus-macos-<arch>.zip` (`arm64` or `x86_64`),
+`Nautilus-<arch>.dSYM.zip` (the symbols, for crash logs) and the
+smoke test's log. The Intel bundle also runs on Apple silicon under
+Rosetta, which is how to try it without an Intel Mac; the Apple
+silicon bundle does not run on an Intel Mac. A bundle downloaded from
+CI carries the quarantine attribute and,
 being signed ad hoc, is refused as "damaged" when opened; clear the
 attribute first:
 
@@ -322,7 +329,15 @@ attribute first:
 xattr -dr com.apple.quarantine Nautilus.app
 ```
 
-There is no `.dmg` yet.
+There is no `.dmg` yet, and no universal bundle: the CEF framework is
+a few hundred megabytes per architecture, so the two bundles stay
+separate.
+
+GitHub retires its Intel macOS runners together with the macOS 15
+image, expected in fall 2027. Revisit the Intel build in 2027: keep
+it only if Intel Macs still matter then, and otherwise drop the
+`macos-15-intel` entries from `.github/workflows/ci.yml` and this
+section.
 
 ### Windows
 
