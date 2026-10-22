@@ -31,6 +31,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- Slow scrolling with a precision wheel or a trackpad moved the page in
+  jumps or not at all: each event's distance was rounded to whole
+  pixels on its own, and a small one rounded to nothing. The fraction
+  is now carried to the next event.
 - Clicking a link sometimes downloaded it instead of opening it, and
   sometimes opened it in a background tab, after the user had switched
   windows with Alt+Tab or closed a tab with Ctrl+W. Nautilus stamped

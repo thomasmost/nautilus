@@ -57,6 +57,9 @@ pub struct TabHost {
     button_flags: Cell<u32>,
     last_click: RefCell<Option<LastClick>>,
     last_pointer: Cell<(i32, i32)>,
+    /// The fraction of a wheel step not yet sent, per axis (CEF takes
+    /// whole steps; see `input::wheel_steps`).
+    wheel_carry: Cell<(f64, f64)>,
 }
 
 struct LastClick {
@@ -88,6 +91,7 @@ impl TabHost {
             button_flags: Cell::new(0),
             last_click: RefCell::new(None),
             last_pointer: Cell::new((0, 0)),
+            wheel_carry: Cell::new((0.0, 0.0)),
         })
     }
 
@@ -376,11 +380,14 @@ impl TabHostApi for TabHost {
                 modifiers,
             } => {
                 let flags = input::modifier_flags(modifiers) | buttons;
-                host.send_mouse_wheel_event(
-                    Some(&mouse(x, y, flags)),
-                    (dx / f64::from(scale)).round() as i32,
-                    (dy / f64::from(scale)).round() as i32,
-                );
+                let (carry_x, carry_y) = self.wheel_carry.get();
+                let (steps_x, carry_x) = input::wheel_steps(dx / f64::from(scale), carry_x);
+                let (steps_y, carry_y) = input::wheel_steps(dy / f64::from(scale), carry_y);
+                self.wheel_carry.set((carry_x, carry_y));
+                if steps_x == 0 && steps_y == 0 {
+                    return;
+                }
+                host.send_mouse_wheel_event(Some(&mouse(x, y, flags)), steps_x, steps_y);
             }
             EngineInput::Key(key) => {
                 for spec in input::key_events(&key) {

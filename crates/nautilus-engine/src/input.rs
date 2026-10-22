@@ -36,6 +36,17 @@ pub(crate) fn modifier_flags(modifiers: Modifiers) -> u32 {
     flags
 }
 
+/// The whole wheel steps to send for a delta of `pixels` (in CEF's
+/// units) on top of the fraction `carried` from earlier events, and the
+/// fraction to carry on. CEF takes whole numbers; a precision wheel or
+/// a trackpad sends less than one per event, which rounding each event
+/// on its own would lose entirely.
+pub(crate) fn wheel_steps(pixels: f64, carried: f64) -> (i32, f64) {
+    let total = pixels + carried;
+    let whole = total.trunc();
+    (whole as i32, total - whole)
+}
+
 pub(crate) fn button_flag(button: MouseButton) -> u32 {
     match button {
         MouseButton::Primary => FLAG_LEFT_BUTTON,
@@ -240,6 +251,23 @@ mod tests {
         ));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].windows_key_code, 0x10);
+    }
+
+    #[test]
+    fn wheel_steps_carry_the_fraction_to_the_next_event() {
+        // Three events of 0.4 make one step on the third.
+        let (steps, carried) = wheel_steps(0.4, 0.0);
+        assert_eq!((steps, carried), (0, 0.4));
+        let (steps, carried) = wheel_steps(0.4, carried);
+        assert_eq!(steps, 0);
+        let (steps, carried) = wheel_steps(0.4, carried);
+        assert_eq!(steps, 1);
+        assert!(carried.abs() < 0.3);
+        // A whole notch is sent at once, and a reversal does not borrow.
+        assert_eq!(wheel_steps(-3.0, 0.0), (-3, 0.0));
+        let (steps, carried) = wheel_steps(-0.5, 0.25);
+        assert_eq!(steps, 0);
+        assert!((carried + 0.25).abs() < 1e-9);
     }
 
     #[test]
