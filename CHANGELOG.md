@@ -16,6 +16,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- A paint of the page copies and uploads only the rectangles Chromium
+  says changed (a blinking caret, a hover, a GIF) instead of the whole
+  frame, when the frame's size is unchanged and no `<select>` popup is
+  open.
 - Tabs in the strip are all one standard width instead of each taking
   its title's width; when they no longer fit they all shrink alike,
   down to a minimum, and only then does the strip scroll. Titles that

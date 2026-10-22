@@ -501,13 +501,14 @@ impl TabHostApi for TabHost {
         }
         let (width, height) = frame.size();
         let fresh = frame.take_dirty();
+        let dirty = frame.dirty_rects();
         let pixels = frame.pixels();
         sink(PagePaint::Frame(FrameRef {
             width,
             height,
             bgra: &pixels,
             fresh,
-            dirty: &[],
+            dirty,
         }));
     }
 }

@@ -38,10 +38,23 @@ use osmena_core::{
 };
 use url::Url;
 
+use osmena_engine::PixelRect;
+
 use crate::extensions::ExtensionManager;
 use crate::frame::Frame;
 use crate::input;
 use crate::store::StoreRequest;
+
+/// A CEF dirty rectangle as the shell's; `None` if it is not a
+/// rectangle of pixels at all (a negative edge or size).
+fn pixel_rect(rect: &Rect) -> Option<PixelRect> {
+    Some(PixelRect {
+        x: u32::try_from(rect.x).ok()?,
+        y: u32::try_from(rect.y).ok()?,
+        width: u32::try_from(rect.width).ok()?,
+        height: u32::try_from(rect.height).ok()?,
+    })
+}
 
 /// The native cursor handle `on_cursor_change` receives. The `cef` crate's
 /// generated handler signature names `CursorHandle` on Windows and Linux
@@ -440,7 +453,7 @@ wrap_render_handler! {
             &self,
             _browser: Option<&mut Browser>,
             type_: PaintElementType,
-            _dirty_rects: Option<&[Rect]>,
+            dirty_rects: Option<&[Rect]>,
             buffer: *const u8,
             width: ::std::os::raw::c_int,
             height: ::std::os::raw::c_int,
@@ -456,7 +469,12 @@ wrap_render_handler! {
             if type_ == PaintElementType::POPUP {
                 frame.paint_popup(width as u32, height as u32, pixels);
             } else {
-                frame.paint_view(width as u32, height as u32, pixels);
+                let rects: Vec<PixelRect> = dirty_rects
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(pixel_rect)
+                    .collect();
+                frame.paint_view(width as u32, height as u32, pixels, &rects);
             }
             drop(frame);
             self.view.push(EngineEvent::FrameReady(self.view.tab));
