@@ -6,7 +6,8 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-21 (the store shim; Windows key events)._
+_Last updated: 2026-10-22 (pointer modifiers from the shell; dirty
+rectangles; wheel fractions)._
 
 ## Architecture
 
@@ -317,6 +318,24 @@ links; (9) a second window and tab drags; (10) Cmd+Q and the Dock's
 Quit both exit with no `Nautilus Helper` process left. Known gaps on
 macOS, not bugs: no `.dmg`, ad-hoc signature only, no application menu
 (Cmd+H, Cmd+M do nothing), `cargo run` cannot start Chromium.
+
+Added 2026-10-22, from a review of click capture and the shell/page
+boundary (osmena 0c4d71d): the user's "a link sometimes opens a
+download" report is explained by the host stamping mouse events with
+the modifiers of the last key event it saw; Windows sends no Alt
+release when Alt+Tab takes the focus (nor does a tab closed by Ctrl+W
+get its Ctrl release), so the next click on a link was an Alt+click,
+which Chromium treats as "save link as". The host keeps no key
+modifiers now; every pointer event brings its own from the shell, and
+the shell releases held keys and buttons in the page on focus loss. Also
+this day: `on_paint` copies only CEF's dirty rectangles into the frame
+at an unchanged size and reports them (`Frame::dirty_rects`,
+`FrameRef::dirty`) so the shell uploads only those; wheel fractions
+carried between events (`input::wheel_steps`). Verified: `cargo test
+--workspace`, clippy, formatting. Not verified by hand: any of it in a
+running browser. The first thing to try: hold Alt, Alt+Tab away and
+back with the mouse, click a link; it should open in place and the
+download log line should not appear.
 
 Added 2026-10-21 (later): favicons (never shown: the `cef` crate's
 string-list clone, C5; fixed with `strings_of`), a log line naming
