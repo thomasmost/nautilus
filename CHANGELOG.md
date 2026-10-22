@@ -8,6 +8,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Tabs are reordered by dragging them along the strip; the others
+  slide out of the way and tabs slide to their places after a close or
+  reorder (osmena).
 - The back and forward buttons of a mouse go back and forward in the
   active tab (osmena).
 - A macOS build for Intel Macs. CI packages an Intel bundle
