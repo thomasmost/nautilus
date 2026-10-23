@@ -8,6 +8,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- A fresh profile's chrome is Shell, a warm sand gradient over the tab
+  strip fading into an off-white toolbar; the other swatches are still
+  in the settings window. A profile that already chose a colour keeps
+  it (osmena).
 - On macOS, the menu bar: Nautilus (About, Settings…, Services, Hide,
   Hide Others, Show All, Quit), File, Edit, View, History, Bookmarks,
   Profiles, Tab and Window, with the keymap's shortcuts. The Edit
@@ -29,6 +33,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- The chrome's typeface is Inter; the address bar and the launcher's
+  field are pills, every input has the same padding, and widgets round
+  like the tabs (osmena).
 - A paint of the page copies and uploads only the rectangles Chromium
   says changed (a blinking caret, a hover, a GIF) instead of the whole
   frame, when the frame's size is unchanged and no `<select>` popup is
