@@ -196,9 +196,6 @@ impl Engine {
         let extensions =
             ExtensionManager::start(delegate.clone(), &engine_dir, UnpackQueue::new(waker));
         delegate.set_extensions(&extensions);
-        if let Ok(id) = std::env::var("NAUTILUS_TEST_INSTALL") {
-            extensions.install(osmena_core::ExtensionSource::Store { id });
-        }
         Ok(Engine {
             delegate,
             extensions,
