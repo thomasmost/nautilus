@@ -162,6 +162,7 @@ impl TabHostApi for TabHost {
             frame: RefCell::new(Frame::default()),
             closing: Cell::new(false),
             context_menu: RefCell::new(None),
+            focused: Cell::new(false),
         });
         let mut client = client_for(view.clone());
         let window_info = WindowInfo::default().set_as_windowless(self.parent);
@@ -261,8 +262,11 @@ impl TabHostApi for TabHost {
     }
 
     fn set_focused(&self, tab: TabId, focused: bool) {
-        if focused && let Some(entry) = self.tabs.get(&tab) {
-            self.delegate.set_last_focused(tab, &entry.browser);
+        if let Some(entry) = self.tabs.get(&tab) {
+            entry.view.focused.set(focused);
+            if focused {
+                self.delegate.set_last_focused(tab, &entry.browser);
+            }
         }
         self.with_host(tab, |host| host.set_focus(i32::from(focused)));
     }

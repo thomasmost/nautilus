@@ -24,11 +24,11 @@ use cef::{
     ImplRenderHandler, ImplRequestHandler, ImplRunContextMenuCallback, KeyEvent, KeyEventType,
     KeyboardHandler, LifeSpanHandler, LoadHandler, LogSeverity, MenuModel, PaintElementType,
     ProcessId, ProcessMessage, Rect, RenderHandler, RequestHandler, RunContextMenuCallback,
-    ScreenInfo, TerminationStatus, WindowOpenDisposition, WrapClient, WrapContextMenuHandler,
-    WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback,
-    WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
-    WrapRequestHandler, wrap_client, wrap_context_menu_handler, wrap_dialog_handler,
-    wrap_display_handler, wrap_download_handler, wrap_download_image_callback,
+    ScreenInfo, TerminationStatus, TransitionType, WindowOpenDisposition, WrapClient,
+    WrapContextMenuHandler, WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler,
+    WrapDownloadImageCallback, WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler,
+    WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_context_menu_handler,
+    wrap_dialog_handler, wrap_display_handler, wrap_download_handler, wrap_download_image_callback,
     wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
     wrap_request_handler,
 };
@@ -225,6 +225,10 @@ pub(crate) struct ViewState {
     /// Where the page's context menu was last opened, until the shell
     /// says the menu closed.
     pub context_menu: RefCell<Option<MenuPoint>>,
+    /// Whether the shell last said this tab has keyboard focus, so the
+    /// focus can be told again to a renderer that arrives later
+    /// (`on_load_start`).
+    pub focused: Cell<bool>,
 }
 
 impl ViewState {
@@ -545,6 +549,26 @@ wrap_load_handler! {
     }
 
     impl LoadHandler {
+        // A navigation to another site commits in a new renderer process,
+        // and Chromium hands the new widget the view's focus only if the
+        // view reports having it, which a windowless view never does. The
+        // page then has no focus: no caret in its fields, grey selection,
+        // `document.hasFocus()` false, until the window loses and regains
+        // focus. Tell the new widget what the shell last told us.
+        fn on_load_start(
+            &self,
+            browser: Option<&mut Browser>,
+            frame: Option<&mut CefFrame>,
+            _transition_type: TransitionType,
+        ) {
+            if self.view.focused.get()
+                && frame.is_some_and(|f| f.is_main() != 0)
+                && let Some(host) = browser.and_then(|b| b.host())
+            {
+                host.set_focus(1);
+            }
+        }
+
         fn on_loading_state_change(
             &self,
             browser: Option<&mut Browser>,

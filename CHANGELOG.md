@@ -39,6 +39,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- Text fields showed no caret, and selections were grey, on any page
+  reached by navigating from one site to another (a search typed on a
+  homepage, a link to another domain) until the window lost and
+  regained focus. Chromium starts the renderer of the new site without
+  the page focus and asks the view whether it has it, which a
+  windowless view never confirms; the engine now tells each committed
+  main-frame navigation the focus the shell last gave the tab.
 - Slow scrolling with a precision wheel or a trackpad moved the page in
   jumps or not at all: each event's distance was rounded to whole
   pixels on its own, and a small one rounded to nothing. The fraction
