@@ -8,6 +8,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- A new tab (Ctrl+T, the "+" button) opens the launcher, a large field
+  over the window, instead of a blank page: type an address or a
+  search and press Enter, or pick a page from the history's matches;
+  Escape opens nothing. Browsing history (`history.toml` in the
+  profile) and its matches under the address bar as you type (osmena).
 - Tabs are reordered by dragging them along the strip; the others
   slide out of the way and tabs slide to their places after a close or
   reorder (osmena).
