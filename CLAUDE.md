@@ -316,8 +316,12 @@ parent view), "Print…" and "Save link as…" (system dialogs over an
 off-screen browser); (8) Ctrl-click, Cmd-click, and Shift-click on
 links; (9) a second window and tab drags; (10) Cmd+Q and the Dock's
 Quit both exit with no `Nautilus Helper` process left. Known gaps on
-macOS, not bugs: no `.dmg`, ad-hoc signature only, no application menu
-(Cmd+H, Cmd+M do nothing), `cargo run` cannot start Chromium.
+macOS, not bugs: no `.dmg`, ad-hoc signature only, `cargo run` cannot
+start Chromium. The menu bar arrived with osmena on 2026-10-23 and has
+not been tried by hand either: check that Cmd+C/V/X/A/Z still reach
+page fields (the bar now intercepts them and sends `PageCommand`s) and
+the address bar, that Cmd+Q quits through the menu, and that Hide and
+Minimize work.
 
 Added 2026-10-22, from a review of click capture and the shell/page
 boundary (osmena 0c4d71d): the user's "a link sometimes opens a

@@ -414,12 +414,10 @@ Upstream causes and the features they block are tracked in
   fix is a CEF built from source with `proprietary_codecs=true`, a
   full Chromium build per platform redone on every CEF bump; not
   planned.
-- No macOS application menu: winit's default menu is turned off so that
-  Cmd+Q reaches Nautilus's own shortcut handling. Chromium serves the
-  editing shortcuts in pages (Cmd+C and the rest) from the Edit menu on
-  macOS, so Nautilus carries those out itself for a key the page did
-  not handle; other menu-driven shortcuts (Cmd+H to hide, Cmd+M to
-  minimize) do nothing.
+- The macOS menu bar (osmena's: Nautilus, File, Edit, View, History,
+  Bookmarks, Profiles, Tab, Window) has not yet been tried on a Mac by
+  hand. Its Edit entries reach the page as CEF frame commands, the way
+  the page context menu's do.
 - Restore previous windows on launch is stored in `settings.toml` but not yet
   acted on.
 - No bookmarks, history UI, downloads UI, extensions, sync, or auto-update.

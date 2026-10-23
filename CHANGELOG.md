@@ -8,6 +8,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- On macOS, the menu bar: Nautilus (About, Settings…, Services, Hide,
+  Hide Others, Show All, Quit), File, Edit, View, History, Bookmarks,
+  Profiles, Tab and Window, with the keymap's shortcuts. The Edit
+  entries (Cmd+C and the rest) act on the page or on a focused text
+  field of the chrome.
 - A new tab (Ctrl+T, the "+" button) opens the launcher, a large field
   over the window, instead of a blank page: type an address or a
   search and press Enter, or pick a page from the history's matches;
@@ -39,6 +44,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- The new-tab launcher opened dimmed, its field under the grey
+  backdrop, once a launcher had been cancelled by a click outside it
+  (osmena).
 - Text fields showed no caret, and selections were grey, on any page
   reached by navigating from one site to another (a search typed on a
   homepage, a link to another domain) until the window lost and
