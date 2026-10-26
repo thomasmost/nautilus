@@ -8,6 +8,12 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Profiles can be named, coloured and given an avatar, and made and
+  deleted from the browser: the avatar at the toolbar's end opens the
+  Profiles menu (the macOS menu bar has the same), with Edit…, the other
+  profiles, Add Profile… and Delete Profile. A profile may share the
+  Default profile's bookmarks and copy its extensions; history is never
+  shared. The window title names a non-default profile (osmena).
 - A fresh profile's chrome is Shell, a warm sand gradient over the tab
   strip fading into an off-white toolbar; the other swatches are still
   in the settings window. A profile that already chose a colour keeps

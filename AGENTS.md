@@ -6,8 +6,8 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-22 (pointer modifiers from the shell; dirty
-rectangles; wheel fractions)._
+_Last updated: 2026-10-26 (osmena's profiles: name, colour, avatar, the
+Profiles menu and dialog; nothing engine-side changed)._
 
 ## Architecture
 
@@ -284,6 +284,26 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-10-26)
+
+Added 2026-10-26, all of it osmena's (no engine change): profiles with a
+name, colour and avatar, the avatar button at the toolbar's end whose
+menu is the Profiles menu, the profile dialog (Edit…, Add Profile…),
+Delete Profile, shared bookmarks and copied extensions. Copying
+extensions reads the default profile's `extensions.toml` (written by
+the shell on every `ExtensionsChanged`) and calls
+`Engine::install_extension(Store { id })` for each missing id, so an
+unpacked extension in the default profile makes the store install fail
+and the status area says so. Verified on Windows by scripted input on
+the debug build (profile `profile-probe`, deletable): the menu, the
+Edit dialog with its live preview, Save (plum chrome, whale avatar,
+`[profile]` in `settings.toml`), Add Profile (a second Nautilus starts
+for `work-stuff`), the Delete Profile submenu, its confirmation, and the deletion itself (a stale `running.pid` left by a killed browser does not block it).
+Not verified by hand: deleting the current profile (it starts the
+default profile, quits, and removes its directory after
+`cef::shutdown`), the "open in another window" refusal, and anything
+on macOS.
 
 ## Status and handoff (2026-10-21)
 

@@ -22,10 +22,16 @@ this repository holds only what is Chromium's.
   for a new one, or right-click to close them all, move them to a window,
   or open them in another profile.
 - **Profiles.** Each profile has its own settings, cookies, and local
-  storage; `--profile <name>` picks one, and a tab can be handed to another
-  profile from its context menu.
-- **Your colour.** Settings offers a row of swatches that tint the tab strip
-  and toolbar per profile.
+  storage, and a name, a colour and an avatar. The avatar at the
+  toolbar's end opens the Profiles menu (also in the macOS menu bar):
+  Edit… customises the current profile, the other profiles open in a
+  window of their own, Add Profile… makes one (name it, pick its theme
+  colour and avatar, choose whether to share the default profile's
+  bookmarks and whether to copy the default profile's extensions; history is never shared), and Delete Profile removes
+  one. `--profile <dir>` picks one on the command line, and a tab can
+  be handed to another profile from its context menu.
+- **Your colour.** The profile dialog and the settings window offer a row
+  of swatches that tint the tab strip and toolbar per profile.
 - **Sleek by default.** No system title bar: the tab strip is the title
   bar, with the window controls at its end. "Use the system title bar and
   borders" in Settings brings the frame back.
@@ -290,7 +296,26 @@ engine glue. Each item must pass.
     `bookmarks.toml` with the pages, and ☰ → Bookmarks → Work lists
     them with "Open all (n)", which opens each in a new tab. Folders are
     gone after a relaunch; bookmarks stay.
-14. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+14. **Profiles.** Click the avatar at the toolbar's right end (the
+    profile's initial on its colour): the menu lists the current profile
+    (checked) with "Edit…", the other profiles, "Add Profile…" and a
+    "Delete Profile" submenu. "Edit…" opens "Customize your profile"
+    over the page with the name selected, the colour swatches and a grid
+    of avatars; type Alice, click the plum swatch and the whale, tick
+    "Share bookmarks with the Default profile" and Save: the chrome
+    turns plum, the toolbar shows the whale, the window title ends in
+    "– Alice", the menu reads "Alice", and `settings.toml` has
+    `[profile]` with the name, `avatar = "whale"` and `share_bookmarks
+    = true`. "Add Profile…", type Work Stuff and tick "Copy extensions from the Default profile", Add: a second window
+    opens for the new profile (its own colour and avatar, title "– Work
+    Stuff"), and `profiles/work-stuff/settings.toml` exists. From the
+    first window, Delete Profile → Work Stuff asks "Delete “Work
+    Stuff” and everything it holds?"; with the second window still
+    open, Delete reports in the status area that the profile is open in
+    another window; close it and delete again: the directory is gone
+    and the menu no longer lists it. Edit… → "Delete profile…" on a
+    non-default profile hands over to the Default profile and quits.
+15. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging
@@ -416,7 +441,8 @@ Upstream causes and the features they block are tracked in
   planned.
 - The macOS menu bar (osmena's: Nautilus, File, Edit, View, History,
   Bookmarks, Profiles, Tab, Window) has not yet been tried on a Mac by
-  hand. Its Edit entries reach the page as CEF frame commands, the way
+  hand; nor has the Profiles menu there, which since 2026-10-26 lists
+  the profiles by name with Edit…, Add Profile… and Delete Profile. Its Edit entries reach the page as CEF frame commands, the way
   the page context menu's do.
 - Restore previous windows on launch is stored in `settings.toml` but not yet
   acted on.
