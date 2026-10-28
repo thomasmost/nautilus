@@ -6,8 +6,8 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-26 (osmena's profiles: name, colour, avatar, the
-Profiles menu and dialog; nothing engine-side changed)._
+_Last updated: 2026-10-28 (the retrying macOS smoke test and the
+scripted-run environment variables; osmena's avatar palettes)._
 
 ## Architecture
 
@@ -63,6 +63,16 @@ Ninja on `PATH`:
   on `ci/smoke.html`, and uploads it with its dSYM). The release profile
   keeps line tables (`debug = "line-tables-only"`), so the build also
   leaves `nautilus.pdb`; CI uploads it with the installer.
+- Scripted runs: `RUST_LOG=nautilus_engine=debug` logs a tab's browser
+  creation, load start, loading state and title (and the extension
+  manager's page); `NAUTILUS_CHROMIUM_SWITCHES=name,name=value` appends
+  Chromium switches in the browser process
+  (`on_before_command_line_processing`); `NAUTILUS_CEF_LOG=info|verbose`
+  raises CEF's own log level from warnings; `NAUTILUS_TEST_PAGE_SCRIPT`
+  runs a script in a page when its load finishes. The macOS smoke test
+  in CI launches the bundle up to three times on the `ci-smoke`
+  profile because a fresh profile's first launch sometimes loads
+  nothing on the Intel runner (C6 in `docs/upstream-issues.md`).
 
 ## Conventions
 
@@ -284,6 +294,30 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-10-28)
+
+The `package macos-15-intel` job had failed its smoke test twice on
+cba28c0 (the page's title never arrived in 30 s). A branch run with
+more logging (`ci/intel-smoke-diagnosis`, deleted after) showed the
+tab's navigation starting and never committing on a fresh profile's
+first launch, the hidden extensions page likewise, on the previous
+green commit as much as on cba28c0, with `--disable-gpu` as well, and
+never on a second launch of the same profile: an intermittent
+first-launch stall of the Intel runner, not a regression (C6 in
+`docs/upstream-issues.md`). The smoke step now retries a clean launch
+without the title up to three times on the same profile and warns
+when a later attempt is the one that passes. Kept from the diagnosis:
+the debug logs around a tab's life, `NAUTILUS_CHROMIUM_SWITCHES` and
+`NAUTILUS_CEF_LOG` (Commands). Not verified: the stall on a real Intel
+Mac (none available); whether the retry's warning ever fires on Apple
+silicon (it has not stalled there).
+
+Also 2026-10-28, osmena's: the profile dialog's avatars in two
+palettes, "Sea creatures" and "Assorted" (osmena `8a5e79d`). Verified
+on Windows by scripted input: both palettes drawn in six columns with
+Save and Cancel in view, a pick saved as `avatar = "turtle"` and shown
+in the toolbar.
 
 ## Status and handoff (2026-10-26)
 

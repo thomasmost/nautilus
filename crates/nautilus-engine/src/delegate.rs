@@ -520,6 +520,7 @@ wrap_life_span_handler! {
         fn on_after_created(&self, _browser: Option<&mut Browser>) {
             let delegate = &self.view.delegate;
             delegate.live_browsers.set(delegate.live_browsers.get() + 1);
+            log::debug!("tab {:?}: browser created", self.view.tab);
         }
 
         fn do_close(&self, _browser: Option<&mut Browser>) -> ::std::os::raw::c_int {
@@ -561,8 +562,12 @@ wrap_load_handler! {
             frame: Option<&mut CefFrame>,
             _transition_type: TransitionType,
         ) {
+            let main = frame.is_some_and(|f| f.is_main() != 0);
+            if main {
+                log::debug!("tab {:?}: load started", self.view.tab);
+            }
             if self.view.focused.get()
-                && frame.is_some_and(|f| f.is_main() != 0)
+                && main
                 && let Some(host) = browser.and_then(|b| b.host())
             {
                 host.set_focus(1);
@@ -584,6 +589,7 @@ wrap_load_handler! {
                 frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
             }
             let tab = self.view.tab;
+            log::debug!("tab {tab:?}: loading = {}", is_loading != 0);
             self.view.push(EngineEvent::LoadStateChanged {
                 tab,
                 state: if is_loading != 0 {
@@ -674,9 +680,11 @@ wrap_display_handler! {
         }
 
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
+            let title = title.map(CefString::to_string).unwrap_or_default();
+            log::debug!("tab {:?}: title {title:?}", self.view.tab);
             self.view.push(EngineEvent::TitleChanged {
                 tab: self.view.tab,
-                title: title.map(CefString::to_string).unwrap_or_default(),
+                title,
             });
         }
 
@@ -828,6 +836,7 @@ wrap_request_handler! {
             } else {
                 format!("The page's renderer process {what}: {detail} (code {error_code}).")
             };
+            log::warn!("tab {:?}: {reason}", self.view.tab);
             log::error!("tab crashed: {reason}");
             self.view.push(EngineEvent::TabCrashed {
                 tab: self.view.tab,

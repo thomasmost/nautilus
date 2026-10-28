@@ -60,6 +60,32 @@ found. **Blocks:** nothing now. **Workaround (2026-10-21):**
 `cef::sys::cef_string_list_size` and `cef_string_list_value`. Favicons
 never showed before it.
 
+### C6: a fresh profile's first launch sometimes loads nothing on macOS Intel
+
+On GitHub's `macos-15-intel` runner, the first launch of the bundle on
+a profile that does not exist yet sometimes starts every navigation
+and commits none: the tab reports `loading = true` and then no
+`on_load_start`, title, or load end for as long as the browser runs
+(120 s tried), the hidden `chrome://extensions` page never loads
+either, and `--exit-after` still exits cleanly. A second launch of the
+same profile loads within a second, every time so far. Seen in 9 of 17
+fresh launches between 2026-10-23 and 2026-10-28, on the code of
+2026-10-23 as much as on the current one, and with `--disable-gpu`
+too, so it is not the runner's GPU-process crash loop (the runner has
+no GPU; Chromium gives up on the GPU process after a few restarts and
+renders in software either way). Not seen on the Apple silicon runner
+or on Windows; no Intel Mac has been tried by hand. Unexplained:
+Chromium logs nothing about it even at `verbose`. **Blocks:** nothing
+known. **Workaround (2026-10-28):** the CI smoke test launches up to
+three times on the same profile and warns when the title arrives only
+on a later attempt. To dig further, run the bundle on the runner with
+`RUST_LOG=nautilus_engine=debug`, `NAUTILUS_CEF_LOG=verbose` and
+`NAUTILUS_CHROMIUM_SWITCHES` (see `CLAUDE.md`, Commands), and take a
+`spindump` of the stalled browser process; one run with
+`--disable-gpu` and one with `--enable-logging=stderr --v=1` ended in
+a segmentation fault at shutdown (exit 139) after the stall, which a
+plain run does not.
+
 ## egui and winit
 
 ### E1: IME is enabled only for egui's own text fields

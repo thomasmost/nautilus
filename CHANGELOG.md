@@ -14,6 +14,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
   profiles, Add Profile… and Delete Profile. A profile may share the
   Default profile's bookmarks and copy its extensions; history is never
   shared. The window title names a non-default profile (osmena).
+- The profile dialog offers its avatars in two palettes: "Sea
+  creatures" (whale, spouting whale, dolphin, octopus, shell, fish,
+  tropical fish, blowfish, turtle, penguin) and "Assorted" (osmena).
+- Two environment variables for scripted runs: `NAUTILUS_CHROMIUM_SWITCHES`
+  (Chromium command-line switches, comma-separated, `name` or
+  `name=value`) and `NAUTILUS_CEF_LOG` (`info` or `verbose` for
+  Chromium's own log on stderr, warnings otherwise).
 - A fresh profile's chrome is Shell, a warm sand gradient over the tab
   strip fading into an off-white toolbar; the other swatches are still
   in the settings window. A profile that already chose a colour keeps

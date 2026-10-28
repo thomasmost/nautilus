@@ -26,8 +26,10 @@ this repository holds only what is Chromium's.
   toolbar's end opens the Profiles menu (also in the macOS menu bar):
   Edit… customises the current profile, the other profiles open in a
   window of their own, Add Profile… makes one (name it, pick its theme
-  colour and avatar, choose whether to share the default profile's
-  bookmarks and whether to copy the default profile's extensions; history is never shared), and Delete Profile removes
+  colour and an avatar from the sea-creature or the assorted palette,
+  choose whether to share the default profile's bookmarks and whether
+  to copy the default profile's extensions; history is never shared),
+  and Delete Profile removes
   one. `--profile <dir>` picks one on the command line, and a tab can
   be handed to another profile from its context menu.
 - **Your colour.** The profile dialog and the settings window offer a row
@@ -300,8 +302,9 @@ engine glue. Each item must pass.
     profile's initial on its colour): the menu lists the current profile
     (checked) with "Edit…", the other profiles, "Add Profile…" and a
     "Delete Profile" submenu. "Edit…" opens "Customize your profile"
-    over the page with the name selected, the colour swatches and a grid
-    of avatars; type Alice, click the plum swatch and the whale, tick
+    over the page with the name selected, the colour swatches and the
+    avatars (the initial, then the "Sea creatures" and "Assorted"
+    palettes); type Alice, click the plum swatch and the whale, tick
     "Share bookmarks with the Default profile" and Save: the chrome
     turns plum, the toolbar shows the whale, the window title ends in
     "– Alice", the menu reads "Alice", and `settings.toml` has
@@ -339,11 +342,14 @@ ships a distribution for each, and the cef crate picks the one for
 the build's target), starts each once on its runner as a smoke test
 (a local page with `--exit-after`: the browser must exit cleanly and
 must have read the page's title, which proves the helper processes
-ran from the bundle), and uploads the workflow artifacts
+ran from the bundle; a launch that exits cleanly without the title is
+tried again on the same profile, up to three times, because the first
+launch of a fresh profile sometimes stalls on the Intel runner, C6 in
+`docs/upstream-issues.md`), and uploads the workflow artifacts
 `nautilus-macos-15` (Apple silicon) and `nautilus-macos-15-intel`
 (Intel), each with `Nautilus-macos-<arch>.zip` (`arm64` or `x86_64`),
 `Nautilus-<arch>.dSYM.zip` (the symbols, for crash logs) and the
-smoke test's log. The Intel bundle also runs on Apple silicon under
+smoke test's logs. The Intel bundle also runs on Apple silicon under
 Rosetta, which is how to try it without an Intel Mac; the Apple
 silicon bundle does not run on an Intel Mac. A bundle downloaded from
 CI carries the quarantine attribute and,
@@ -417,6 +423,10 @@ Upstream causes and the features they block are tracked in
 - macOS has had one run by hand (2026-10-20: launch, a page, the
   extension manager starting and shutting down); the rest of the manual
   checklist is untried there (see the handoff in `CLAUDE.md`).
+- On GitHub's Intel macOS runner, the first launch of a fresh profile
+  sometimes never loads a page; a second launch does (C6 in
+  `docs/upstream-issues.md`). Not seen on Apple silicon, and no Intel
+  Mac has been tried by hand.
 - Extensions: an action popup on macOS is a borderless child window of
   the browser window (`popup.rs`); it was built from the Windows
   behaviour and not yet clicked by hand. Extension popups see Chromium's own tabs,

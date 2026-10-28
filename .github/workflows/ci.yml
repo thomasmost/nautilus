@@ -141,7 +141,8 @@ jobs:
       # xtask), its symbols, and a smoke run: the bundle is started on
       # a local page with `--exit-after`, must exit cleanly within the
       # time, and must have read the page's title (so Chromium's helper
-      # processes ran from the bundle and rendered it).
+      # processes ran from the bundle and rendered it). The logs of
+      # every launch go up with the bundle.
       - if: runner.os == 'macOS'
         run: cargo xtask bundle-mac
       - if: runner.os == 'macOS'
@@ -158,30 +159,44 @@ jobs:
           set +e
           app=target/release/Nautilus.app
           page="file://$PWD/ci/smoke.html"
-          "$app/Contents/MacOS/Nautilus" --profile ci-smoke --exit-after 30 "$page" > smoke.log 2>&1 &
-          pid=$!
-          for _ in $(seq 1 150); do
-            kill -0 "$pid" 2>/dev/null || break
-            sleep 1
+          # The first launch of a fresh profile sometimes starts every
+          # navigation and commits none on the Intel runner (C6 in
+          # docs/upstream-issues.md); a second launch of the profile
+          # loads at once. A launch that exits cleanly without the title
+          # is tried again on the same profile, up to three times.
+          for attempt in 1 2 3; do
+            log="smoke-$attempt.log"
+            "$app/Contents/MacOS/Nautilus" --profile ci-smoke --exit-after 30 "$page" > "$log" 2>&1 &
+            pid=$!
+            for _ in $(seq 1 150); do
+              kill -0 "$pid" 2>/dev/null || break
+              sleep 1
+            done
+            if kill -0 "$pid" 2>/dev/null; then
+              echo "::error::attempt $attempt: the browser did not exit within 150 s"
+              kill -9 "$pid"
+              cat "$log"
+              exit 1
+            fi
+            wait "$pid"
+            code=$?
+            echo "::group::attempt $attempt (exit code $code)"
+            cat "$log"
+            echo "::endgroup::"
+            if [ "$code" -ne 0 ]; then
+              echo "::error::attempt $attempt: the browser exited with code $code"
+              exit 1
+            fi
+            if grep -q '"Nautilus smoke test"' "$log"; then
+              if [ "$attempt" -gt 1 ]; then
+                echo "::warning::the page's title arrived on attempt $attempt: the first launch of the fresh profile stalled (C6 in docs/upstream-issues.md)"
+              fi
+              exit 0
+            fi
+            echo "attempt $attempt: the page's title never reached the browser"
           done
-          if kill -0 "$pid" 2>/dev/null; then
-            echo "::error::the browser did not exit within 150 s"
-            kill -9 "$pid"
-            cat smoke.log
-            exit 1
-          fi
-          wait "$pid"
-          code=$?
-          cat smoke.log
-          echo "exit code $code"
-          if [ "$code" -ne 0 ]; then
-            echo "::error::the browser exited with code $code"
-            exit 1
-          fi
-          if ! grep -q '"Nautilus smoke test"' smoke.log; then
-            echo "::error::the page's title never reached the browser"
-            exit 1
-          fi
+          echo "::error::the page's title never reached the browser in three launches"
+          exit 1
       # The zips carry the architecture (`arm64` or `x86_64`) so the
       # two macOS artifacts' files tell apart once downloaded.
       - if: runner.os == 'macOS'
@@ -198,7 +213,7 @@ jobs:
           path: |
             target/release/Nautilus-macos-*.zip
             target/release/Nautilus-*.dSYM.zip
-            smoke.log
+            smoke-*.log
           if-no-files-found: error
       - if: runner.os == 'macOS' && steps.smoke.outcome == 'failure'
         run: |

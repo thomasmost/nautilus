@@ -166,7 +166,14 @@ impl Engine {
             root_cache_path: cache_path.clone(),
             cache_path,
             persist_session_cookies: 1,
-            log_severity: LogSeverity::WARNING,
+            // Chromium's own log on stderr: warnings, or what
+            // NAUTILUS_CEF_LOG asks for ("info", "verbose") when a
+            // scripted run needs to see what Chromium is doing.
+            log_severity: match std::env::var("NAUTILUS_CEF_LOG").as_deref() {
+                Ok("verbose") => LogSeverity::VERBOSE,
+                Ok("info") => LogSeverity::INFO,
+                _ => LogSeverity::WARNING,
+            },
             // Opaque white behind pages that paint nothing.
             background_color: 0xFFFF_FFFF,
             browser_subprocess_path: helper_path()
@@ -447,7 +454,7 @@ wrap_app! {
     impl App {
         fn on_before_command_line_processing(
             &self,
-            _process_type: Option<&CefString>,
+            process_type: Option<&CefString>,
             command_line: Option<&mut CommandLine>,
         ) {
             let Some(command_line) = command_line else {
@@ -466,6 +473,25 @@ wrap_app! {
             command_line.append_switch(Some(&"disable-direct-composition".into()));
             #[cfg(target_os = "macos")]
             command_line.append_switch(Some(&"use-mock-keychain".into()));
+            // Chromium switches for a scripted run (CI's smoke test on a
+            // runner without a GPU, a verbose Chromium log): a
+            // comma-separated list of `name` or `name=value`, without the
+            // dashes. Browser process only; Chromium hands its children
+            // the switches they need.
+            if process_type.is_none_or(|t| t.to_string().is_empty())
+                && let Ok(switches) = std::env::var("NAUTILUS_CHROMIUM_SWITCHES")
+            {
+                for switch in switches.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    match switch.split_once('=') {
+                        Some((name, value)) => command_line.append_switch_with_value(
+                            Some(&name.into()),
+                            Some(&value.into()),
+                        ),
+                        None => command_line.append_switch(Some(&switch.into())),
+                    }
+                    log::info!("Chromium switch from the environment: --{switch}");
+                }
+            }
         }
 
         /// Every renderer gets the store shim (`store.rs`).

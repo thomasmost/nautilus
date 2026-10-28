@@ -961,6 +961,7 @@ mod native {
             fn on_after_created(&self, browser: Option<&mut Browser>) {
                 self.manager.delegate.add_live(1);
                 self.manager.inner.borrow_mut().browser = browser.map(|b| b.clone());
+                log::debug!("extension manager: browser created");
             }
 
             fn on_before_close(&self, _browser: Option<&mut Browser>) {
@@ -987,6 +988,7 @@ mod native {
                 _http_status_code: ::std::os::raw::c_int,
             ) {
                 if frame.is_some_and(|f| f.is_main() != 0) {
+                    log::debug!("extension manager: page loaded");
                     self.manager.on_page_ready();
                 }
             }
