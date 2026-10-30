@@ -43,6 +43,10 @@ this repository holds only what is Chromium's.
   Settings) or load
   an unpacked directory; pin them to the toolbar, where their popups
   open under the button; switch them off or remove them in Settings.
+- **Find in page.** Ctrl+F opens a bar at the top right of the page;
+  Chromium highlights every match as you type and scrolls to the active
+  one, with the count beside the field; Enter and F3 step forward,
+  Shift+Enter back, "Aa" matches case, Escape closes.
 - **Bookmarks.** The star beside the address bar (or Ctrl+D) bookmarks
   the page and opens a popover to name it, pick its group, or remove it;
   the bookmarks bar (Ctrl+Shift+B) shows the "Bookmarks bar" group as
@@ -336,7 +340,14 @@ engine glue. Each item must pass.
     another window; close it and delete again: the directory is gone
     and the menu no longer lists it. Edit… → "Delete profile…" on a
     non-default profile hands over to the Default profile and quits.
-15. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+15. **Find in page.** On example.com press Ctrl+F: a pill opens at the
+    page's top right with the keyboard in its field. Type `domain`: the
+    page highlights both matches, the first in orange, and the bar reads
+    "1 of 2". Enter: "2 of 2" and the second match is orange; Shift+Enter
+    goes back. Type `xyz` after it: "No matches" and the arrows disable.
+    Escape closes the bar and the highlights go. Ctrl+F again reopens it
+    with the previous text selected.
+16. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging

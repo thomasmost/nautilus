@@ -37,6 +37,8 @@ pub static INFO: EngineInfo = EngineInfo {
     version: "154",
     data_dir: "chromium",
     supports_stop: true,
+    // Chromium's find-in-page (`BrowserHost::find`, the find handler).
+    find: true,
     // winit reports one wheel notch as one line on Windows; Chromium
     // scrolls about 100 px per notch.
     wheel_line_px: 100.0,

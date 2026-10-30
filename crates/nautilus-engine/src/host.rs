@@ -501,6 +501,23 @@ impl TabHostApi for TabHost {
         }
     }
 
+    /// Chromium's find-in-page: it highlights every match, selects and
+    /// scrolls to the active one, and reports through the find handler.
+    fn find(&self, tab: TabId, text: &str, forward: bool, match_case: bool, find_next: bool) {
+        self.with_host(tab, |host| {
+            host.find(
+                Some(&CefString::from(text)),
+                i32::from(forward),
+                i32::from(match_case),
+                i32::from(find_next),
+            );
+        });
+    }
+
+    fn stop_finding(&self, tab: TabId, clear_selection: bool) {
+        self.with_host(tab, |host| host.stop_finding(i32::from(clear_selection)));
+    }
+
     /// The tab's latest frame, if it painted one yet.
     fn paint_page(&self, tab: TabId, sink: &mut dyn FnMut(PagePaint<'_>)) {
         let Some(entry) = self.tabs.get(&tab) else {

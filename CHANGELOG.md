@@ -15,6 +15,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Find in page, from osmena, over Chromium's find: Ctrl+F opens the
+  bar, every match is highlighted and the active one scrolled to, with
+  the count, Enter/F3 and Shift+Enter/Shift+F3 step, "Aa" matches case,
+  Escape closes.
 - Bookmarks, from osmena: the star beside the address bar (Ctrl+D) with
   its popover to name a bookmark, move it between groups or remove it;
   the bookmarks bar (Ctrl+Shift+B, or Settings) with favicon chips that

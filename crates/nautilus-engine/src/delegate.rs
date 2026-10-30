@@ -16,19 +16,20 @@ use cef::{
     BeforeDownloadCallback, Browser, CefString, CefStringList, CefStringUserfree, Client,
     ContextMenuHandler, ContextMenuMediaType, ContextMenuParams, CursorInfo, CursorType,
     DialogHandler, DisplayHandler, DownloadHandler, DownloadImageCallback, DownloadItem,
-    DownloadItemCallback, Errorcode, FileDialogCallback, FileDialogMode, Frame as CefFrame, Image,
-    ImplBeforeDownloadCallback, ImplBinaryValue, ImplBrowser, ImplBrowserHost, ImplClient,
-    ImplContextMenuHandler, ImplContextMenuParams, ImplDialogHandler, ImplDisplayHandler,
-    ImplDownloadHandler, ImplDownloadImageCallback, ImplDownloadItem, ImplFileDialogCallback,
-    ImplFrame, ImplImage, ImplKeyboardHandler, ImplLifeSpanHandler, ImplLoadHandler,
-    ImplRenderHandler, ImplRequestHandler, ImplRunContextMenuCallback, KeyEvent, KeyEventType,
-    KeyboardHandler, LifeSpanHandler, LoadHandler, LogSeverity, MenuModel, PaintElementType,
-    ProcessId, ProcessMessage, Rect, RenderHandler, RequestHandler, RunContextMenuCallback,
-    ScreenInfo, TerminationStatus, TransitionType, WindowOpenDisposition, WrapClient,
-    WrapContextMenuHandler, WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler,
-    WrapDownloadImageCallback, WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler,
-    WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_context_menu_handler,
-    wrap_dialog_handler, wrap_display_handler, wrap_download_handler, wrap_download_image_callback,
+    DownloadItemCallback, Errorcode, FileDialogCallback, FileDialogMode, FindHandler,
+    Frame as CefFrame, Image, ImplBeforeDownloadCallback, ImplBinaryValue, ImplBrowser,
+    ImplBrowserHost, ImplClient, ImplContextMenuHandler, ImplContextMenuParams, ImplDialogHandler,
+    ImplDisplayHandler, ImplDownloadHandler, ImplDownloadImageCallback, ImplDownloadItem,
+    ImplFileDialogCallback, ImplFindHandler, ImplFrame, ImplImage, ImplKeyboardHandler,
+    ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler, ImplRequestHandler,
+    ImplRunContextMenuCallback, KeyEvent, KeyEventType, KeyboardHandler, LifeSpanHandler,
+    LoadHandler, LogSeverity, MenuModel, PaintElementType, ProcessId, ProcessMessage, Rect,
+    RenderHandler, RequestHandler, RunContextMenuCallback, ScreenInfo, TerminationStatus,
+    TransitionType, WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDialogHandler,
+    WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback, WrapFindHandler,
+    WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
+    WrapRequestHandler, wrap_client, wrap_context_menu_handler, wrap_dialog_handler,
+    wrap_display_handler, wrap_download_handler, wrap_download_image_callback, wrap_find_handler,
     wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
     wrap_request_handler,
 };
@@ -267,6 +268,7 @@ pub(crate) fn client_for(view: Rc<ViewState>) -> Client {
         request: TabRequestHandler::new(view.clone()),
         context_menu: TabContextMenuHandler::new(view.clone()),
         download: TabDownloadHandler::new(view.clone()),
+        find: TabFindHandler::new(view.clone()),
         keyboard: TabKeyboardHandler::new(),
         dialog,
         view,
@@ -282,6 +284,7 @@ struct TabHandlers {
     request: RequestHandler,
     context_menu: ContextMenuHandler,
     download: DownloadHandler,
+    find: FindHandler,
     keyboard: KeyboardHandler,
     dialog: DialogHandler,
     view: Rc<ViewState>,
@@ -334,6 +337,10 @@ wrap_client! {
 
         fn download_handler(&self) -> Option<DownloadHandler> {
             Some(self.handlers.download.clone())
+        }
+
+        fn find_handler(&self) -> Option<FindHandler> {
+            Some(self.handlers.find.clone())
         }
 
         fn keyboard_handler(&self) -> Option<KeyboardHandler> {
@@ -1074,6 +1081,33 @@ fn edit_command(modifiers: u32, key: i32) -> Option<EditCommand> {
         (0x56, true) => Some(EditCommand::PastePlain),
         (0x41, false) => Some(EditCommand::SelectAll),
         _ => None,
+    }
+}
+
+wrap_find_handler! {
+    struct TabFindHandler {
+        view: Rc<ViewState>,
+    }
+
+    impl FindHandler {
+        /// Where the search stands: Chromium reports as it counts, the
+        /// count growing, then once more with `final_update`.
+        fn on_find_result(
+            &self,
+            _browser: Option<&mut Browser>,
+            _identifier: ::std::os::raw::c_int,
+            count: ::std::os::raw::c_int,
+            _selection_rect: Option<&Rect>,
+            active_match_ordinal: ::std::os::raw::c_int,
+            final_update: ::std::os::raw::c_int,
+        ) {
+            self.view.push(EngineEvent::FindResult {
+                tab: self.view.tab,
+                current: u32::try_from(active_match_ordinal).unwrap_or(0),
+                total: u32::try_from(count).unwrap_or(0),
+                final_update: final_update != 0,
+            });
+        }
     }
 }
 
