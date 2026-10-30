@@ -254,7 +254,7 @@ jobs:
           tag="build-${{ github.run_number }}"
           release_url="${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag"
           setup=$(ls artifacts/nautilus-windows-2025/*-setup.exe)
-          ci/update-manifest.sh "$version" "${{ github.run_number }}" "${{ github.sha }}" "$release_url" latest.toml \
+          bash ci/update-manifest.sh "$version" "${{ github.run_number }}" "${{ github.sha }}" "$release_url" latest.toml \
             "windows-x86_64=$setup" \
             macos-aarch64=artifacts/nautilus-macos-15/Nautilus-macos-arm64.zip \
             macos-x86_64=artifacts/nautilus-macos-15-intel/Nautilus-macos-x86_64.zip
