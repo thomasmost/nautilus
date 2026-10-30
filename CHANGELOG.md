@@ -14,9 +14,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
   profiles, Add Profile… and Delete Profile. A profile may share the
   Default profile's bookmarks and copy its extensions; history is never
   shared. The window title names a non-default profile (osmena).
-- The profile dialog offers its avatars in two palettes: "Sea
-  creatures" (whale, spouting whale, dolphin, octopus, shell, fish,
-  tropical fish, blowfish, turtle, penguin) and "Assorted" (osmena).
+- The profile dialog offers its avatars in three tabs: "Sea
+  creatures" (22, among them shark, seal, otter, squid, jellyfish,
+  crab, lobster, shrimp, oyster and coral), "Emoji" (the 24 most used
+  emoji, flat and monochrome) and "Assorted" (osmena).
+- The theme colour is a grid of seven hues, each in a pastel, the
+  earlier shade and a deeper, more natural one (Mint, Forest, Pine;
+  Lagoon, Ocean, Abyss; …), in the profile dialog and the settings
+  window; saved colours are unchanged (osmena).
 - Two environment variables for scripted runs: `NAUTILUS_CHROMIUM_SWITCHES`
   (Chromium command-line switches, comma-separated, `name` or
   `name=value`) and `NAUTILUS_CEF_LOG` (`info` or `verbose` for
