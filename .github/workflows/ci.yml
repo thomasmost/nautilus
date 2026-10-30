@@ -131,8 +131,37 @@ jobs:
         run: cargo install cargo-packager --version 0.11.8 --locked
       - if: runner.os == 'Windows'
         run: cargo build --release -p nautilus
+      # cef-dll-sys copies the CEF runtime files (libcef.dll, the .pak
+      # resources, the locales) into target/release/ only when its build
+      # script runs; after a full rust-cache hit it does not, and the
+      # installer's resource globs then match nothing (build 32 shipped
+      # without CEF). Copy them from the distribution every time, from
+      # wherever its layout puts them (flat from export-cef-dir, or
+      # <version>/cef_<os>_<arch>/{Release,Resources} from a download).
+      - if: runner.os == 'Windows'
+        name: CEF runtime files beside the binary
+        shell: bash
+        run: |
+          mkdir -p target/release/locales
+          find .cef \( -name '*.dll' -o -name '*.pak' -o -name '*.dat' -o -name '*.bin' -o -name '*.json' \) \
+            -type f -not -path '*/Debug/*' -not -path '*/locales/*' -not -path '*/cmake/*' \
+            -exec cp {} target/release/ \;
+          locales=$(find .cef -type d -name locales -not -path '*/Debug/*' | head -1)
+          cp "$locales"/* target/release/locales/
+          ls -la target/release/libcef.dll target/release/resources.pak target/release/icudtl.dat
+          ls target/release/locales | wc -l
       - if: runner.os == 'Windows'
         run: cargo packager --release -p nautilus
+      - if: runner.os == 'Windows'
+        name: The installer holds CEF
+        shell: bash
+        run: |
+          size=$(stat -c %s target/release/*-setup.exe)
+          echo "installer: $size bytes"
+          if [ "$size" -lt 100000000 ]; then
+            echo "::error::the installer is too small to hold libcef.dll"
+            exit 1
+          fi
       - if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:

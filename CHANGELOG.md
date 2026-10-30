@@ -6,6 +6,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Fixed
+
+- The Windows installer could ship without Chromium's runtime files
+  when CI's build cache was fully warm (release build 32 did): the
+  package job now copies them from the CEF distribution itself before
+  packaging and fails if the installer is too small to hold them.
+
 ### Added
 
 - Updates over the air. Every green push to `main` is now a GitHub
