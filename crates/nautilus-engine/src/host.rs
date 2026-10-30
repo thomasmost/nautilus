@@ -518,6 +518,13 @@ impl TabHostApi for TabHost {
         self.with_host(tab, |host| host.stop_finding(i32::from(clear_selection)));
     }
 
+    /// Chromium's zoom level is logarithmic: each unit is a factor of
+    /// 1.2, so 120% is level 1 and 100% level 0.
+    fn set_zoom(&self, tab: TabId, percent: u16) {
+        let level = (f64::from(percent) / 100.0).ln() / 1.2f64.ln();
+        self.with_host(tab, |host| host.set_zoom_level(level));
+    }
+
     /// The tab's latest frame, if it painted one yet.
     fn paint_page(&self, tab: TabId, sink: &mut dyn FnMut(PagePaint<'_>)) {
         let Some(entry) = self.tabs.get(&tab) else {

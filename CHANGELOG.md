@@ -15,6 +15,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Page zoom, from osmena, over Chromium's zoom levels: Ctrl and + or − (or the
+  wheel), Ctrl+0, the ☰ menu's Zoom submenu; every tab on the site
+  follows, the site remembers its level, a chip beside the address bar
+  shows it, and Settings sets the default.
 - Find in page, from osmena, over Chromium's find: Ctrl+F opens the
   bar, every match is highlighted and the active one scrolled to, with
   the count, Enter/F3 and Shift+Enter/Shift+F3 step, "Aa" matches case,

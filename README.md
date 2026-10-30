@@ -43,6 +43,9 @@ this repository holds only what is Chromium's.
   Settings) or load
   an unpacked directory; pin them to the toolbar, where their popups
   open under the button; switch them off or remove them in Settings.
+- **Page zoom.** Ctrl and + or − (or the wheel) zoom the page through
+  Chromium's steps; every tab on the site follows and the site remembers
+  its level; a chip beside the address bar shows it; Ctrl+0 resets.
 - **Find in page.** Ctrl+F opens a bar at the top right of the page;
   Chromium highlights every match as you type and scrolls to the active
   one, with the count beside the field; Enter and F3 step forward,
@@ -347,7 +350,13 @@ engine glue. Each item must pass.
     goes back. Type `xyz` after it: "No matches" and the arrows disable.
     Escape closes the bar and the highlights go. Ctrl+F again reopens it
     with the previous text selected.
-16. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+16. **Page zoom.** On example.com press Ctrl and = twice: the page grows
+    and a "125%" chip appears beside the address bar; Ctrl and the wheel
+    over the page step it; the chip's click offers −, + and Reset. Open
+    example.com in a second tab: it opens at 125%. Ctrl+0: both tabs
+    return to 100% and the chip goes; `zoom.toml` in the profile has no
+    entry for the site.
+17. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging
