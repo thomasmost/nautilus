@@ -253,13 +253,27 @@ jobs:
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           tag="build-${{ github.run_number }}"
           release_url="${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag"
-          setup=$(ls artifacts/nautilus-windows-2025/*-setup.exe)
+          # An artifact keeps the files' paths below their common parent,
+          # so one uploaded from two roots (the macOS zips and the smoke
+          # logs) nests them: find every asset by name.
+          find artifacts -type f | sort
+          asset() { find artifacts -type f -name "$1" | head -1; }
           bash ci/update-manifest.sh "$version" "${{ github.run_number }}" "${{ github.sha }}" "$release_url" latest.toml \
-            "windows-x86_64=$setup" \
-            macos-aarch64=artifacts/nautilus-macos-15/Nautilus-macos-arm64.zip \
-            macos-x86_64=artifacts/nautilus-macos-15-intel/Nautilus-macos-x86_64.zip
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+            "windows-x86_64=$(asset '*-setup.exe')" \
+            "macos-aarch64=$(asset Nautilus-macos-arm64.zip)" \
+            "macos-x86_64=$(asset Nautilus-macos-x86_64.zip)"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "files<<EOF"
+            asset '*-setup.exe'
+            asset nautilus.pdb
+            asset Nautilus-macos-arm64.zip
+            asset Nautilus-arm64.dSYM.zip
+            asset Nautilus-macos-x86_64.zip
+            asset Nautilus-x86_64.dSYM.zip
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
       - name: Release
         shell: bash
         env:
@@ -270,13 +284,8 @@ jobs:
             echo "replacing the release of an earlier attempt of this run"
             gh release delete "$tag" --yes --cleanup-tag
           fi
+          readarray -t files <<< "${{ steps.manifest.outputs.files }}"
           gh release create "$tag" \
             --title "Nautilus ${{ steps.manifest.outputs.version }} (build ${{ github.run_number }})" \
             --generate-notes --latest \
-            latest.toml \
-            artifacts/nautilus-windows-2025/*-setup.exe \
-            artifacts/nautilus-windows-2025/nautilus.pdb \
-            artifacts/nautilus-macos-15/Nautilus-macos-arm64.zip \
-            artifacts/nautilus-macos-15/Nautilus-arm64.dSYM.zip \
-            artifacts/nautilus-macos-15-intel/Nautilus-macos-x86_64.zip \
-            artifacts/nautilus-macos-15-intel/Nautilus-x86_64.dSYM.zip
+            latest.toml "${files[@]}"
