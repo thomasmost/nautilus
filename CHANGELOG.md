@@ -8,6 +8,17 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Updates over the air. Every green push to `main` is now a GitHub
+  release with the installer, the macOS bundles, the symbols and an
+  update manifest; a CI build of Nautilus checks it 15 seconds after it
+  starts and every six hours, downloads a newer build in the
+  background, and shows a green "Restart to update" pill in the toolbar
+  (also in the ☰ menu, the macOS application menu, and the new Updates
+  section of Settings, which has the switch for the automatic checks,
+  "Check now" and the release notes). The restart installs it and
+  reopens the same profile; on Windows the silent installer closes any
+  other Nautilus window first. A build made outside CI never updates
+  itself (osmena).
 - Profiles can be named, coloured and given an avatar, and made and
   deleted from the browser: the avatar at the toolbar's end opens the
   Profiles menu (the macOS menu bar has the same), with Edit…, the other

@@ -389,6 +389,34 @@ builds it on every push to `main` and uploads it as the workflow artifact
 `nautilus-windows-2025`, together with `nautilus.pdb` (the release profile
 keeps line tables) so a crash in an installed build can be symbolized.
 
+### Releases and updates
+
+Every green push to `main` also becomes a GitHub release
+(<https://github.com/thomasmost/nautilus/releases>), tagged `build-<run
+number>` and titled "Nautilus <version> (build <run number>)", made by
+the workflow's `release` job from the package job's artifacts: the
+Windows installer, both macOS bundles as zips, the symbol files, and `latest.toml`, the
+update manifest (`ci/update-manifest.sh` writes it; the format is
+osmena-core's `update::Manifest`). GitHub's
+`releases/latest/download/latest.toml` always points at the newest
+release, and that is the URL in `crates/nautilus/src/brand.rs`.
+
+The browser updates itself from it (osmena's flow, see its README): the
+package job sets `OSMENA_BUILD_NUMBER` to the run number, which the
+brand reads at compile time, so a running build knows whether a release
+is newer. It checks 15 seconds after it starts and every six hours,
+downloads the newer build into `<config dir>/Nautilus/updates/`,
+verifies it, and shows a green "Restart to update" pill in the toolbar
+(also "Restart to update Nautilus" in the ☰ menu and the application
+menu on macOS, and in Settings, whose Updates section has the
+"Check for updates and download them in the background" switch, "Check
+now" and the release notes). The restart runs the installer silently
+on Windows (it closes every other Nautilus window, other profiles
+included, and installs over the previous location) or swaps the bundle
+on macOS, and starts the same profile again. A build made outside CI
+has no build number and never updates itself; "Check for updates…" is
+disabled in it. A rerun of a workflow run replaces that run's release.
+
 ### Windows prerequisites
 
 - Visual Studio 2022 Build Tools with the "Desktop development with C++"
@@ -456,7 +484,7 @@ Upstream causes and the features they block are tracked in
   the page context menu's do.
 - Restore previous windows on launch is stored in `settings.toml` but not yet
   acted on.
-- No bookmarks, history UI, downloads UI, extensions, sync, or auto-update.
+- No history UI, downloads UI, or sync.
 - Thorium (a Chromium fork with compiler and feature patches) publishes no
   CEF distribution; building CEF from Thorium's tree is possible but is a
   multi-hour Chromium build, so Nautilus tracks stock CEF for now. See

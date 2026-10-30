@@ -97,6 +97,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2025, macos-15, macos-15-intel]
+    env:
+      # The build number the browser compares with the release manifest
+      # (`Brand::build`, read at compile time); the release job tags the
+      # release with the same number.
+      OSMENA_BUILD_NUMBER: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
@@ -219,3 +224,59 @@ jobs:
         run: |
           echo "::error::the smoke test failed; the bundle was uploaded anyway"
           exit 1
+
+  # Every green push to main is a GitHub release, tagged by the run
+  # number, carrying the installers and bundles the package job built,
+  # their symbols, and `latest.toml`: the manifest the browser's update
+  # check fetches at `releases/latest/download/latest.toml` (osmena's
+  # `update::Manifest`; ci/update-manifest.sh writes it). The build
+  # number inside the browser is the same run number (OSMENA_BUILD_NUMBER
+  # in the package job), which is how a running build knows a release is
+  # newer. A rerun of a run replaces its release.
+  release:
+    name: release
+    needs: package
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+      - name: Manifest
+        id: manifest
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          tag="build-${{ github.run_number }}"
+          release_url="${{ github.server_url }}/${{ github.repository }}/releases/tag/$tag"
+          setup=$(ls artifacts/nautilus-windows-2025/*-setup.exe)
+          ci/update-manifest.sh "$version" "${{ github.run_number }}" "${{ github.sha }}" "$release_url" latest.toml \
+            "windows-x86_64=$setup" \
+            macos-aarch64=artifacts/nautilus-macos-15/Nautilus-macos-arm64.zip \
+            macos-x86_64=artifacts/nautilus-macos-15-intel/Nautilus-macos-x86_64.zip
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.manifest.outputs.tag }}"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "replacing the release of an earlier attempt of this run"
+            gh release delete "$tag" --yes --cleanup-tag
+          fi
+          gh release create "$tag" \
+            --title "Nautilus ${{ steps.manifest.outputs.version }} (build ${{ github.run_number }})" \
+            --generate-notes --latest \
+            latest.toml \
+            artifacts/nautilus-windows-2025/*-setup.exe \
+            artifacts/nautilus-windows-2025/nautilus.pdb \
+            artifacts/nautilus-macos-15/Nautilus-macos-arm64.zip \
+            artifacts/nautilus-macos-15/Nautilus-arm64.dSYM.zip \
+            artifacts/nautilus-macos-15-intel/Nautilus-macos-x86_64.zip \
+            artifacts/nautilus-macos-15-intel/Nautilus-x86_64.dSYM.zip

@@ -6,8 +6,10 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-28 (the retrying macOS smoke test and the
-scripted-run environment variables; osmena's avatar palettes)._
+_Last updated: 2026-10-29 (updates over the air: the release job, the
+build number, and osmena's check, download and restart; before that
+the retrying macOS smoke test and the scripted-run environment
+variables)._
 
 ## Architecture
 
@@ -262,6 +264,18 @@ Ninja on `PATH`:
   crate's directory (hence `../../`). The `resources` globs pick up the CEF
   runtime files the build copied into `target/release/`; they assume the
   default target dir and no `--target`.
+- **Every green push to `main` is a release, and the browser updates
+  from it.** The `release` job tags `build-<run number>`, attaches the
+  package job's artifacts and `latest.toml` (`ci/update-manifest.sh`,
+  osmena's `update::Manifest`), and the package job builds with
+  `OSMENA_BUILD_NUMBER` set to the same run number, which `brand.rs`
+  reads with `option_env!` into `Brand::build`. The check, download and
+  restart are osmena's (`osmena_shell::update`); this repository owns
+  only the brand's manifest URL
+  (`releases/latest/download/latest.toml`) and the release job. The
+  installer's silent mode (`/S`) kills every `nautilus.exe`, so the
+  restart closes other profiles' windows too. Keep the asset names the
+  release job lists in step with the package job's uploads.
 - **Generated icons are committed.** Edit `assets/logo.svg` (pure vector,
   no `<text>`, no `<image>`: osmena's xtask builds resvg without font or
   raster support), run `cargo xtask icons`, commit the result. Never
@@ -294,6 +308,20 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-10-29)
+
+Added 2026-10-29: updates over the air (see Conventions and osmena's
+handoff). Verified on Windows with the debug build and a local manifest
+server: the check, the download and verification into
+`%APPDATA%\Nautilus\updates\<build>\`, the pill, and the click
+quitting the browser, running a stand-in installer with `/S` after the
+exit and relaunching the same profile. Not verified: the real
+`nautilus_<version>_x64-setup.exe` in silent mode over the installed
+copy (try it on the first release after this one: the pill should
+appear within a minute of starting the installed build, and the
+restart should come back on the new build number, shown in Settings),
+the release job before its first run, and macOS.
 
 ## Status and handoff (2026-10-28)
 
