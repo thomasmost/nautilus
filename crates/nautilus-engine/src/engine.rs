@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use cef::ImplDownloadItemCallback;
 use cef::args::Args;
 use cef::rc::Rc as _;
 use cef::{
@@ -20,7 +21,8 @@ use cef::{
     wrap_life_span_handler,
 };
 use osmena_core::{
-    EngineEvent, EngineInfo, ExtensionSource, ExtensionSupport, PageTools, PendingTab,
+    DownloadPolicy, EngineEvent, EngineInfo, ExtensionSource, ExtensionSupport, PageTools,
+    PendingTab,
 };
 use osmena_engine::raw_window_handle::{DisplayHandle, WindowHandle};
 use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker};
@@ -39,6 +41,8 @@ pub static INFO: EngineInfo = EngineInfo {
     supports_stop: true,
     // Chromium's find-in-page (`BrowserHost::find`, the find handler).
     find: true,
+    // Chromium's downloads, through the download handler (`delegate.rs`).
+    downloads: true,
     // winit reports one wheel notch as one line on Windows; Chromium
     // scrolls about 100 px per notch.
     wheel_line_px: 100.0,
@@ -278,6 +282,28 @@ impl osmena_engine::Engine for Engine {
 
     fn uninstall_extension(&self, extension: &str) {
         self.extensions.uninstall(extension);
+    }
+
+    fn configure_downloads(&self, policy: DownloadPolicy) {
+        self.delegate.set_download_policy(policy);
+    }
+
+    fn cancel_download(&self, id: u32) {
+        if let Some(callback) = self.delegate.download_callback(id) {
+            callback.cancel();
+        }
+    }
+
+    fn pause_download(&self, id: u32) {
+        if let Some(callback) = self.delegate.download_callback(id) {
+            callback.pause();
+        }
+    }
+
+    fn resume_download(&self, id: u32) {
+        if let Some(callback) = self.delegate.download_callback(id) {
+            callback.resume();
+        }
     }
 }
 

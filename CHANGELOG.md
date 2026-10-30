@@ -15,6 +15,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Downloads, from osmena, over Chromium's download handler: files go
+  to the Downloads folder (or the one Settings names) under unique
+  names, or the save dialog asks when Settings says so; the toolbar
+  button with its progress ring and the popover (Ctrl+J) with pause,
+  resume, cancel, open, show in folder, retry and clear; the quit
+  confirmation while a download goes; the list kept across runs. The
+  status overlay no longer carries download progress.
 - Page zoom, from osmena, over Chromium's zoom levels: Ctrl and + or − (or the
   wheel), Ctrl+0, the ☰ menu's Zoom submenu; every tab on the site
   follows, the site remembers its level, a chip beside the address bar

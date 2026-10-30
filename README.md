@@ -43,6 +43,11 @@ this repository holds only what is Chromium's.
   Settings) or load
   an unpacked directory; pin them to the toolbar, where their popups
   open under the button; switch them off or remove them in Settings.
+- **Downloads.** Files go to the Downloads folder (or the one Settings
+  names) under their names; a button at the toolbar's right end fills a
+  ring as they arrive and opens a list (Ctrl+J) with pause, resume,
+  cancel, open, show in folder, retry and clear; quitting mid-download
+  asks first.
 - **Page zoom.** Ctrl and + or − (or the wheel) zoom the page through
   Chromium's steps; every tab on the site follows and the site remembers
   its level; a chip beside the address bar shows it; Ctrl+0 resets.
@@ -356,7 +361,15 @@ engine glue. Each item must pass.
     example.com in a second tab: it opens at 125%. Ctrl+0: both tabs
     return to 100% and the chip goes; `zoom.toml` in the profile has no
     entry for the site.
-17. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+17. **Downloads.** Load a release asset's address (a `latest.toml` from
+    the Releases page): the file lands in the Downloads folder and a
+    downloads button appears at the toolbar's right end. Ctrl+J opens
+    the list with the file and its size; Open starts the default
+    program, Show in folder selects it in Explorer, × forgets it. Load
+    a large file: the ring on the button fills as it arrives, the row
+    shows received of total and the speed, Pause and Resume work, and
+    Cmd+Q asks before quitting; Cancel leaves a row with Retry.
+18. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging
@@ -480,9 +493,8 @@ Upstream causes and the features they block are tracked in
   (the call returns null), so pages that script the new window do not work.
 - No IME composition for page text fields yet: egui-winit only enables IME
   for its own fields.
-- A download's progress shows only in the status overlay; there is no
-  downloads list, and a download in progress is cancelled when the
-  browser exits.
+- A download in progress is cancelled when the browser exits (the list
+  marks it interrupted, with Retry).
 - Without the system title bar, Windows 11's snap-layouts flyout on the
   maximize control is not available (snap by dragging still is), and the
   frameless window has not been tried on macOS.
@@ -522,7 +534,7 @@ Upstream causes and the features they block are tracked in
   the page context menu's do.
 - Restore previous windows on launch is stored in `settings.toml` but not yet
   acted on.
-- No history UI, downloads UI, or sync.
+- No history UI or sync.
 - Thorium (a Chromium fork with compiler and feature patches) publishes no
   CEF distribution; building CEF from Thorium's tree is possible but is a
   multi-hour Chromium build, so Nautilus tracks stock CEF for now. See
@@ -535,4 +547,4 @@ Upstream causes and the features they block are tracked in
 - [ ] Accelerated off-screen rendering (shared textures)
 - [ ] IME composition for page text fields
 - [ ] Restore previous windows on launch (the setting is stored but not acted on)
-- [ ] A downloads list, history
+- [ ] A history page

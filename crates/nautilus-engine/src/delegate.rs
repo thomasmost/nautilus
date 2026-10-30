@@ -34,8 +34,8 @@ use cef::{
     wrap_request_handler,
 };
 use osmena_core::{
-    Cursor, EditState, EngineEvent, ExtensionSource, LoadState, Media, MediaKind, Misspelling,
-    PageContext, PendingTab, RgbaImage, TabId,
+    Cursor, DownloadPolicy, DownloadReport, DownloadState, EditState, EngineEvent, ExtensionSource,
+    LoadState, Media, MediaKind, Misspelling, PageContext, PendingTab, RgbaImage, TabId,
 };
 use url::Url;
 
@@ -90,6 +90,12 @@ pub(crate) struct DelegateState {
     /// The extension manager, for what store pages ask (`store.rs`); it
     /// holds this state, hence weak.
     extensions: RefCell<Weak<ExtensionManager>>,
+    /// Where downloads go, as the shell last said; `None` until it does
+    /// (a download before then asks where to save).
+    download_policy: RefCell<Option<DownloadPolicy>>,
+    /// The callback that cancels, pauses or resumes each download that
+    /// is going, by Chromium's id for it.
+    downloads: RefCell<HashMap<u32, DownloadItemCallback>>,
 }
 
 impl DelegateState {
@@ -166,6 +172,14 @@ impl DelegateState {
 
     /// A URL Chromium wants shown that has no opener tab (an extension
     /// asked for a tab): offer it to the last focused tab's window.
+    pub(crate) fn set_download_policy(&self, policy: DownloadPolicy) {
+        *self.download_policy.borrow_mut() = Some(policy);
+    }
+
+    pub(crate) fn download_callback(&self, id: u32) -> Option<DownloadItemCallback> {
+        self.downloads.borrow().get(&id).cloned()
+    }
+
     pub(crate) fn request_tab_without_opener(&self, url: Url) -> bool {
         match self.last_focused.get() {
             Some(opener) => {
@@ -1126,8 +1140,10 @@ wrap_download_handler! {
             1
         }
 
-        /// Every download (a link to a file, "Save … as") asks where to
-        /// save, in the system's dialog, owned by the tab's window.
+        /// Every download (a link to a file, "Save … as") goes to the
+        /// directory the shell named, under its suggested name (made
+        /// unique), or asks where to save when the shell said so (or
+        /// said nothing yet).
         fn on_before_download(
             &self,
             _browser: Option<&mut Browser>,
@@ -1135,11 +1151,12 @@ wrap_download_handler! {
             suggested_name: Option<&CefString>,
             callback: Option<&mut BeforeDownloadCallback>,
         ) -> ::std::os::raw::c_int {
+            let suggested = suggested_name.map(CefString::to_string).unwrap_or_default();
             if let Some(item) = download_item {
                 // What is being saved and why it is a download, for the log.
                 log::info!(
                     "download {:?} ({}, {:?}) from {}",
-                    suggested_name.map(CefString::to_string).unwrap_or_default(),
+                    suggested,
                     CefString::from(&item.mime_type()),
                     CefString::from(&item.content_disposition()).to_string(),
                     CefString::from(&item.url())
@@ -1148,58 +1165,128 @@ wrap_download_handler! {
             let Some(callback) = callback else {
                 return 0;
             };
-            callback.cont(None, 1);
+            let policy = self.view.delegate.download_policy.borrow().clone();
+            match policy {
+                Some(policy) => {
+                    let name = if suggested.is_empty() {
+                        "download".to_string()
+                    } else {
+                        suggested
+                    };
+                    let path = unique_path(&policy.directory, &name);
+                    callback.cont(
+                        Some(&CefString::from(path.to_string_lossy().as_ref())),
+                        i32::from(policy.ask),
+                    );
+                }
+                None => callback.cont(None, 1),
+            }
             1
         }
 
-        /// Progress and the outcome show in the status overlay.
+        /// Every change goes to the model as a report; the callback that
+        /// cancels, pauses or resumes is kept while the download goes.
         fn on_download_updated(
             &self,
             _browser: Option<&mut Browser>,
             download_item: Option<&mut DownloadItem>,
-            _callback: Option<&mut DownloadItemCallback>,
+            callback: Option<&mut DownloadItemCallback>,
         ) {
             let Some(item) = download_item else {
                 return;
             };
-            // The chosen path once the dialog is answered, else the
-            // suggested name, else the URL's last segment (a download
-            // that fails before the dialog has neither).
+            let id = item.id();
+            // The chosen path once known, else the suggested name, else
+            // the URL's last segment.
             let last_segment = |text: String| {
                 text.rsplit(['/', '\\'])
                     .find(|part| !part.is_empty())
                     .map(|part| part.split('?').next().unwrap_or(part).to_string())
                     .unwrap_or_default()
             };
-            let mut name = last_segment(text(item.full_path()));
+            let full_path = text(item.full_path());
+            let mut name = last_segment(full_path.clone());
             if name.is_empty() {
                 name = text(item.suggested_file_name());
             }
-            if name.is_empty() {
-                name = last_segment(text(item.url()));
+            // The address the user asked for, not the signed one a
+            // redirect landed on, so a retry works after it expires.
+            let mut url_text = text(item.original_url());
+            if url_text.is_empty() {
+                url_text = text(item.url());
             }
-            let status = if item.is_complete() != 0 {
-                format!("Saved {name}")
+            if name.is_empty() {
+                name = last_segment(url_text.clone());
+            }
+            let state = if item.is_complete() != 0 {
+                DownloadState::Complete
             } else if item.is_canceled() != 0 {
-                return;
+                DownloadState::Cancelled
             } else if item.is_interrupted() != 0 {
-                format!("Could not save {name}")
-            } else if item.is_in_progress() != 0 {
-                let percent = item.percent_complete();
-                if percent >= 0 {
-                    format!("Saving {name}\u{2026} {percent}%")
-                } else {
-                    format!("Saving {name}\u{2026}")
-                }
+                DownloadState::Interrupted(interrupt_text(item.interrupt_reason()))
+            } else if item.is_paused() != 0 {
+                DownloadState::Paused
             } else {
+                DownloadState::InProgress
+            };
+            {
+                let mut downloads = self.view.delegate.downloads.borrow_mut();
+                match (&state, callback) {
+                    (DownloadState::InProgress | DownloadState::Paused, Some(callback)) => {
+                        downloads.insert(id, callback.clone());
+                    }
+                    _ => {
+                        downloads.remove(&id);
+                    }
+                }
+            }
+            let Ok(url) = Url::parse(&url_text) else {
                 return;
             };
-            self.view.push(EngineEvent::StatusChanged {
-                tab: self.view.tab,
-                text: status,
+            let total = u64::try_from(item.total_bytes()).ok().filter(|t| *t > 0);
+            self.view.push(EngineEvent::DownloadUpdated {
+                id,
+                report: DownloadReport {
+                    name,
+                    url,
+                    path: (!full_path.is_empty()).then(|| PathBuf::from(full_path)),
+                    received: u64::try_from(item.received_bytes()).unwrap_or(0),
+                    total,
+                    speed: u64::try_from(item.current_speed()).unwrap_or(0),
+                    state,
+                },
             });
         }
     }
+}
+
+/// `dir/name`, or `dir/name (2).ext` and so on when the name is taken.
+fn unique_path(dir: &std::path::Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
+        _ => (name.to_string(), String::new()),
+    };
+    (2..)
+        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
+        .find(|p| !p.exists())
+        .expect("some number is free")
+}
+
+/// Chromium's interrupt reason as a short phrase ("file access denied"):
+/// the variant's name (`DownloadInterruptReason(CEF_DOWNLOAD_INTERRUPT_
+/// REASON_FILE_ACCESS_DENIED)` in its `Debug` form) without the prefix.
+fn interrupt_text(reason: cef::DownloadInterruptReason) -> String {
+    let raw = format!("{reason:?}");
+    let inner = raw
+        .split_once('(')
+        .map(|(_, rest)| rest.trim_end_matches(')'))
+        .unwrap_or(&raw);
+    let name = inner.trim_start_matches("CEF_DOWNLOAD_INTERRUPT_REASON_");
+    name.to_ascii_lowercase().replace('_', " ")
 }
 
 wrap_download_image_callback! {

@@ -518,6 +518,12 @@ impl TabHostApi for TabHost {
         self.with_host(tab, |host| host.stop_finding(i32::from(clear_selection)));
     }
 
+    fn start_download(&self, tab: TabId, url: Url) {
+        self.with_host(tab, |host| {
+            host.start_download(Some(&CefString::from(url.as_str())));
+        });
+    }
+
     /// Chromium's zoom level is logarithmic: each unit is a factor of
     /// 1.2, so 120% is level 1 and 100% level 0.
     fn set_zoom(&self, tab: TabId, percent: u16) {
