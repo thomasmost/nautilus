@@ -43,6 +43,10 @@ this repository holds only what is Chromium's.
   Settings) or load
   an unpacked directory; pin them to the toolbar, where their popups
   open under the button; switch them off or remove them in Settings.
+- **Session restore.** "Continue where you left off" brings the windows
+  and tabs back where they were (tabs load when first shown); after a
+  crash a bar offers the last session; the update's restart restores
+  it too.
 - **Downloads.** Files go to the Downloads folder (or the one Settings
   names) under their names; a button at the toolbar's right end fills a
   ring as they arrive and opens a list (Ctrl+J) with pause, resume,
@@ -369,7 +373,14 @@ engine glue. Each item must pass.
     a large file: the ring on the button fills as it arrives, the row
     shows received of total and the speed, Pause and Resume work, and
     Cmd+Q asks before quitting; Cancel leaves a row with Retry.
-18. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+18. **Session restore.** Turn on "Continue where you left off" in
+    Settings, open a second tab, move the window, quit. Launch again:
+    the window is where it was with both tabs, the one that was active
+    loaded and the other faint; click the faint tab and it loads. Kill
+    the process (Task Manager) and launch: a bar under the toolbar
+    offers the last session; Restore brings the tabs back and the
+    home-page window goes; Dismiss leaves the home page.
+19. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging
@@ -546,5 +557,4 @@ Upstream causes and the features they block are tracked in
 - [ ] Renderer sandbox (`bootstrap.exe` on Windows, helper layout on macOS)
 - [ ] Accelerated off-screen rendering (shared textures)
 - [ ] IME composition for page text fields
-- [ ] Restore previous windows on launch (the setting is stored but not acted on)
 - [ ] A history page

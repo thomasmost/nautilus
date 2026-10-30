@@ -15,6 +15,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Session restore, from osmena: "Continue where you left off" in
+  Settings brings the windows and tabs back where they were, loading
+  each tab when first shown; a crash leaves an offer to restore the
+  last session; "Restart to update" restores it too.
 - Downloads, from osmena, over Chromium's download handler: files go
   to the Downloads folder (or the one Settings names) under unique
   names, or the save dialog asks when Settings says so; the toolbar
