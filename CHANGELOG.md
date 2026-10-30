@@ -15,6 +15,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Bookmarks, from osmena: the star beside the address bar (Ctrl+D) with
+  its popover to name a bookmark, move it between groups or remove it;
+  the bookmarks bar (Ctrl+Shift+B, or Settings) with favicon chips that
+  drag to reorder, an overflow chip and the other groups as drop-downs;
+  "Bookmark this tab…", "Bookmark all tabs…", import and export of an
+  HTML bookmarks file and per-group rename and delete in the Bookmarks
+  menu; bookmarks among the address bar's and the launcher's
+  suggestions, marked with a star and ranked above history.
 - Updates over the air. Every green push to `main` is now a GitHub
   release with the installer, the macOS bundles, the symbols and an
   update manifest; a CI build of Nautilus checks it 15 seconds after it

@@ -6,10 +6,10 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-29 (updates over the air: the release job, the
-build number, and osmena's check, download and restart; before that
-the retrying macOS smoke test and the scripted-run environment
-variables)._
+_Last updated: 2026-10-30 (osmena's bookmarks: the star, the bar, the
+menu with import and export; before that updates over the air: the
+release job, the build number, and osmena's check, download and
+restart)._
 
 ## Architecture
 

@@ -43,6 +43,12 @@ this repository holds only what is Chromium's.
   Settings) or load
   an unpacked directory; pin them to the toolbar, where their popups
   open under the button; switch them off or remove them in Settings.
+- **Bookmarks.** The star beside the address bar (or Ctrl+D) bookmarks
+  the page and opens a popover to name it, pick its group, or remove it;
+  the bookmarks bar (Ctrl+Shift+B) shows the "Bookmarks bar" group as
+  chips with favicons and the other groups as drop-downs; the Bookmarks
+  menu imports and exports an HTML bookmarks file; bookmarks appear
+  among the address bar's suggestions with a star.
 - **Tab folders and bookmark groups.** Fold a selection of tabs behind
   one chip in the strip, or bookmark it as a named group to reopen from
   the menu.
@@ -297,7 +303,19 @@ engine glue. Each item must pass.
     selection asks for a group name; type Work, Enter: the profile has
     `bookmarks.toml` with the pages, and ☰ → Bookmarks → Work lists
     them with "Open all (n)", which opens each in a new tab. Folders are
-    gone after a relaunch; bookmarks stay.
+    gone after a relaunch; bookmarks stay. On a page, press Ctrl+D (Cmd+D
+    on macOS): the star beside the address bar fills and a popover
+    "Bookmark added" opens under it with the title and the group
+    "Bookmarks bar"; Enter closes it and the page is in ☰ → Bookmarks →
+    Bookmarks bar. Ctrl+Shift+B shows the bar under the toolbar with the
+    page as a chip (its favicon once the site reported one); clicking the
+    chip loads the page, right-clicking it offers Open in new tab, Open in
+    new window, Copy link address, Edit… and Delete. Click the star
+    again: the popover reads "Edit bookmark"; pick "New group…", type
+    Reading, Done: the chip moves out of the bar and a "Reading ▾" chip
+    at the bar's right end lists it with Open all, Rename group… and
+    Delete group. Typing part of the page's title in the address bar
+    offers it with a star before any history match.
 14. **Profiles.** Click the avatar at the toolbar's right end (the
     profile's initial on its colour): the menu lists the current profile
     (checked) with "Edit…", the other profiles, "Add Profile…" and a
