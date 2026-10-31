@@ -23,4 +23,10 @@ pub static BRAND: Brand = Brand {
     updates: Some(UpdateSource {
         manifest_url: "https://github.com/thomasmost/nautilus/releases/latest/download/latest.toml",
     }),
+    // The Google Cloud OAuth client the Launch Panel's Drive tile signs
+    // in with (docs/LaunchPanelOps.md in browser-project explains the
+    // registration). Read at compile time so CI stamps it from a
+    // repository variable and nothing is committed; a build without it
+    // has no Drive tile.
+    google_client_id: option_env!("NAUTILUS_GOOGLE_CLIENT_ID"),
 };

@@ -15,6 +15,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- The Launch Panel, from osmena: Ctrl+T opens a wide panel with the
+  search-or-address field on top and tiles under it: recent Google
+  Drive files (after "Connect Google Drive", in builds made with a
+  Google client id), today's weather at a place you name, Ask Claude
+  and Ask ChatGPT fields, and the five most visited sites. The gear
+  opens the Launch Settings: the search engine, the question
+  templates, the weather place and units, the Google account, and the
+  tiles dragged to reorder or closed to remove.
 - Session restore, from osmena: "Continue where you left off" in
   Settings brings the windows and tabs back where they were, loading
   each tab when first shown; a crash leaves an offer to restore the

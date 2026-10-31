@@ -102,6 +102,11 @@ jobs:
       # (`Brand::build`, read at compile time); the release job tags the
       # release with the same number.
       OSMENA_BUILD_NUMBER: ${{ github.run_number }}
+      # The Google OAuth client id for the Launch Panel's Drive tile
+      # (`Brand::google_client_id`): a repository variable, set once by
+      # the owner (docs/LaunchPanelOps.md in browser-project). Unset, the
+      # build simply has no Drive tile.
+      NAUTILUS_GOOGLE_CLIENT_ID: ${{ vars.NAUTILUS_GOOGLE_CLIENT_ID }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
