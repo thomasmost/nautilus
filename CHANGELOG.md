@@ -6,8 +6,29 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- The icon has no black outline, and its tile is a continuous-corner
+  rounded square in Apple's proportion. The macOS icon is drawn on
+  Apple's icon grid (`assets/logo-macos.svg`: the 824 px tile inset
+  in a transparent canvas, with the template's shadow), so it sits in
+  the Dock at the size of other apps.
+
 ### Fixed
 
+- macOS: one Backspace deleted two characters in page fields, and an
+  arrow, Delete, Escape, Page Up/Down or a function key acted twice
+  (its release reached the page as a second press; C8 in
+  `docs/upstream-issues.md`). Modifier keys reached pages with their
+  press and release swapped (Shift's `keydown` without `shiftKey`).
+- macOS: typing into a page opened the emoji palette (on E) or the
+  dictation prompt (on D) and swallowed that letter: the page's
+  unhandled keys went to the menu bar as made-up events that the
+  system's hidden "Emoji & Symbols" and "Start Dictation…" items
+  matched (C7). Only Ctrl+Cmd+Space opens the palette now.
+- macOS: the Dock showed the window icon's PNG, with its black border,
+  over the bundle's icon while Nautilus ran; it shows the bundle's
+  icon now (osmena).
 - The Windows installer could ship without Chromium's runtime files
   when CI's build cache was fully warm (release build 32 did): the
   package job now copies them from the CEF distribution itself before
@@ -15,6 +36,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- macOS: Nautilus can be the default browser. The bundle claims the
+  `http` and `https` schemes and HTML pages, so System Settings lists
+  it; a bar under the toolbar offers to make it the default while it
+  is not (Make default, Don't ask again, Not now), and Settings has a
+  Default browser section with the button and the switch (osmena).
+  Links clicked in other apps, and pages opened with Nautilus from the
+  Finder, open as tabs; a link that launched Nautilus opens in place
+  of the home page.
 - The Launch Panel, from osmena: Ctrl+T opens a wide panel with the
   search-or-address field on top and tiles under it: recent Google
   Drive files (after "Connect Google Drive", in builds made with a

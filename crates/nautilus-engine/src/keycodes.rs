@@ -229,7 +229,9 @@ pub(crate) fn native_key_code(code: Code) -> i32 {
         Code::ContextMenu => 0x6E,
         Code::F12 => 0x6F,
         Code::F15 => 0x71,
-        Code::Help => 0x72,
+        // kVK_Help, the key where other keyboards have Insert (winit
+        // reports it as Insert).
+        Code::Help | Code::Insert => 0x72,
         Code::Home => 0x73,
         Code::PageUp => 0x74,
         Code::Delete => 0x75,

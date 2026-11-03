@@ -16,10 +16,10 @@ publish = false
 # at once. For local work, patch the source to a checkout in
 # ~/.cargo/config.toml (see osmena's README). winit, egui, and glow come
 # through these crates, pinned there.
-osmena-core = { git = "https://github.com/thomasmost/osmena", rev = "e365db99325cf1388212913bc46634468447ab67" }
-osmena-engine = { git = "https://github.com/thomasmost/osmena", rev = "e365db99325cf1388212913bc46634468447ab67" }
-osmena-shell = { git = "https://github.com/thomasmost/osmena", rev = "e365db99325cf1388212913bc46634468447ab67" }
-osmena-xtask = { git = "https://github.com/thomasmost/osmena", rev = "e365db99325cf1388212913bc46634468447ab67" }
+osmena-core = { git = "https://github.com/thomasmost/osmena", rev = "43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60" }
+osmena-engine = { git = "https://github.com/thomasmost/osmena", rev = "43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60" }
+osmena-shell = { git = "https://github.com/thomasmost/osmena", rev = "43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60" }
+osmena-xtask = { git = "https://github.com/thomasmost/osmena", rev = "43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60" }
 raw-window-handle = "0.6"
 dpi = "0.1"
 keyboard-types = { version = "0.8.3", features = ["serde"] }

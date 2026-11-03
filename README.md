@@ -88,6 +88,12 @@ this repository holds only what is Chromium's.
   background tabs, Shift-click in a new window.
 - **Search from the address bar.** Text that is not a URL is searched,
   with Google unless Settings names another engine.
+- **Your default browser (macOS).** The bundle declares itself a web
+  browser, so System Settings lists it under "Default web browser"; while
+  it is not the default a bar under the toolbar offers to make it so
+  (Make default, Don't ask again, Not now), and Settings has the same
+  button. Links clicked in other apps, and pages opened with Nautilus
+  from the Finder, open as tabs.
 - **Keyboard first.** Every control is a command with Chromium's shortcut
   (Cmd for Ctrl on macOS), chords work even while the address bar has
   focus, and Settings remaps them the way a game's controls screen does:
@@ -399,7 +405,26 @@ engine glue. Each item must pass.
     the process (Task Manager) and launch: a bar under the toolbar
     offers the last session; Restore brings the tabs back and the
     home-page window goes; Dismiss leaves the home page.
-19. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+19. **Typing (macOS).** In a page's text field (a login form's email
+    field), type a word with E and D in it, then press Backspace once:
+    every letter appears, one character goes, and neither the emoji
+    palette nor the dictation prompt opens. Left and Right move the
+    caret one place per press. Ctrl+Cmd+Space opens the palette (what it
+    inserts is still lost, E2 in `docs/upstream-issues.md`).
+20. **Default browser (macOS).** On a profile where Nautilus is not the
+    default, a bar under the toolbar says so; "Make default" brings the
+    system's question, and choosing Nautilus there makes the bar go and
+    Settings → Default browser read "Nautilus is your default browser."
+    System Settings → Desktop & Dock → Default web browser lists
+    Nautilus. With it the default, a link clicked in Mail or Notes opens
+    as a tab and brings the window forward; with Nautilus not running it
+    starts and shows only that link. "Open With → Nautilus" on an
+    `.html` file in the Finder opens it. "Don't ask again" keeps the bar
+    away after a restart; the Settings checkbox brings it back.
+21. **Dock icon (macOS).** While running, the Dock shows the same icon
+    as the Finder: a white rounded square on Apple's grid, as large as
+    its neighbours, with no black outline.
+22. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging
@@ -415,7 +440,9 @@ builds the release binaries (`nautilus` and `nautilus-helper`), lays out
 Framework.framework` under `Contents/Frameworks`, copied from the CEF
 distribution at `CEF_PATH`, and the five helper apps beside it, `Nautilus
 Helper`, `… (GPU)`, `… (Renderer)`, `… (Plugin)`, `… (Alerts)`, each a
-copy of `nautilus-helper`), writes the property lists, and signs the
+copy of `nautilus-helper`), writes the property lists (the browser's
+claims the `http` and `https` schemes and HTML pages, which is what
+makes macOS offer it as a default browser), and signs the
 bundle ad hoc (Apple silicon runs no unsigned code; there is no
 Developer ID yet). CI builds it on every push to `main` for both Mac
 architectures, on an Apple silicon runner and on an Intel one (CEF
@@ -522,7 +549,17 @@ Upstream causes and the features they block are tracked in
 - `window.open` opens a tab at the URL but the opener gets no handle to it
   (the call returns null), so pages that script the new window do not work.
 - No IME composition for page text fields yet: egui-winit only enables IME
-  for its own fields.
+  for its own fields. The emoji palette (Ctrl+Cmd+Space) and dictation
+  open, but winit drops the text they insert (E2 in
+  `docs/upstream-issues.md`).
+- The default-browser offer and the links other apps hand over are
+  macOS only; on Windows the installer does not register Nautilus as a
+  browser yet.
+- macOS 26 masks app icons made with Icon Composer (an `.icon` compiled
+  into `Assets.car` by Xcode 26's `actool`, which CI's runners do not
+  have); Nautilus ships an `.icns` drawn on Apple's grid
+  (`assets/logo-macos.svg`), which macOS 15 and earlier show as is and
+  macOS 26 may show inside its own tile.
 - A download in progress is cancelled when the browser exits (the list
   marks it interrupted, with Retry).
 - Without the system title bar, Windows 11's snap-layouts flyout on the
@@ -575,5 +612,9 @@ Upstream causes and the features they block are tracked in
 - [ ] macOS `.dmg`, and a Developer ID signature in place of the ad-hoc one
 - [ ] Renderer sandbox (`bootstrap.exe` on Windows, helper layout on macOS)
 - [ ] Accelerated off-screen rendering (shared textures)
-- [ ] IME composition for page text fields
+- [ ] IME composition for page text fields, and text from the emoji
+      palette and dictation (E2)
+- [ ] Register as a browser on Windows (the installer's `Capabilities`
+      keys) and offer to become the default there
+- [ ] An Icon Composer icon for macOS 26
 - [ ] A history page

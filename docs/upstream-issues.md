@@ -86,6 +86,47 @@ on a later attempt. To dig further, run the bundle on the runner with
 a segmentation fault at shutdown (exit 139) after the stall, which a
 plain run does not.
 
+### C7: macOS offers a windowless browser's unhandled keys to the menu bar as synthetic events
+
+For a key the renderer did not handle and the client's `OnKeyEvent`
+left alone, `CefBrowserPlatformDelegateNativeMac::HandleKeyboardEvent`
+calls `[[NSApp mainMenu] performKeyEquivalent:]` with the event's
+`os_event`. For a windowless browser that is the `NSEvent` CEF made up
+from the `CefKeyEvent` in `TranslateWebKeyEvent`, whose modifier flags
+are only those the CEF flags map to: none for a plain letter. The
+key-down of every letter typed into a page field is "unhandled" (the
+text comes from the `CHAR` event), and AppKit's hidden items in every
+Edit menu match such an event although their key equivalents need the
+Globe key: "Emoji & Symbols" (fn-E) and "Start Dictation…" (fn-D) on
+macOS 15. A hardware-shaped event (from a `CGEvent`, flags `0x100`)
+does not match them. Typing opened the emoji palette and the dictation
+prompt and swallowed that E or D. Found 2026-11-03 against CEF 154.0.34
+(source at its commit) with an AppKit probe calling `performKeyEquivalent:`
+on the events CEF builds, and reproduced in the bundle with keys sent to
+the tab (the palette and dictation actions replaced by logging stubs);
+no upstream issue found. Windowed browsers (the extension popups) pass
+the real event and are not affected. **Blocks:** nothing now.
+**Workaround (2026-11-03):** the tab's `on_key_event` answers every key
+as handled on macOS (`mac_unhandled_key` in `delegate.rs`); the menu bar
+already had the real event before the window saw the key.
+
+### C8: on macOS a key event without characters is a modifier change
+
+`TranslateWebKeyEvent` makes the `NSEvent` an `NSEventTypeFlagsChanged`
+when both `character` and `unmodified_character` are 0, and keeps the
+CEF event's type only for `CHAR`. Chromium's `ui::IsKeyUpEvent` reads a
+flags change as a release only for the modifier keys (by their flags)
+and as a press for every other key code, so a key-up sent without
+characters for Backspace, Delete, an arrow, Escape, Page Up/Down or a
+function key reached the page as a second key-down: one Backspace
+deleted two characters. This is CEF's own convention (its `cefclient`
+sends AppKit's characters for every key), not a bug, but nothing in the
+API says so. **Workaround (2026-11-03):** `input::event_character`
+gives every key but a modifier the character AppKit's event would carry
+(`NSDeleteCharacter`, the `NS…FunctionKey` range), and osmena gives a
+modifier key's own event its modifier flag (Shift's press carries
+Shift, its release not), so the flags change reads the right way.
+
 ## egui and winit
 
 ### E1: IME is enabled only for egui's own text fields
@@ -95,6 +136,18 @@ keyboard focus, so winit sends no `Ime` events while the page has focus.
 **Blocks:** composed input (CJK) in page text fields. **Workaround:** the
 `Ime` arm in `BrowserWindow::handle_event` is ready; the engine side
 (`ime_set_composition`, `ime_commit_text`) is implemented.
+
+### E2: winit drops text inserted without a composition (emoji palette, dictation)
+
+winit 0.30's macOS view turns `insertText:replacementRange:` into an
+`Ime::Commit` only while it has marked text and IME is enabled
+(`view.rs`, "Commit only if we have marked text"). The emoji palette
+(Ctrl+Cmd+Space) and dictation insert their text that way, with no
+composition before it, so what they insert is lost, in page fields
+(where IME is off, E1) and in the address bar alike. **Blocks:**
+inserting emoji from the palette and dictated text. **Workaround:**
+none yet; the palette opens, and typing works. A fix needs either a
+winit change or osmena taking over that method of winit's view.
 
 ### C4: Chromium's extension dialogs crash a windowless browser
 

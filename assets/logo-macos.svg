@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Nautilus's macOS icon: logo.svg on Apple's macOS icon grid. macOS
+     draws an app icon as its .icns has it (no mask before macOS 26), so
+     the shape and its margin are the icon's own: the tile is the grid's
+     824 px body at (100, 100) of the 1024 px canvas, with its 185.4 px
+     continuous corners (logo.svg's tile, 976 px from 24, scaled by
+     824 / 976 and moved there), over the template's soft shadow; the
+     rest of the canvas is transparent, as other apps' icons are.
+     osmena's icon task renders the .icns from this file and every other
+     icon from logo.svg. -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="5" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <g filter="url(#shadow)">
+    <image x="79.738" y="79.738" width="864.525" height="864.525" xlink:href="logo.svg"/>
+  </g>
+</svg>

@@ -87,7 +87,14 @@ pub(crate) enum KeyEventKind {
 /// code there instead, every letter typed into a page arrived as its
 /// upper-case virtual key (`a` is `0x41`, `A`) and punctuation as the
 /// characters that happen to share its codes.
+///
+/// On macOS the key-down and key-up carry a character even for a key
+/// that types nothing ([`event_character`]).
 pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEventSpec> {
+    key_events_for(input, cfg!(target_os = "macos"))
+}
+
+fn key_events_for(input: &KeyInput, macos: bool) -> Vec<KeyEventSpec> {
     let mut modifiers = modifier_flags(input.modifiers);
     if input.repeat {
         modifiers |= FLAG_IS_REPEAT;
@@ -98,7 +105,7 @@ pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEventSpec> {
     let windows_key_code = keycodes::windows_key_code(input.code, &input.key);
     let native_key_code = keycodes::native_key_code(input.code);
     let text = typed_text(&input.key);
-    let character = text.unwrap_or(0);
+    let character = event_character(&input.key, text, macos);
     let mut events = Vec::with_capacity(2);
     match input.state {
         KeyState::Down => {
@@ -136,6 +143,88 @@ pub(crate) fn key_events(input: &KeyInput) -> Vec<KeyEventSpec> {
         }),
     }
     events
+}
+
+/// The `character` (and `unmodified_character`) of a key's key-down and
+/// key-up: the text it types, else 0 on Windows (CEF there reads a
+/// key-down's virtual-key code and only a `CHAR` event's character).
+///
+/// On macOS CEF builds an `NSEvent` from the key event
+/// (`TranslateWebKeyEvent` in its native platform delegate), and both
+/// characters being 0 makes that an `NSEventTypeFlagsChanged`: a
+/// modifier key's event, whose press or release Chromium reads off the
+/// modifier flags (`ui::IsKeyUpEvent`). For any other key that answer is
+/// always "press", so the release of Backspace was a second Backspace
+/// (two characters gone per keystroke), an arrow's release moved the
+/// caret again, and so on. Every key but a modifier therefore carries
+/// what AppKit's own event for it would ([`mac_function_character`]),
+/// which Chromium turns into no text.
+fn event_character(key: &Key, text: Option<u16>, macos: bool) -> u16 {
+    match text {
+        Some(text) => text,
+        None if macos => mac_function_character(key).unwrap_or(0),
+        None => 0,
+    }
+}
+
+/// AppKit's character for a key that types no text: `NSDeleteCharacter`
+/// for Backspace, Escape's, and the `NS…FunctionKey` private-use
+/// characters of `NSEvent.h` for the rest (the ones with no name share
+/// one from that range, which Chromium treats the same). `None` for a
+/// modifier key, whose event is a flags change on macOS as well.
+fn mac_function_character(key: &Key) -> Option<u16> {
+    /// A function-key character AppKit reserves but names no key with.
+    const OTHER_FUNCTION_KEY: u16 = 0xF7FF;
+    let Key::Named(named) = key else {
+        // A character key whose text does not fit one event.
+        return Some(OTHER_FUNCTION_KEY);
+    };
+    let character = match named {
+        NamedKey::Shift
+        | NamedKey::Control
+        | NamedKey::Alt
+        | NamedKey::AltGraph
+        | NamedKey::Meta
+        | NamedKey::CapsLock
+        | NamedKey::Fn
+        | NamedKey::FnLock
+        | NamedKey::Symbol
+        | NamedKey::SymbolLock => return None,
+        NamedKey::Backspace => 0x7F,
+        NamedKey::Escape => 0x1B,
+        NamedKey::Enter => 0x0D,
+        NamedKey::Tab => 0x09,
+        NamedKey::ArrowUp => 0xF700,
+        NamedKey::ArrowDown => 0xF701,
+        NamedKey::ArrowLeft => 0xF702,
+        NamedKey::ArrowRight => 0xF703,
+        NamedKey::Insert => 0xF727,
+        NamedKey::Delete => 0xF728,
+        NamedKey::Home => 0xF729,
+        NamedKey::End => 0xF72B,
+        NamedKey::PageUp => 0xF72C,
+        NamedKey::PageDown => 0xF72D,
+        NamedKey::PrintScreen => 0xF72E,
+        NamedKey::ScrollLock => 0xF72F,
+        NamedKey::Pause => 0xF730,
+        NamedKey::ContextMenu => 0xF735,
+        // The keypad's Clear, where other keyboards have Num Lock.
+        NamedKey::Clear | NamedKey::NumLock => 0xF739,
+        NamedKey::Help => 0xF746,
+        other => match function_key_number(other) {
+            // NSF1FunctionKey is 0xF704, up to NSF35FunctionKey.
+            Some(n) => 0xF704 + n - 1,
+            None => OTHER_FUNCTION_KEY,
+        },
+    };
+    Some(character)
+}
+
+/// `n` for the function key Fn (F1 to F35).
+fn function_key_number(key: &NamedKey) -> Option<u16> {
+    let name = key.to_string();
+    let n: u16 = name.strip_prefix('F')?.parse().ok()?;
+    (1..=35).contains(&n).then_some(n)
 }
 
 /// The UTF-16 unit a key press types, if any: the character of a printable
@@ -251,6 +340,110 @@ mod tests {
         ));
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].windows_key_code, 0x10);
+    }
+
+    fn release(key: Key, code: Code) -> KeyInput {
+        KeyInput {
+            state: KeyState::Up,
+            ..press(key, code, Modifiers::empty())
+        }
+    }
+
+    /// What CEF on macOS makes of an event: a flags change when both
+    /// characters are empty (`TranslateWebKeyEvent`).
+    fn is_flags_change(event: &KeyEventSpec) -> bool {
+        event.character == 0 && event.unmodified_character == 0
+    }
+
+    #[test]
+    fn on_macos_backspace_is_a_key_event_in_both_directions() {
+        // A flags change for a key that is not a modifier is a press to
+        // Chromium whichever way it goes: Backspace's release deleted a
+        // second character.
+        let down = key_events_for(
+            &press(
+                Key::Named(NamedKey::Backspace),
+                Code::Backspace,
+                Modifiers::empty(),
+            ),
+            true,
+        );
+        let up = key_events_for(
+            &release(Key::Named(NamedKey::Backspace), Code::Backspace),
+            true,
+        );
+        assert_eq!(down.len(), 1, "Backspace types nothing");
+        assert_eq!(down[0].kind, KeyEventKind::RawKeyDown);
+        assert_eq!(up[0].kind, KeyEventKind::KeyUp);
+        for event in down.iter().chain(&up) {
+            assert!(!is_flags_change(event));
+            // NSDeleteCharacter, as AppKit's own event has it.
+            assert_eq!(event.character, 0x7F);
+            assert_eq!(event.windows_key_code, 0x08);
+        }
+    }
+
+    #[test]
+    fn on_macos_keys_without_text_carry_their_function_key_character() {
+        for (key, code, character) in [
+            (NamedKey::ArrowLeft, Code::ArrowLeft, 0xF702),
+            (NamedKey::ArrowDown, Code::ArrowDown, 0xF701),
+            (NamedKey::Delete, Code::Delete, 0xF728),
+            (NamedKey::Escape, Code::Escape, 0x1B),
+            (NamedKey::PageDown, Code::PageDown, 0xF72D),
+            (NamedKey::F1, Code::F1, 0xF704),
+            (NamedKey::F12, Code::F12, 0xF70F),
+            (NamedKey::F20, Code::F20, 0xF717),
+        ] {
+            let up = key_events_for(&release(Key::Named(key), code), true);
+            assert_eq!(up[0].kind, KeyEventKind::KeyUp, "{key:?}");
+            assert_eq!(up[0].character, character, "{key:?}");
+            assert_eq!(up[0].unmodified_character, character, "{key:?}");
+            let down = key_events_for(&press(Key::Named(key), code, Modifiers::empty()), true);
+            assert_eq!(down.len(), 1, "{key:?} types nothing");
+        }
+        // A key with no name of its own still is not a flags change.
+        let up = key_events_for(&release(Key::Named(NamedKey::Dead), Code::Quote), true);
+        assert!(!is_flags_change(&up[0]));
+    }
+
+    #[test]
+    fn on_macos_modifier_keys_stay_flag_changes() {
+        for (key, code) in [
+            (NamedKey::Shift, Code::ShiftLeft),
+            (NamedKey::Meta, Code::MetaRight),
+            (NamedKey::Alt, Code::AltLeft),
+            (NamedKey::CapsLock, Code::CapsLock),
+        ] {
+            let up = key_events_for(&release(Key::Named(key), code), true);
+            assert!(is_flags_change(&up[0]), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn on_windows_keys_without_text_carry_no_character() {
+        let up = key_events_for(
+            &release(Key::Named(NamedKey::Backspace), Code::Backspace),
+            false,
+        );
+        assert_eq!(up[0].character, 0);
+        let down = key_events_for(
+            &press(
+                Key::Named(NamedKey::ArrowLeft),
+                Code::ArrowLeft,
+                Modifiers::empty(),
+            ),
+            false,
+        );
+        assert_eq!(down[0].character, 0);
+    }
+
+    #[test]
+    fn typed_text_is_the_character_on_both_platforms() {
+        for macos in [false, true] {
+            let up = key_events_for(&release(Key::Character("e".into()), Code::KeyE), macos);
+            assert_eq!(up[0].character, u16::from(b'e'));
+        }
     }
 
     #[test]

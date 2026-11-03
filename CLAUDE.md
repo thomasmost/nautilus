@@ -6,9 +6,11 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-10-30 (osmena's session restore; downloads over Chromium's download handler; page zoom over Chromium's zoom levels; find in page over Chromium's find handler;
-osmena's bookmarks: the star, the bar, the menu with import and export;
-before that updates over the air)._
+_Last updated: 2026-11-03 (macOS typing fixes: keys without text carry
+AppKit's characters, unhandled keys stop at the tab; the macOS icon on
+Apple's grid; the bundle claims web links for osmena's default-browser
+offer; before that osmena's session restore, downloads, page zoom, find
+in page, bookmarks, updates over the air)._
 
 ## Architecture
 
@@ -132,7 +134,12 @@ Ninja on `PATH`:
   renderer did not handle, carries them out on the focused frame
   (`unhandled_key` in `delegate.rs`); on other platforms it does
   nothing. The handler is declared once per platform because the
-  binding's `os_event` type differs.
+  binding's `os_event` type differs. On macOS it then answers every
+  key as handled (`mac_unhandled_key`): CEF would otherwise offer its
+  synthetic `NSEvent` to the menu bar, whose hidden fn-E and fn-D
+  items ("Emoji & Symbols", "Start Dictation…") match a plain E or D
+  (C7 in `docs/upstream-issues.md`). The menu bar has had the real
+  event already; do not let unhandled keys through to it again.
 - **Key events follow each platform's native message.** On Windows CEF
   builds a `ui::KeyEvent` from a `CefKeyEvent` (`TranslateUiKeyEvent` in
   its platform delegate): a `CHAR` event's character is read from
@@ -142,7 +149,14 @@ Ninja on `PATH`:
   with `0xE000` for extended keys. `input::key_events` and
   `keycodes.rs` follow that: `0x41` on the down event and `'a'` on the
   `CHAR` event for the A key. On macOS CEF reads `native_key_code`
-  (the `kVK_*` code) and `character` and ignores `windows_key_code`.
+  (the `kVK_*` code) and `character` and ignores `windows_key_code`,
+  and an event whose `character` and `unmodified_character` are both 0
+  is a modifier's flags change, which Chromium reads as a press for any
+  other key, releases included (C8). So on macOS every key but a
+  modifier carries a character (`input::event_character`: its text,
+  else AppKit's `NSDeleteCharacter` or `NS…FunctionKey`), and a
+  modifier key's own event carries its modifier flag only on the press
+  (osmena's `keyutils::with_own_modifier`).
 - **Page-opened tabs are URLs.** `on_before_popup` and `on_open_urlfrom_tab`
   cancel Chromium's popup and report `EngineEvent::NewTabRequested` with a
   `PendingTab` that holds the URL (`background` for the
@@ -276,9 +290,22 @@ Ninja on `PATH`:
   restart closes other profiles' windows too. Keep the asset names the
   release job lists in step with the package job's uploads.
 - **Generated icons are committed.** Edit `assets/logo.svg` (pure vector,
-  no `<text>`, no `<image>`: osmena's xtask builds resvg without font or
-  raster support), run `cargo xtask icons`, commit the result. Never
-  hand-edit `assets/icons/`.
+  no `<text>`, no raster `<image>`: osmena's xtask builds resvg without
+  font support), run `cargo xtask icons`, commit the result. Never
+  hand-edit `assets/icons/`. The `.icns` comes from
+  `assets/logo-macos.svg`, which places `logo.svg` on Apple's icon grid
+  (the 824 px tile at 100 px in a transparent 1024 px canvas, 185.4 px
+  continuous corners, the template's shadow): macOS before 26 masks
+  nothing, so the shape and margin must be the icon's own. Keep
+  `logo.svg`'s tile at 976 px from 24 with radius 219.6 px, or redo the
+  placement in `logo-macos.svg`. osmena leaves the Dock to the bundle's
+  icon.
+- **The bundle claims web links.** `WEB_BROWSER_TYPES` in
+  `bundle_mac.rs` puts `http`, `https` (`CFBundleURLTypes`) and HTML
+  pages (`CFBundleDocumentTypes`) in the browser's `Info.plist`: that is
+  what makes System Settings list Nautilus as a default browser, and
+  what osmena's shell checks before it offers to become the default.
+  The shell answers the system's `GURL` and `odoc` Apple Events itself.
 - **Format before every commit:** `cargo fmt --all`. CI fails on formatting
   or clippy warnings.
 - **`AGENTS.md` mirrors this file.** Keep them identical.
@@ -307,6 +334,49 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-03)
+
+From the user's reports on the Apple silicon Mac (macOS 15.5), with
+their causes:
+
+1. and 2. The icon's black border and odd corner radius: `logo.svg`
+   drew a black stroke and a 976 px tile with `rx=200`, and osmena set
+   the Dock icon from that PNG at run time over the bundle's `.icns`.
+   Now no outline, a continuous-corner tile, an `.icns` on Apple's grid
+   (`logo-macos.svg`, through osmena-xtask's new macOS source), and
+   osmena leaves the Dock alone in a bundle with an icon.
+3. and 4. The emoji palette and the dictation prompt opening while
+   typing: C7. Reproduced in the bundle with keys sent to the tab
+   through a temporary hook (since removed) and the two actions
+   replaced by logging stubs: with the old handler, typing "hello d"
+   fired `orderFrontCharacterPalette:` on the E and `startDictation:`
+   on the D; with the fix, neither, and every letter typed.
+5. Backspace deleting two characters: C8. It happened on every
+   Backspace, not sometimes: the same hook typed "hello" and one
+   Backspace and the page saw two `keydown`s and "hel" before the fix,
+   one and "hell" after; Shift's `keydown`/`keyup` now carry
+   `shiftKey` true/false.
+6. The default browser: osmena's (see its handoff); the bundle's
+   `Info.plist` claims web links. Verified on this Mac: Launch
+   Services lists Nautilus for `http` and `https`, the status reads
+   "No" (Comet is the default), `open -a` of the bundle with a URL
+   while it is not running loads that URL in place of the home page,
+   with it running adds a tab, and an `.html` file opens. Not verified:
+   the "Make default" button and the system's question (that would
+   change the user's default browser), a real link from Mail, the bar
+   and the Settings section by eye.
+
+Also: `cargo test --workspace`, clippy, fmt; osmena's likewise. Not
+verified: anything by hand with real keystrokes (Terminal has no
+Accessibility permission here), Windows (no change there but the
+icon's art and osmena's shared code; CI will tell), macOS 26. Known
+and left: text from the emoji palette and dictation is lost (E2).
+
+The osmena changes are in the local checkout only, through the patch
+table: commit and push osmena first, then bump every osmena `rev` in
+`Cargo.toml` here and restore `Cargo.lock` as the handoff below
+says.
 
 ## Status and handoff (2026-10-29)
 

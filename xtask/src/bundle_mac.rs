@@ -28,6 +28,41 @@ const PRODUCT: &str = "Nautilus";
 const IDENTIFIER: &str = "org.nautilus.software";
 const MINIMUM_SYSTEM: &str = "12.0";
 const FRAMEWORK: &str = "Chromium Embedded Framework.framework";
+/// What makes the system count the browser as one (System Settings,
+/// Desktop & Dock, "Default web browser", lists the apps that claim
+/// both web schemes and HTML pages), and what lets it open a page from
+/// the Finder. osmena's shell answers the open requests these bring
+/// (`GURL` and `odoc` Apple Events) and offers to become the default
+/// once the bundle claims `http`.
+const WEB_BROWSER_TYPES: &str = "\t<key>CFBundleURLTypes</key>
+\t<array>
+\t\t<dict>
+\t\t\t<key>CFBundleTypeRole</key>
+\t\t\t<string>Viewer</string>
+\t\t\t<key>CFBundleURLName</key>
+\t\t\t<string>Web site URL</string>
+\t\t\t<key>CFBundleURLSchemes</key>
+\t\t\t<array>
+\t\t\t\t<string>http</string>
+\t\t\t\t<string>https</string>
+\t\t\t</array>
+\t\t</dict>
+\t</array>
+\t<key>CFBundleDocumentTypes</key>
+\t<array>
+\t\t<dict>
+\t\t\t<key>CFBundleTypeName</key>
+\t\t\t<string>Web page</string>
+\t\t\t<key>CFBundleTypeRole</key>
+\t\t\t<string>Viewer</string>
+\t\t\t<key>LSItemContentTypes</key>
+\t\t\t<array>
+\t\t\t\t<string>public.html</string>
+\t\t\t\t<string>public.xhtml</string>
+\t\t\t</array>
+\t\t</dict>
+\t</array>
+";
 /// Chromium's process kinds, as helper app suffixes (CEF's layout).
 const HELPERS: [&str; 5] = ["", " (GPU)", " (Renderer)", " (Plugin)", " (Alerts)"];
 
@@ -216,6 +251,7 @@ fn info_plist(
         ));
     }
     if !helper {
+        body.push_str(WEB_BROWSER_TYPES);
         // What the browser may ask the user for; the strings show in
         // the system's permission prompts.
         for (key, value) in [
@@ -351,6 +387,11 @@ mod tests {
         assert!(main.contains("<key>CFBundleExecutable</key>\n\t<string>Nautilus</string>"));
         assert!(main.contains("<key>CFBundleIconFile</key>\n\t<string>Nautilus.icns</string>"));
         assert!(!main.contains("LSUIElement"));
+        // The browser claims the web schemes and HTML pages, so the
+        // system can make it the default; a helper claims nothing.
+        assert!(main.contains("<string>http</string>"));
+        assert!(main.contains("<string>https</string>"));
+        assert!(main.contains("<string>public.html</string>"));
         let helper = info_plist(
             "Nautilus Helper (GPU)",
             "org.nautilus.software.helper.gpu",
@@ -361,5 +402,6 @@ mod tests {
         assert!(helper.contains("<key>LSUIElement</key>\n\t<true/>"));
         assert!(helper.contains("<string>Nautilus Helper (GPU)</string>"));
         assert!(!helper.contains("CFBundleIconFile"));
+        assert!(!helper.contains("CFBundleURLTypes"));
     }
 }

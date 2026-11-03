@@ -1017,18 +1017,41 @@ wrap_keyboard_handler! {
             event: Option<&KeyEvent>,
             _os_event: *mut u8,
         ) -> ::std::os::raw::c_int {
-            unhandled_key(browser, event)
+            mac_unhandled_key(browser, event)
         }
     }
+}
+
+/// macOS: a key the page did not handle, which `unhandled_key` has had,
+/// is answered as handled, always. CEF's next step for it
+/// (`HandleKeyboardEvent` in its native platform delegate) offers it to
+/// the application's menu bar with `performKeyEquivalent:`, but what it
+/// offers is the synthetic `NSEvent` it made from the CEF key event this
+/// crate sent, with no modifier flags at all for a plain key, and
+/// AppKit's hidden items in every Edit menu, "Emoji & Symbols" (fn-E)
+/// and "Start Dictation…" (fn-D), match such an E or D: typing into a
+/// page opened the emoji palette, and the dictation prompt, every so
+/// often (C7 in `docs/upstream-issues.md`). Nothing is lost by stopping
+/// here: the menu bar already had the real event, since AppKit offers
+/// every key-down to the menus before the window sees it (that is how
+/// Ctrl+Cmd+Space still opens the palette).
+#[cfg(target_os = "macos")]
+fn mac_unhandled_key(
+    browser: Option<&mut Browser>,
+    event: Option<&KeyEvent>,
+) -> ::std::os::raw::c_int {
+    unhandled_key(browser, event);
+    1
 }
 
 /// A key the page did not handle. On macOS the editing chords (Cmd+Z,
 /// Shift+Cmd+Z, Cmd+X, Cmd+C, Cmd+V, Shift+Cmd+V, Cmd+A) are the
 /// application's Edit menu's, not the renderer's: Blink leaves them to
-/// the browser, which Chromium serves from its menu. Nautilus has no
-/// application menu, so they are carried out here on the focused frame,
-/// after the page had its chance (a page that handles the key itself is
-/// not second-guessed). Windows and Linux renderers handle these chords
+/// the browser, which Chromium serves from its menu. osmena's menu bar
+/// normally takes them before the page sees them; a chord that reaches
+/// the page anyway is carried out here on the focused frame, after the
+/// page had its chance (a page that handles the key itself is not
+/// second-guessed). Windows and Linux renderers handle these chords
 /// themselves, so nothing happens there.
 fn unhandled_key(browser: Option<&mut Browser>, event: Option<&KeyEvent>) -> ::std::os::raw::c_int {
     let Some(event) = event else {
