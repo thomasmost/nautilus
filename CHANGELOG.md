@@ -6,6 +6,16 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- Guest profiles and the Manage Profiles dialog, from osmena: the
+  Profiles menu behind the avatar now reads like Chromium's (the
+  current profile and Edit…, "Other Nautilus Profiles" over the rest,
+  then Add Nautilus Profile…, Open Guest Profile and Manage Profiles…).
+  A guest is a throwaway profile deleted when its window closes;
+  Manage Profiles… opens, edits or deletes any profile from one
+  dialog, which is where Delete moved from the menu.
+
 ### Changed
 
 - The icon has no black outline, and its tile is a continuous-corner

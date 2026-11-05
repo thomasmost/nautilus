@@ -152,7 +152,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
  "x11rb",
 ]
 
@@ -2240,7 +2240,7 @@ dependencies = [
 [[package]]
 name = "osmena-chrome"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60#43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60"
+source = "git+https://github.com/thomasmost/osmena?rev=608c6619432f3f6d5105b162c060d6a83fabc8ca#608c6619432f3f6d5105b162c060d6a83fabc8ca"
 dependencies = [
  "dpi",
  "egui",
@@ -2260,7 +2260,7 @@ dependencies = [
 [[package]]
 name = "osmena-core"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60#43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60"
+source = "git+https://github.com/thomasmost/osmena?rev=608c6619432f3f6d5105b162c060d6a83fabc8ca#608c6619432f3f6d5105b162c060d6a83fabc8ca"
 dependencies = [
  "directories",
  "keyboard-types",
@@ -2272,7 +2272,7 @@ dependencies = [
 [[package]]
 name = "osmena-engine"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60#43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60"
+source = "git+https://github.com/thomasmost/osmena?rev=608c6619432f3f6d5105b162c060d6a83fabc8ca#608c6619432f3f6d5105b162c060d6a83fabc8ca"
 dependencies = [
  "dpi",
  "glow",
@@ -2287,7 +2287,7 @@ dependencies = [
 [[package]]
 name = "osmena-shell"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60#43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60"
+source = "git+https://github.com/thomasmost/osmena?rev=608c6619432f3f6d5105b162c060d6a83fabc8ca#608c6619432f3f6d5105b162c060d6a83fabc8ca"
 dependencies = [
  "arboard",
  "block2 0.6.2",
@@ -2322,7 +2322,7 @@ dependencies = [
 [[package]]
 name = "osmena-xtask"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60#43afd300c3ac1601ed2d3e6eea554b7ed3fb1b60"
+source = "git+https://github.com/thomasmost/osmena?rev=608c6619432f3f6d5105b162c060d6a83fabc8ca#608c6619432f3f6d5105b162c060d6a83fabc8ca"
 dependencies = [
  "icns",
  "ico",
@@ -2798,7 +2798,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4308,23 +4308,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "osmena-chrome"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "osmena-core"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "osmena-engine"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "osmena-shell"
-version = "0.1.0"
-
-[[patch.unused]]
-name = "osmena-xtask"
-version = "0.1.0"
