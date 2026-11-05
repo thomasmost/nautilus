@@ -6,6 +6,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- The ☰ menu button sits at the toolbar's right end, right of the
+  profile avatar, instead of on the tab strip (osmena).
+
 ### Added
 
 - Guest profiles and the Manage Profiles dialog, from osmena: the

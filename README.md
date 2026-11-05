@@ -206,9 +206,10 @@ Run with `cargo run` after any change to the chrome, input handling, or
 engine glue. Each item must pass.
 
 1. **Launch.** A window opens with one tab at the homepage and the page
-   renders. There is no system title bar: the tab strip ends in the ☰
-   menu and the minimize, maximize, and close controls, and the taskbar
-   shows the shell logo with the title Nautilus. Dragging the strip's
+   renders. There is no system title bar: the tab strip ends in the
+   minimize, maximize, and close controls, the toolbar in the profile
+   avatar and the ☰ menu, and the taskbar shows the shell logo with the
+   title Nautilus. Dragging the strip's
    empty space moves the window, double-clicking it maximizes, and the
    pointer becomes a resize arrow at every edge and corner.
 2. **Address bar.** Type `example.com` and press Enter: the page loads, the
