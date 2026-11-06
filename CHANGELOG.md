@@ -10,8 +10,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 - The active tab is shaped like Chromium's: rounded on top, flaring
   out at the bottom into a one-pixel line along the strip's edge, in
-  the toolbar's colour so it reads as part of the toolbar. Tab titles
-  are slightly smaller and dark on every theme colour (osmena).
+  the toolbar's colour so it reads as part of the toolbar. The other
+  tabs are solid fills lifted halfway to white from the theme colour,
+  and tab titles are slightly smaller and dark on them (osmena).
 - The ☰ menu button sits at the toolbar's right end, right of the
   profile avatar, instead of on the tab strip (osmena).
 

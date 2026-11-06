@@ -2240,7 +2240,7 @@ dependencies = [
 [[package]]
 name = "osmena-chrome"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=24d1126bb9f1c5030505e9cdde1114ee3deec48c#24d1126bb9f1c5030505e9cdde1114ee3deec48c"
+source = "git+https://github.com/thomasmost/osmena?rev=b20788370de493d2ec57c97f50eb1825d80d1954#b20788370de493d2ec57c97f50eb1825d80d1954"
 dependencies = [
  "dpi",
  "egui",
@@ -2260,7 +2260,7 @@ dependencies = [
 [[package]]
 name = "osmena-core"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=24d1126bb9f1c5030505e9cdde1114ee3deec48c#24d1126bb9f1c5030505e9cdde1114ee3deec48c"
+source = "git+https://github.com/thomasmost/osmena?rev=b20788370de493d2ec57c97f50eb1825d80d1954#b20788370de493d2ec57c97f50eb1825d80d1954"
 dependencies = [
  "directories",
  "keyboard-types",
@@ -2272,7 +2272,7 @@ dependencies = [
 [[package]]
 name = "osmena-engine"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=24d1126bb9f1c5030505e9cdde1114ee3deec48c#24d1126bb9f1c5030505e9cdde1114ee3deec48c"
+source = "git+https://github.com/thomasmost/osmena?rev=b20788370de493d2ec57c97f50eb1825d80d1954#b20788370de493d2ec57c97f50eb1825d80d1954"
 dependencies = [
  "dpi",
  "glow",
@@ -2287,7 +2287,7 @@ dependencies = [
 [[package]]
 name = "osmena-shell"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=24d1126bb9f1c5030505e9cdde1114ee3deec48c#24d1126bb9f1c5030505e9cdde1114ee3deec48c"
+source = "git+https://github.com/thomasmost/osmena?rev=b20788370de493d2ec57c97f50eb1825d80d1954#b20788370de493d2ec57c97f50eb1825d80d1954"
 dependencies = [
  "arboard",
  "block2 0.6.2",
@@ -2322,7 +2322,7 @@ dependencies = [
 [[package]]
 name = "osmena-xtask"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=24d1126bb9f1c5030505e9cdde1114ee3deec48c#24d1126bb9f1c5030505e9cdde1114ee3deec48c"
+source = "git+https://github.com/thomasmost/osmena?rev=b20788370de493d2ec57c97f50eb1825d80d1954#b20788370de493d2ec57c97f50eb1825d80d1954"
 dependencies = [
  "icns",
  "ico",
