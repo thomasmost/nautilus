@@ -8,6 +8,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- The Launch Settings gear read as a steering wheel; it is a cog now.
+  The weather tile's cloud had a dark bow tie across its middle, and
+  its high and low read "H 20° L 14° °C" with the unit left dangling
+  (osmena).
 - A drag attempt on a draggable element left the page in its dragging
   state for good: the element stayed faded, hidden or deaf to the
   pointer (whatever its `dragstart` did), and never hovered again.
@@ -27,6 +31,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- The Launch Panel's weather tile follows this device: opening the
+  panel asks the system where it is, which is what asks you for
+  permission, and shows today's conditions there. Naming a place on
+  the tile still overrides it and asks the system nothing, and the
+  Launch Settings move between the two. If the system will not say,
+  the tile says so and offers to look a place up instead. Windows
+  answers through its own location service; macOS cannot yet, so the
+  tile asks for a place name there (osmena).
 - Drag and drop within a page: a draggable element, a selection, a
   link or an image dragged with the mouse reaches the drop targets on
   the same page (`dragenter`, `dragover`, `drop`), with Chromium's

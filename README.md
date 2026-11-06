@@ -16,12 +16,13 @@ this repository holds only what is Chromium's.
   with the history and bookmark matches dropping down under it, and
   tiles beneath: the Google Drive files you opened last (after
   "Connect Google Drive"; only in builds made with a Google client id,
-  see Local development), today's weather at a place you name on the
-  tile, Ask Claude and Ask ChatGPT fields that open the question in a
-  new tab, and the five sites you visit most. The gear opens the
+  see Local development), today's weather where you are (the panel asks
+  the system for your location, which is what asks you about it; you
+  can name a place on the tile instead), Ask Claude and Ask ChatGPT
+  fields that open the question in a new tab, and the five sites you visit most. The gear opens the
   Launch Settings in the panel: the search engine (Google, DuckDuckGo,
   Bing, Brave, Kagi or custom), the question templates, the weather
-  place and units, the Google account, and the tiles themselves,
+  location and units, the Google account, and the tiles themselves,
   dragged to reorder or closed to remove. All of it is osmena's; the
   Google client id is this build's.
 - **Chromium under the hood.** Pages render through Chromium (CEF 154),
