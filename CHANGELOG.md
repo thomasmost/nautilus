@@ -36,6 +36,12 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- With nobody having chosen units, the weather tile measures the way
+  the country it is showing does: a device that turns out to be in the
+  United States reads Fahrenheit without anyone saying so, and a place
+  named in France reads Celsius. A choice, once made, stands wherever
+  the device goes (osmena).
+
 - Fahrenheit and Celsius are a row of their own in the Launch
   Settings, labelled "Temperature" and named in words, where they were
   two bare degree signs under the weather place (osmena).
