@@ -499,6 +499,22 @@ wrap_app! {
             // to the windowless tabs with DirectComposition on; the tabs
             // paint into memory and never use it.
             command_line.append_switch(Some(&"disable-direct-composition".into()));
+            // A page that marks the dragged element in its `dragstart`
+            // handler the common way, with `pointer-events: none`,
+            // could not be dragged at all: after dispatching
+            // `dragstart`, Blink hit-tests the drag origin again and
+            // cancels the drag when the hit no longer lands on the
+            // drag source (`DragController::StartDrag`), which that
+            // very property guarantees. Chromium's own fix generates
+            // the drag overlay before `dragstart` and skips the second
+            // hit test; the feature is stable in Chromium but not yet
+            // enabled in CEF 154's build (C9 in
+            // `docs/upstream-issues.md`), so turn it on here. Drop
+            // this when a CEF bump has it on by default.
+            command_line.append_switch_with_value(
+                Some(&"enable-blink-features".into()),
+                Some(&"GenerateDragOverlayBeforeDragStart".into()),
+            );
             #[cfg(target_os = "macos")]
             command_line.append_switch(Some(&"use-mock-keychain".into()));
             // Chromium switches for a scripted run (CI's smoke test on a

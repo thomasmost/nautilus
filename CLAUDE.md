@@ -195,7 +195,12 @@ Ninja on `PATH`:
   `DoDragDrop` with a nested loop inside the callback, as cefclient's
   `osr_dragdrop_win.cc`), files dropped in from the desktop (winit's
   `DroppedFile` into `drag_target_*` with a `DragData` from
-  `drag_data_create`), drags between tabs or windows.
+  `drag_data_create`), drags between tabs or windows. One Chromium
+  feature goes with this: `on_before_command_line_processing` enables
+  `GenerateDragOverlayBeforeDragStart`, without which Blink cancels
+  every drag whose `dragstart` handler sets `pointer-events: none` on
+  the element, before the embedder is ever asked (C9 in
+  `docs/upstream-issues.md`).
 - **The page context menu is osmena's; CEF's is declined.**
   `TabContextMenuHandler::run_context_menu` cancels CEF's callback at
   once, keeps the frame and point in `ViewState::context_menu`, and
@@ -366,23 +371,32 @@ A task is complete only when:
 
 ## Status and handoff (2026-11-05)
 
-Drag and drop within a page (see Conventions), from the report that
-draggable divs sometimes stop reacting to the pointer and vanish mid
-drag: both are the page's `dragstart` handler's doing, never undone
-because `dragend` never came. Verified: `cargo test --workspace`
-(the frame's blending test among them), clippy, fmt, and a scripted
-launch of the debug build on a drag-and-drop test page with no
-input, which is all a script can do here (a synthetic `dragstart`
-never reaches `StartDragging`; the real gesture is needed). Not
-verified by hand: the manual checklist's drag-and-drop item (7),
-which is the first thing to try: on an HTML5 drag-and-drop demo the
-image should follow the pointer, the zone should react, a drop
-should land, and a release over the toolbar or Escape should put the
-element back; `RUST_LOG=nautilus_engine=debug` logs one "drag
-started" and one "drag ended" per gesture. If the image does not
-show, `DragData::has_image` was 0 or `as_bitmap` at the view's scale
-returned nothing: log both. If the pointer sticks on no-drop after a
-drop, `update_drag_cursor` did not arrive for the last move.
+Drag and drop within a page, in two halves (see Conventions): the
+embedder side (`DragSession`, the drop-target calls, the drag image)
+and the Chromium feature that C9 describes, without which Blink
+cancelled any drag whose `dragstart` handler set `pointer-events:
+none` before the embedder saw it at all.
+
+Verified by driving real drags with SendInput against the debug
+build, on a probe page with six sources (a div that sets data, a
+plain div, a link, an image, a div that sets `pointer-events: none`,
+a div that only fades, and a text selection). Every one logs one
+"drag started" and one "drag ended … dropped" in the engine, and the
+page gets `drag`, `dragenter`, `drop` with the right
+`dataTransfer.types` (`text/plain` for the divs, `text/uri-list` and
+`text/html` for the link, `Files` for the image) and `dragend` with
+`dropEffect=move`. The probe page and its driver are in the session
+scratchpad (`dragsources.html`, `dragsources.ps1`). Also `cargo test
+--workspace` (the frame's blending test among them), clippy, fmt.
+
+Not verified: the cancel paths by hand (a release over the toolbar,
+Escape mid-drag, Alt+Tab mid-drag) and whether the drag image looks
+right by eye, since the probe only reads the event trace; macOS
+entirely. If a drag ever sticks on the no-drop cursor after a drop,
+`update_drag_cursor` did not arrive for the last move. Note that the
+older `draggable-hover.html` probe in the scratchpad, written before
+any of this was run, fails on its card A for the C9 reason and is
+superseded by `dragsources.html`.
 
 ## Status and handoff (2026-11-03)
 

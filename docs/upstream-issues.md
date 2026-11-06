@@ -127,6 +127,31 @@ gives every key but a modifier the character AppKit's event would carry
 modifier key's own event its modifier flag (Shift's press carries
 Shift, its release not), so the flags change reads the right way.
 
+### C9: Blink cancels a drag whose `dragstart` handler hides the source from hit testing
+
+A page that marks the dragged element on `dragstart` with
+`pointer-events: none` (what most drag-and-drop code and libraries do,
+alongside fading it) could not be dragged at all: the page saw
+`dragstart` and then `dragend` a millisecond later, and no drag ever
+reached the embedder. `MouseEventManager::TryStartDrag` dispatches
+`dragstart` and then calls `DragController::StartDrag`, which, on the
+legacy path, hit-tests the drag origin once more and returns false
+unless the hit lands on the drag source; `pointer-events: none`
+guarantees it does not, and `TryStartDrag` then dispatches `dragend`
+itself and gives up. Nothing on the embedder's side is consulted, so
+this is neither CEF's nor the windowless path's doing. Chromium's own
+fix is the `GenerateDragOverlayBeforeDragStart` feature, which builds
+the drag overlay before `dragstart` runs and skips the second hit test;
+its comment in `runtime_enabled_features.json5` names this case. The
+feature is `status: "stable"` in Chromium, so current Chrome handles
+these pages, but it is not on in CEF 154's build.
+**Workaround (2026-11-05):** `on_before_command_line_processing` appends
+`--enable-blink-features=GenerateDragOverlayBeforeDragStart`. Verified
+by driving a real drag of such an element: without the switch the drag
+is cancelled at once, with it the drop zone gets `dragenter`, `drop`
+and the source gets `dragend` with `dropEffect=move`. Remove the switch
+on the CEF bump where the feature is on by default.
+
 ## egui and winit
 
 ### E1: IME is enabled only for egui's own text fields

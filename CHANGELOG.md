@@ -15,6 +15,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
   without the page's `dragend`. Drags are now carried out within the
   page (below), and a drop on the chrome, outside the window, or
   Escape mid-drag cancels one with `dragend` all the same.
+- A page that marks the dragged element with `pointer-events: none` in
+  its `dragstart` handler, which most drag-and-drop code does, could
+  not be dragged at all: Blink cancelled the drag a millisecond after
+  announcing it, because it hit-tests the drag origin again and that
+  property makes the hit miss. Chromium fixes this with a feature that
+  is on in Chrome but not in CEF's build yet, which Nautilus now
+  enables (C9 in `docs/upstream-issues.md`).
 - A mouse button pressed in a tab that then closed stayed pressed for
   the window's other tabs until the next click.
 
