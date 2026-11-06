@@ -63,6 +63,8 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- Tab titles and folder names are a notch smaller, and sit on the
+  centre line of their favicon instead of about two pixels below it.
 - The active tab is shaped like Chromium's: rounded on top, flaring
   out at the bottom into a one-pixel line along the strip's edge, in
   the toolbar's colour so it reads as part of the toolbar. The other
