@@ -61,9 +61,10 @@ this repository holds only what is Chromium's.
   an unpacked directory; pin them to the toolbar, where their popups
   open under the button; switch them off or remove them in Settings.
 - **Session restore.** "Continue where you left off" brings the windows
-  and tabs back where they were (tabs load when first shown); after a
-  crash a bar offers the last session; the update's restart restores
-  it too.
+  and tabs back where they were (tabs load when first shown, after a
+  look at each in turn, half a second apart, for its title and
+  favicon); after a crash a bar offers the last session; the update's
+  restart restores it too.
 - **Downloads.** Files go to the Downloads folder (or the one Settings
   names) under their names; a button at the toolbar's right end fills a
   ring as they arrive and opens a list (Ctrl+J) with pause, resume,

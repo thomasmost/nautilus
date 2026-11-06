@@ -6,8 +6,9 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-05 (drags carried out within the page; before
-that macOS typing fixes: keys without text carry AppKit's characters,
+_Last updated: 2026-11-06 (osmena's restored tabs warmed one by one
+for their titles and favicons; before that drags carried out within
+the page; before that macOS typing fixes: keys without text carry AppKit's characters,
 unhandled keys stop at the tab; the macOS icon on Apple's grid; the
 bundle claims web links for osmena's default-browser offer; osmena's
 session restore, downloads, page zoom, find in page, bookmarks,
