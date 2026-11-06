@@ -7,11 +7,14 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use cef::{
-    Browser, BrowserSettings, CefString, Frame as CefFrame, ImplBrowser, ImplBrowserHost,
-    ImplFrame, KeyEvent, KeyEventType, MouseButtonType, MouseEvent, WindowInfo,
+    Browser, BrowserSettings, CefString, DragOperationsMask, Frame as CefFrame, ImplBrowser,
+    ImplBrowserHost, ImplFrame, KeyEvent, KeyEventType, MouseButtonType, MouseEvent, WindowInfo,
 };
 use dpi::PhysicalSize;
-use osmena_core::{ButtonAction, EngineInput, MouseButton, PageCommand, PendingTab, TabId};
+use keyboard_types::{Key, KeyState, NamedKey};
+use osmena_core::{
+    ButtonAction, EngineEvent, EngineInput, MouseButton, PageCommand, PendingTab, TabId,
+};
 use osmena_engine::{EngineError, FrameRef, PagePaint, ScreenRect, TabHost as TabHostApi};
 use raw_window_handle::RawWindowHandle;
 use url::Url;
@@ -146,6 +149,170 @@ impl TabHost {
         });
         count
     }
+
+    /// Input while the tab's page drags something (`ViewState::drag`,
+    /// from `start_dragging`): the moves and the release are the drag's,
+    /// not the page's mouse events, and go to Chromium's drop-target
+    /// side. Returns whether `input` was taken by the drag.
+    ///
+    /// While the pointer is over the view the moves are drag-overs (an
+    /// enter first); off it (over the chrome, outside the window: the
+    /// shell's capture keeps sending them) the target is left. The
+    /// primary release drops where the pointer is if it is over the
+    /// view, and ends the drag either way; Escape cancels it. A primary
+    /// press while a session is still open means its release was lost,
+    /// so the session is ended first and the press goes on as usual.
+    fn drag_input(&self, entry: &TabEntry, host: &cef::BrowserHost, input: &EngineInput) -> bool {
+        let scale = self.scale.get();
+        let to_dip = |v: f32| (v / scale).round() as i32;
+        let (width, height) = entry.view.dip_size.get();
+        let inside = |x: i32, y: i32| (0..width).contains(&x) && (0..height).contains(&y);
+        match input {
+            EngineInput::MouseMove { x, y, modifiers } => {
+                let point = (to_dip(*x), to_dip(*y));
+                self.last_pointer.set(point);
+                let event = MouseEvent {
+                    x: point.0,
+                    y: point.1,
+                    modifiers: input::modifier_flags(*modifiers) | self.button_flags.get(),
+                };
+                // Chromium's answer (`update_drag_cursor`) arrives on
+                // a later message-loop turn, but the borrow is not
+                // held across the calls all the same.
+                let (data, allowed, entered, hotspot) = {
+                    let mut drag = entry.view.drag.borrow_mut();
+                    let Some(session) = drag.as_mut() else {
+                        return false;
+                    };
+                    let entered = session.entered;
+                    session.entered = inside(point.0, point.1);
+                    (
+                        Clone::clone(&session.data),
+                        session.allowed,
+                        entered,
+                        session.hotspot,
+                    )
+                };
+                if inside(point.0, point.1) {
+                    if !entered {
+                        let mut data = data;
+                        host.drag_target_drag_enter(Some(&mut data), Some(&event), allowed);
+                    }
+                    host.drag_target_drag_over(Some(&event), allowed);
+                } else if entered {
+                    host.drag_target_drag_leave();
+                    self.delegate.push(EngineEvent::CursorChanged {
+                        tab: entry.view.tab,
+                        cursor: osmena_core::Cursor::NotAllowed,
+                    });
+                }
+                entry
+                    .view
+                    .frame
+                    .borrow_mut()
+                    .set_drag_rect(x.round() as i32 - hotspot.0, y.round() as i32 - hotspot.1);
+                self.delegate.push(EngineEvent::FrameReady(entry.view.tab));
+                true
+            }
+            EngineInput::MouseLeft => {
+                let entered = {
+                    let mut drag = entry.view.drag.borrow_mut();
+                    let Some(session) = drag.as_mut() else {
+                        return false;
+                    };
+                    std::mem::replace(&mut session.entered, false)
+                };
+                if entered {
+                    host.drag_target_drag_leave();
+                }
+                true
+            }
+            EngineInput::MouseButton {
+                action: ButtonAction::Up,
+                button: MouseButton::Primary,
+                x,
+                y,
+                modifiers,
+            } => {
+                if entry.view.drag.borrow().is_none() {
+                    return false;
+                }
+                let point = (to_dip(*x), to_dip(*y));
+                let event = MouseEvent {
+                    x: point.0,
+                    y: point.1,
+                    modifiers: input::modifier_flags(*modifiers) | self.button_flags.get(),
+                };
+                self.button_flags
+                    .set(self.button_flags.get() & !input::button_flag(MouseButton::Primary));
+                self.end_drag(entry, host, inside(point.0, point.1).then_some(event));
+                true
+            }
+            EngineInput::MouseButton {
+                action: ButtonAction::Down,
+                button: MouseButton::Primary,
+                ..
+            } => {
+                if entry.view.drag.borrow().is_some() {
+                    log::debug!("tab {:?}: a drag outlived its gesture", entry.view.tab);
+                    self.end_drag(entry, host, None);
+                }
+                false
+            }
+            EngineInput::Key(key)
+                if key.state == KeyState::Down && key.key == Key::Named(NamedKey::Escape) =>
+            {
+                if entry.view.drag.borrow().is_none() {
+                    return false;
+                }
+                self.end_drag(entry, host, None);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// End the tab's drag: with a drop at `drop` (the pointer is over
+    /// the view, and the page gets `drop` there), or cancelled. The
+    /// source gets `dragend` either way, with the operation the target
+    /// accepted or none. The order is CEF's: the target's calls before
+    /// the source's.
+    fn end_drag(&self, entry: &TabEntry, host: &cef::BrowserHost, drop: Option<MouseEvent>) {
+        let Some(session) = entry.view.drag.borrow_mut().take() else {
+            return;
+        };
+        let none = DragOperationsMask::default();
+        let (x, y, operation) = match drop {
+            Some(event) if session.entered => {
+                host.drag_target_drop(Some(&event));
+                (event.x, event.y, session.operation)
+            }
+            _ => {
+                if session.entered {
+                    host.drag_target_drag_leave();
+                }
+                let (x, y) = self.last_pointer.get();
+                (x, y, none)
+            }
+        };
+        host.drag_source_ended_at(x, y, operation);
+        host.drag_source_system_drag_ended();
+        entry.view.frame.borrow_mut().hide_drag_image();
+        let tab = entry.view.tab;
+        log::debug!(
+            "tab {tab:?}: drag ended at ({x}, {y}), {}",
+            if operation == none {
+                "cancelled"
+            } else {
+                "dropped"
+            }
+        );
+        self.delegate.push(EngineEvent::FrameReady(tab));
+        self.delegate.push(EngineEvent::CursorChanged {
+            tab,
+            cursor: entry.view.cursor.get(),
+        });
+    }
 }
 
 impl TabHostApi for TabHost {
@@ -163,6 +330,8 @@ impl TabHostApi for TabHost {
             closing: Cell::new(false),
             context_menu: RefCell::new(None),
             focused: Cell::new(false),
+            drag: RefCell::new(None),
+            cursor: Cell::new(osmena_core::Cursor::Default),
         });
         let mut client = client_for(view.clone());
         let window_info = WindowInfo::default().set_as_windowless(self.parent);
@@ -203,6 +372,12 @@ impl TabHostApi for TabHost {
     fn close_tab(&mut self, tab: TabId) {
         if let Some(entry) = self.tabs.remove(&tab) {
             entry.view.closing.set(true);
+            // A button pressed in this tab is released nowhere (the
+            // shell delivers a release only to the tab that got the
+            // press), so forget the buttons rather than stamp every
+            // later move with one; a drag goes with its page.
+            self.button_flags.set(0);
+            entry.view.drag.borrow_mut().take();
             if let Some(host) = entry.browser.host() {
                 if host.has_dev_tools() != 0 {
                     host.close_dev_tools();
@@ -315,6 +490,9 @@ impl TabHostApi for TabHost {
         let Some(host) = entry.browser.host() else {
             return;
         };
+        if entry.view.drag.borrow().is_some() && self.drag_input(entry, &host, &input) {
+            return;
+        }
         let scale = self.scale.get();
         let to_dip = |v: f32| (v / scale).round() as i32;
         let mouse = |x: f32, y: f32, flags: u32| MouseEvent {

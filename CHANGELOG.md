@@ -6,6 +6,27 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Fixed
+
+- A drag attempt on a draggable element left the page in its dragging
+  state for good: the element stayed faded, hidden or deaf to the
+  pointer (whatever its `dragstart` did), and never hovered again.
+  Nautilus answered Chromium's drag with "abort", which ends it
+  without the page's `dragend`. Drags are now carried out within the
+  page (below), and a drop on the chrome, outside the window, or
+  Escape mid-drag cancels one with `dragend` all the same.
+- A mouse button pressed in a tab that then closed stayed pressed for
+  the window's other tabs until the next click.
+
+### Added
+
+- Drag and drop within a page: a draggable element, a selection, a
+  link or an image dragged with the mouse reaches the drop targets on
+  the same page (`dragenter`, `dragover`, `drop`), with Chromium's
+  image of it under the pointer and the no-drop cursor where nothing
+  accepts it. Dragging out of the browser, between tabs or windows,
+  and dropping files in from the desktop are not there yet.
+
 ### Changed
 
 - The active tab is shaped like Chromium's: rounded on top, flaring

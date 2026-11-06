@@ -6,11 +6,12 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-03 (macOS typing fixes: keys without text carry
-AppKit's characters, unhandled keys stop at the tab; the macOS icon on
-Apple's grid; the bundle claims web links for osmena's default-browser
-offer; before that osmena's session restore, downloads, page zoom, find
-in page, bookmarks, updates over the air)._
+_Last updated: 2026-11-05 (drags carried out within the page; before
+that macOS typing fixes: keys without text carry AppKit's characters,
+unhandled keys stop at the tab; the macOS icon on Apple's grid; the
+bundle claims web links for osmena's default-browser offer; osmena's
+session restore, downloads, page zoom, find in page, bookmarks,
+updates over the air)._
 
 ## Architecture
 
@@ -167,6 +168,34 @@ Ninja on `PATH`:
   relative to the page area; `TabHost::input` divides by the scale factor
   and tracks click counts and held buttons, which CEF expects the embedder
   to supply.
+- **Drags are carried out within the view.** A windowless browser
+  expects its embedder to run the system drag Chromium starts
+  (`RenderHandler::start_dragging`) and to feed Chromium's drop-target
+  side meanwhile; the `cef` crate's default answers "abort", which
+  ends the drag without the page's `dragend` and leaves the element
+  as `dragstart` left it (faded, hidden, `pointer-events: none`:
+  "draggable divs stop hovering"). `TabRenderHandler::start_dragging`
+  answers "handled" and keeps a `DragSession` on the `ViewState`
+  (Chromium's own clone of the drag data, the allowed operations, the
+  drag image composed into the `Frame` under the pointer). No system
+  drag starts: the shell's pointer capture already sends the pressed
+  tab every move and the release, and `TabHost::drag_input` turns
+  them into `drag_target_drag_enter`/`drag_over` while the pointer is
+  over the view, `drag_target_drag_leave` off it, and on the primary
+  release `drag_target_drop` (over the view) then
+  `drag_source_ended_at` and `drag_source_system_drag_ended`, in CEF's
+  order (target before source); Escape, a release off the view, or a
+  release the shell synthesises on focus loss end it with no
+  operation. `update_drag_cursor` gives the drop effect, shown as the
+  no-drop cursor or the arrow; the page's own cursor is put back at
+  the end, since Chromium does not repeat one it believes is still
+  shown. Never return 1 from `start_dragging` without the two
+  `drag_source_*` calls to follow: Blink suppresses every input event
+  until they arrive. Not done: dragging out of the browser (an OLE
+  `DoDragDrop` with a nested loop inside the callback, as cefclient's
+  `osr_dragdrop_win.cc`), files dropped in from the desktop (winit's
+  `DroppedFile` into `drag_target_*` with a `DragData` from
+  `drag_data_create`), drags between tabs or windows.
 - **The page context menu is osmena's; CEF's is declined.**
   `TabContextMenuHandler::run_context_menu` cancels CEF's callback at
   once, keeps the frame and point in `ViewState::context_menu`, and
@@ -334,6 +363,26 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-05)
+
+Drag and drop within a page (see Conventions), from the report that
+draggable divs sometimes stop reacting to the pointer and vanish mid
+drag: both are the page's `dragstart` handler's doing, never undone
+because `dragend` never came. Verified: `cargo test --workspace`
+(the frame's blending test among them), clippy, fmt, and a scripted
+launch of the debug build on a drag-and-drop test page with no
+input, which is all a script can do here (a synthetic `dragstart`
+never reaches `StartDragging`; the real gesture is needed). Not
+verified by hand: the manual checklist's drag-and-drop item (7),
+which is the first thing to try: on an HTML5 drag-and-drop demo the
+image should follow the pointer, the zone should react, a drop
+should land, and a release over the toolbar or Escape should put the
+element back; `RUST_LOG=nautilus_engine=debug` logs one "drag
+started" and one "drag ended" per gesture. If the image does not
+show, `DragData::has_image` was 0 or `as_bitmap` at the view's scale
+returned nothing: log both. If the pointer sticks on no-drop after a
+drop, `update_drag_cursor` did not arrive for the last move.
 
 ## Status and handoff (2026-11-03)
 

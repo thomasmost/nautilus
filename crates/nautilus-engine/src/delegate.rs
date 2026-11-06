@@ -16,22 +16,22 @@ use cef::{
     BeforeDownloadCallback, Browser, CefString, CefStringList, CefStringUserfree, Client,
     ContextMenuHandler, ContextMenuMediaType, ContextMenuParams, CursorInfo, CursorType,
     DialogHandler, DisplayHandler, DownloadHandler, DownloadImageCallback, DownloadItem,
-    DownloadItemCallback, Errorcode, FileDialogCallback, FileDialogMode, FindHandler,
-    Frame as CefFrame, Image, ImplBeforeDownloadCallback, ImplBinaryValue, ImplBrowser,
-    ImplBrowserHost, ImplClient, ImplContextMenuHandler, ImplContextMenuParams, ImplDialogHandler,
-    ImplDisplayHandler, ImplDownloadHandler, ImplDownloadImageCallback, ImplDownloadItem,
-    ImplFileDialogCallback, ImplFindHandler, ImplFrame, ImplImage, ImplKeyboardHandler,
-    ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler, ImplRequestHandler,
-    ImplRunContextMenuCallback, KeyEvent, KeyEventType, KeyboardHandler, LifeSpanHandler,
-    LoadHandler, LogSeverity, MenuModel, PaintElementType, ProcessId, ProcessMessage, Rect,
-    RenderHandler, RequestHandler, RunContextMenuCallback, ScreenInfo, TerminationStatus,
-    TransitionType, WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDialogHandler,
-    WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback, WrapFindHandler,
-    WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
-    WrapRequestHandler, wrap_client, wrap_context_menu_handler, wrap_dialog_handler,
-    wrap_display_handler, wrap_download_handler, wrap_download_image_callback, wrap_find_handler,
-    wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
-    wrap_request_handler,
+    DownloadItemCallback, DragData, DragOperationsMask, Errorcode, FileDialogCallback,
+    FileDialogMode, FindHandler, Frame as CefFrame, Image, ImplBeforeDownloadCallback,
+    ImplBinaryValue, ImplBrowser, ImplBrowserHost, ImplClient, ImplContextMenuHandler,
+    ImplContextMenuParams, ImplDialogHandler, ImplDisplayHandler, ImplDownloadHandler,
+    ImplDownloadImageCallback, ImplDownloadItem, ImplDragData, ImplFileDialogCallback,
+    ImplFindHandler, ImplFrame, ImplImage, ImplKeyboardHandler, ImplLifeSpanHandler,
+    ImplLoadHandler, ImplRenderHandler, ImplRequestHandler, ImplRunContextMenuCallback, KeyEvent,
+    KeyEventType, KeyboardHandler, LifeSpanHandler, LoadHandler, LogSeverity, MenuModel,
+    PaintElementType, ProcessId, ProcessMessage, Rect, RenderHandler, RequestHandler,
+    RunContextMenuCallback, ScreenInfo, TerminationStatus, TransitionType, WindowOpenDisposition,
+    WrapClient, WrapContextMenuHandler, WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler,
+    WrapDownloadImageCallback, WrapFindHandler, WrapKeyboardHandler, WrapLifeSpanHandler,
+    WrapLoadHandler, WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_context_menu_handler,
+    wrap_dialog_handler, wrap_display_handler, wrap_download_handler, wrap_download_image_callback,
+    wrap_find_handler, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
+    wrap_render_handler, wrap_request_handler,
 };
 use osmena_core::{
     Cursor, DownloadPolicy, DownloadReport, DownloadState, EditState, EngineEvent, ExtensionSource,
@@ -221,6 +221,32 @@ pub(crate) struct MenuPoint {
     pub y: i32,
 }
 
+/// A drag the page started on one of its draggable elements
+/// (`dragstart`), carried out within the view. Chromium expects the
+/// embedder to run the system drag and to feed its own drop target
+/// side meanwhile; here no system drag starts. The shell's pointer
+/// capture keeps sending the pressed tab every move and the release,
+/// and `TabHost::drag_input` turns them into Chromium's drop-target
+/// calls, so the page gets the whole `drag`, `dragover`, `drop`,
+/// `dragend` cycle and unwinds whatever `dragstart` set up. Nothing
+/// leaves the view: a drop on the chrome, on another window or outside
+/// the browser ends as a cancelled drag (`dragend` all the same).
+pub(crate) struct DragSession {
+    /// Chromium's own copy of what is dragged (the lent object is
+    /// read-only), fed back to it when the pointer enters the view.
+    pub data: DragData,
+    /// The operations the source allows (`effectAllowed`).
+    pub allowed: DragOperationsMask,
+    /// Whether Chromium's drop target has been told the drag is over
+    /// the view (`drag_target_drag_enter`) and not since told it left.
+    pub entered: bool,
+    /// The operation the page accepts where the pointer is, as Chromium
+    /// last said (`update_drag_cursor`); none until it does.
+    pub operation: DragOperationsMask,
+    /// The pointer's offset into the drag image, physical pixels.
+    pub hotspot: (i32, i32),
+}
+
 /// What one tab's handlers need: the tab id, the geometry CEF asks about,
 /// and the frame CEF paints into.
 pub(crate) struct ViewState {
@@ -244,6 +270,12 @@ pub(crate) struct ViewState {
     /// focus can be told again to a renderer that arrives later
     /// (`on_load_start`).
     pub focused: Cell<bool>,
+    /// The drag the page is carrying out, while it is.
+    pub drag: RefCell<Option<DragSession>>,
+    /// The cursor the page last asked for, to put back after a drag
+    /// (a drag shows its own, and Chromium does not repeat a cursor it
+    /// believes is still shown).
+    pub cursor: Cell<Cursor>,
 }
 
 impl ViewState {
@@ -504,7 +536,106 @@ wrap_render_handler! {
             drop(frame);
             self.view.push(EngineEvent::FrameReady(self.view.tab));
         }
+
+        // The page started a drag (`dragstart` on a draggable element,
+        // a selection, a link, an image). Answering "not handled"
+        // makes CEF end the drag at once without `dragend`, which
+        // leaves the page in whatever state `dragstart` put it in
+        // (an element faded, hidden, or with `pointer-events: none`,
+        // until a `dragend` that never comes). So the drag is handled:
+        // kept as a session the host carries out with the pointer
+        // events it gets anyway (`DragSession`).
+        fn start_dragging(
+            &self,
+            _browser: Option<&mut Browser>,
+            drag_data: Option<&mut DragData>,
+            allowed_ops: DragOperationsMask,
+            x: ::std::os::raw::c_int,
+            y: ::std::os::raw::c_int,
+        ) -> ::std::os::raw::c_int {
+            let Some(lent) = drag_data else {
+                return 0;
+            };
+            let data = ImplDragData::clone(lent).unwrap_or_else(|| Clone::clone(lent));
+            let scale = self.view.scale.get();
+            let to_px = |v: i32| (v as f32 * scale).round() as i32;
+            let hotspot = data.image_hotspot();
+            let hotspot = (to_px(hotspot.x), to_px(hotspot.y));
+            let image = (data.has_image() != 0)
+                .then(|| data.image())
+                .flatten()
+                .and_then(|mut image| drag_image_from(&mut image, scale));
+            {
+                let mut frame = self.view.frame.borrow_mut();
+                match image {
+                    Some((width, height, bgra)) => {
+                        frame.set_drag_image(width, height, &bgra);
+                        frame.set_drag_rect(to_px(x) - hotspot.0, to_px(y) - hotspot.1);
+                    }
+                    None => frame.hide_drag_image(),
+                }
+            }
+            *self.view.drag.borrow_mut() = Some(DragSession {
+                data,
+                allowed: allowed_ops,
+                entered: false,
+                operation: DragOperationsMask::default(),
+                hotspot,
+            });
+            log::debug!(
+                "tab {:?}: drag started at ({x}, {y}), allowed {allowed_ops:?}",
+                self.view.tab
+            );
+            self.view.push(EngineEvent::FrameReady(self.view.tab));
+            1
+        }
+
+        // What the page under the pointer would do with a drop (its
+        // `dropEffect`), which is the cursor the drag shows.
+        fn update_drag_cursor(&self, _browser: Option<&mut Browser>, operation: DragOperationsMask) {
+            if let Some(session) = self.view.drag.borrow_mut().as_mut() {
+                session.operation = operation;
+            }
+            self.view.push(EngineEvent::CursorChanged {
+                tab: self.view.tab,
+                cursor: drag_cursor(operation),
+            });
+        }
     }
+}
+
+/// The cursor for a drag over somewhere that would do `operation` with
+/// a drop: none means no drop here.
+pub(crate) fn drag_cursor(operation: DragOperationsMask) -> Cursor {
+    if operation.as_ref().0 == cef::sys::cef_drag_operations_mask_t::DRAG_OPERATION_NONE.0 {
+        Cursor::NotAllowed
+    } else {
+        Cursor::Default
+    }
+}
+
+/// Chromium's drag image at the view's scale as premultiplied BGRA, with
+/// its size in pixels.
+fn drag_image_from(image: &mut Image, scale: f32) -> Option<(u32, u32, Vec<u8>)> {
+    if image.is_empty() != 0 {
+        return None;
+    }
+    let (mut width, mut height) = (0, 0);
+    let bitmap = image.as_bitmap(
+        scale,
+        cef::ColorType::BGRA_8888,
+        cef::AlphaType::PREMULTIPLIED,
+        Some(&mut width),
+        Some(&mut height),
+    )?;
+    let size = bitmap.size();
+    let mut bgra = vec![0u8; size];
+    let copied = bitmap.data(Some(&mut bgra), 0);
+    if copied != size || width <= 0 || height <= 0 || size != width as usize * height as usize * 4 {
+        log::warn!("drag image bitmap has unexpected size");
+        return None;
+    }
+    Some((width as u32, height as u32, bgra))
 }
 
 wrap_life_span_handler! {
@@ -772,9 +903,11 @@ wrap_display_handler! {
             type_: CursorType,
             _custom_cursor_info: Option<&CursorInfo>,
         ) -> ::std::os::raw::c_int {
+            let cursor = cursor_from(type_);
+            self.view.cursor.set(cursor);
             self.view.push(EngineEvent::CursorChanged {
                 tab: self.view.tab,
-                cursor: cursor_from(type_),
+                cursor,
             });
             1
         }

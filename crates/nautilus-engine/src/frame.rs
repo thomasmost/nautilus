@@ -6,6 +6,10 @@
 //! frame keeps the latest of each and composes them when the window asks
 //! for pixels.
 //!
+//! While the page drags one of its elements, the image Chromium made
+//! of it (what the system would carry in a native drag) is composed
+//! under the pointer as well, blended, since it is translucent.
+//!
 //! CEF names the rectangles a view paint changed. When every change
 //! since the pixels were last handed out was a view paint of the same
 //! size, the frame copies only those rectangles in and reports them, so
@@ -72,6 +76,12 @@ pub struct Frame {
     /// Where the popup goes, in physical pixels relative to the view.
     popup_rect: (i32, i32),
     popup_shown: bool,
+    /// The image of what the page drags, premultiplied BGRA.
+    drag: Image,
+    /// Where the drag image goes, in physical pixels relative to the
+    /// view: the pointer less the image's hotspot.
+    drag_rect: (i32, i32),
+    drag_shown: bool,
     dirty: bool,
     /// The parts of the view changed since the last `take_dirty`, while
     /// `partial` says they are the whole story.
@@ -122,29 +132,33 @@ impl Frame {
         self.dirty_rects.clear();
     }
 
-    /// The view with the popup composed over it, BGRA, row-major, tightly
-    /// packed (`size()` pixels).
+    /// The view with the popup and the drag image composed over it,
+    /// BGRA, row-major, tightly packed (`size()` pixels).
     pub fn pixels(&self) -> Cow<'_, [u8]> {
-        if !self.popup_shown || self.popup.bgra.is_empty() || self.view.bgra.is_empty() {
+        let popup = (self.popup_shown && !self.popup.bgra.is_empty()).then_some((
+            &self.popup,
+            self.popup_rect,
+            false,
+        ));
+        let drag = (self.drag_shown && !self.drag.bgra.is_empty()).then_some((
+            &self.drag,
+            self.drag_rect,
+            true,
+        ));
+        if self.view.bgra.is_empty() || (popup.is_none() && drag.is_none()) {
             return Cow::Borrowed(&self.view.bgra);
         }
         let mut out = self.view.bgra.clone();
-        let (vw, vh) = (i64::from(self.view.width), i64::from(self.view.height));
-        let (px, py) = (i64::from(self.popup_rect.0), i64::from(self.popup_rect.1));
-        for row in 0..i64::from(self.popup.height) {
-            let y = py + row;
-            if y < 0 || y >= vh {
-                continue;
-            }
-            for col in 0..i64::from(self.popup.width) {
-                let x = px + col;
-                if x < 0 || x >= vw {
-                    continue;
-                }
-                let src = ((row * i64::from(self.popup.width) + col) * 4) as usize;
-                let dst = ((y * vw + x) * 4) as usize;
-                out[dst..dst + 4].copy_from_slice(&self.popup.bgra[src..src + 4]);
-            }
+        for (image, (x, y), blend) in [popup, drag].into_iter().flatten() {
+            compose(
+                &mut out,
+                self.view.width,
+                self.view.height,
+                image,
+                x,
+                y,
+                blend,
+            );
         }
         Cow::Owned(out)
     }
@@ -184,6 +198,64 @@ impl Frame {
         self.popup_shown = shown;
         if !shown {
             self.popup = Image::default();
+        }
+    }
+
+    /// The page started dragging something that looks like `bgra`
+    /// (premultiplied), to be shown at `drag_rect`.
+    pub(crate) fn set_drag_image(&mut self, width: u32, height: u32, bgra: &[u8]) {
+        self.change_all();
+        self.drag.set(width, height, bgra);
+        self.drag_shown = true;
+    }
+
+    /// The drag image moved (with the pointer).
+    pub(crate) fn set_drag_rect(&mut self, x: i32, y: i32) {
+        if self.drag_shown && self.drag_rect != (x, y) {
+            self.change_all();
+        }
+        self.drag_rect = (x, y);
+    }
+
+    /// The drag ended: the image goes.
+    pub(crate) fn hide_drag_image(&mut self) {
+        if self.drag_shown {
+            self.change_all();
+        }
+        self.drag_shown = false;
+        self.drag = Image::default();
+    }
+}
+
+/// Draw `image` over `out` (a `width` by `height` BGRA image) with its
+/// top left at (`x`, `y`), clipped: copied as is, or, `blend`, as
+/// premultiplied pixels over an opaque background.
+fn compose(out: &mut [u8], width: u32, height: u32, image: &Image, x: i32, y: i32, blend: bool) {
+    let (vw, vh) = (i64::from(width), i64::from(height));
+    let (px, py) = (i64::from(x), i64::from(y));
+    for row in 0..i64::from(image.height) {
+        let y = py + row;
+        if y < 0 || y >= vh {
+            continue;
+        }
+        for col in 0..i64::from(image.width) {
+            let x = px + col;
+            if x < 0 || x >= vw {
+                continue;
+            }
+            let src = ((row * i64::from(image.width) + col) * 4) as usize;
+            let dst = ((y * vw + x) * 4) as usize;
+            let pixel = &image.bgra[src..src + 4];
+            if blend {
+                let keep = u32::from(255 - pixel[3]);
+                for channel in 0..3 {
+                    let under = u32::from(out[dst + channel]) * keep / 255;
+                    out[dst + channel] = (u32::from(pixel[channel]) + under).min(255) as u8;
+                }
+                out[dst + 3] = 255;
+            } else {
+                out[dst..dst + 4].copy_from_slice(pixel);
+            }
         }
     }
 }
@@ -277,5 +349,35 @@ mod tests {
         assert_eq!(frame.pixels().len(), 36);
         frame.show_popup(false);
         assert_eq!(pixel(&frame, 2, 2), [0; 4]);
+    }
+
+    /// The drag image is blended over the view (premultiplied, so a
+    /// half-transparent pixel adds its own value to half the view's),
+    /// follows its rectangle, and goes when hidden; each is a change of
+    /// the whole frame.
+    #[test]
+    fn a_drag_image_is_blended_under_the_pointer_until_hidden() {
+        let mut frame = Frame::default();
+        frame.paint_view(3, 3, &[200, 200, 200, 255].repeat(9), &[]);
+        frame.take_dirty();
+        // One pixel, half-transparent dark blue.
+        frame.set_drag_image(1, 1, &[100, 0, 0, 128]);
+        frame.set_drag_rect(1, 1);
+        assert!(frame.take_dirty());
+        assert!(frame.dirty_rects().is_empty());
+        assert_eq!(pixel(&frame, 1, 1), [199, 99, 99, 255]);
+        assert_eq!(pixel(&frame, 0, 0), [200, 200, 200, 255]);
+        frame.set_drag_rect(2, 0);
+        assert!(frame.take_dirty());
+        assert_eq!(pixel(&frame, 1, 1), [200, 200, 200, 255]);
+        assert_eq!(pixel(&frame, 2, 0), [199, 99, 99, 255]);
+        // Off the edge: clipped.
+        frame.set_drag_rect(-1, 5);
+        assert_eq!(frame.pixels().len(), 36);
+        frame.take_dirty();
+        frame.hide_drag_image();
+        assert!(frame.take_dirty());
+        assert_eq!(pixel(&frame, 2, 0), [200, 200, 200, 255]);
+        assert!(!frame.take_dirty());
     }
 }

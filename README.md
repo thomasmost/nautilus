@@ -258,6 +258,15 @@ engine glue. Each item must pass.
    Hovering a link shows its URL in the status overlay at the bottom left
    and the pointer becomes a hand; over text it becomes an I-beam. A
    `<select>` opens its list over the page and picks on click.
+   **Drag and drop.** On a page with draggable elements and a drop
+   zone (any HTML5 drag-and-drop demo), press on an element and drag:
+   an image of it follows the pointer, the zone reacts as the pointer
+   crosses it (its `dragenter`/`dragover` styling), the pointer shows
+   no-drop elsewhere, and releasing over the zone drops it there;
+   releasing over the toolbar or outside the window, or pressing
+   Escape mid-drag, cancels the drag and the element returns to
+   normal, hovering as before. Selected text dragged into a text
+   field on the same page lands there.
    **Page menu.** Right-click a link: a native menu at the pointer offers
    Open link in new tab, Open link in new window, Save link as…, Copy
    link address, and Inspect. "Open link in new tab" adds a tab right
@@ -566,6 +575,10 @@ Upstream causes and the features they block are tracked in
   macOS 26 may show inside its own tile.
 - A download in progress is cancelled when the browser exits (the list
   marks it interrupted, with Retry).
+- Drag and drop stays within a page: no system drag starts, so nothing
+  can be dragged out of a page (to another tab, window, or
+  application), and files from the desktop cannot be dropped in. A
+  drag released anywhere but over its own page is cancelled.
 - Without the system title bar, Windows 11's snap-layouts flyout on the
   maximize control is not available (snap by dragging still is), and the
   frameless window has not been tried on macOS.
