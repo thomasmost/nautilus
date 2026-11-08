@@ -6,6 +6,20 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Added
+
+- Blocked sites. A profile keeps websites it refuses to show, by
+  registrable domain, so blocking `youtube.com` covers every subdomain:
+  "Block on this profile" in a tab's menu (behind a confirmation) or
+  the "Blocked sites" section of the settings window, which is also
+  the only place a site is unblocked. Typed addresses are stopped by
+  the shell; links, scripts and redirects are cancelled in Chromium's
+  before-browse hook before any request goes out, and the tab shows a
+  block page over `about:blank` with the attempted address in the
+  address bar. Back returns to the page before; Reload re-rolls the
+  page's line; unblocking brings the tabs back (osmena, with
+  `on_before_browse` and `location.replace` here).
+
 ### Fixed
 
 - Tab titles sat a pixel or two above the centre line of their

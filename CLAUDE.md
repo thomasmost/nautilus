@@ -6,7 +6,8 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-06 (osmena's restored tabs warmed one by one
+_Last updated: 2026-11-08 (blocked sites over Chromium's before-browse
+hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
 for their titles and favicons; before that drags carried out within
 the page; before that macOS typing fixes: keys without text carry AppKit's characters,
 unhandled keys stop at the tab; the macOS icon on Apple's grid; the
@@ -369,6 +370,65 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-08)
+
+Blocked sites over Chromium's before-browse hook (osmena has the list,
+the block page and the settings section; the README's feature bullet
+and checklist item 17 say what a user sees). `TabRequestHandler::
+on_before_browse` (`delegate.rs`) asks the pure `blocked_navigation`
+filter whether a main-frame URL falls under a blocked site. If it does,
+the hook returns 1, which cancels the load before any request, and
+pushes `EngineEvent::NavigationBlocked`. The list lives in
+`DelegateState` (`blocked`, set by `Engine::configure_blocked_sites`).
+`TabHost::replace_with_blank` runs `location.replace('about:blank')` on
+the main frame, so a blocked tab's entry is swapped rather than buried
+under the block page. `on_load_start` logs the URL of each main-frame
+load. The filter's tests cover the subdomain rule, subframes, and the
+non-web schemes (`about:`, `data:`, `view-source:`, `chrome:`,
+`devtools:`, extension pages, text that is no URL).
+
+Scripted run (debug build on Windows, `NAUTILUS_TEST_PAGE_SCRIPT` clicking
+a link to example.com): `load started at file:///...`, the console line
+`clicking`, `blocked navigation to https://example.com/`, then
+`load started at about:blank`, and no `load started at https://example.com/`
+in any run. With `NAUTILUS_CEF_LOG=verbose`, Chromium's log had no line
+naming example.com. The test script runs again at every main-frame load
+end, so the first version clicked twice and produced two blocked lines and
+two about:blank loads; a guarded version that clicks once gave exactly one
+of each.
+
+Redirect (a 302 from a local server to https://example.com/, in a probe
+profile): the hook saw it. The log has
+`blocked navigation to https://example.com/ (a redirect)` (the file breaks
+that line after "(a "), then one `load started at about:blank`, and the
+exit line reads `at https://example.com/`. No `load started` named
+example.com.
+
+By hand: a typed example.com gives the block page with no hook line, and
+Back returns to the previous page. Blocking the page of a tab from its
+menu, with the real replacement, returns Back straight to the previous page
+with no load of the blocked site after the block. Forward then shows a plain
+blank page with `about:blank` in the address bar. That is the replaced entry
+itself, known and accepted: nothing of the site is requested, and typing the
+address again gives the block page. Remove in the settings window returns the
+tab to the site on its own. "View page source" opens a `view-source:` tab.
+
+Not verified: DevTools on a blocked tab; macOS; the puzzle menu's
+"Manage extensions" opens the settings window by design, and typing
+`chrome://extensions` into a `view-source:` tab did not navigate in the
+run (not tried on a normal tab). Observed: a URL change to
+`about:blank#x` on a blocked tab clears the block, since the blank-page
+rule compares the exact string. A test script that set a hash on the
+blank page did this in Nautilus (the exit line read `at
+about:blank#once`), and an opener window can do the same with
+`w.location = 'about:blank#x'`, even cross-origin. The effect is
+cosmetic: the block page gives way to a plain blank page, nothing from
+the blocked site is requested, and the hook still cancels any later
+navigation to the site. The fix belongs in osmena's `apply` (match the
+scheme and path, ignoring the fragment) as a follow-up. CEF logs
+"Timeout of new browser info response" after a block load; it has not
+been traced.
 
 ## Status and handoff (2026-11-05)
 

@@ -22,20 +22,22 @@ use cef::{
     ImplContextMenuParams, ImplDialogHandler, ImplDisplayHandler, ImplDownloadHandler,
     ImplDownloadImageCallback, ImplDownloadItem, ImplDragData, ImplFileDialogCallback,
     ImplFindHandler, ImplFrame, ImplImage, ImplKeyboardHandler, ImplLifeSpanHandler,
-    ImplLoadHandler, ImplRenderHandler, ImplRequestHandler, ImplRunContextMenuCallback, KeyEvent,
-    KeyEventType, KeyboardHandler, LifeSpanHandler, LoadHandler, LogSeverity, MenuModel,
-    PaintElementType, ProcessId, ProcessMessage, Rect, RenderHandler, RequestHandler,
-    RunContextMenuCallback, ScreenInfo, TerminationStatus, TransitionType, WindowOpenDisposition,
-    WrapClient, WrapContextMenuHandler, WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler,
-    WrapDownloadImageCallback, WrapFindHandler, WrapKeyboardHandler, WrapLifeSpanHandler,
-    WrapLoadHandler, WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_context_menu_handler,
-    wrap_dialog_handler, wrap_display_handler, wrap_download_handler, wrap_download_image_callback,
-    wrap_find_handler, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
-    wrap_render_handler, wrap_request_handler,
+    ImplLoadHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
+    ImplRunContextMenuCallback, KeyEvent, KeyEventType, KeyboardHandler, LifeSpanHandler,
+    LoadHandler, LogSeverity, MenuModel, PaintElementType, ProcessId, ProcessMessage, Rect,
+    RenderHandler, Request, RequestHandler, RunContextMenuCallback, ScreenInfo, TerminationStatus,
+    TransitionType, WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDialogHandler,
+    WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback, WrapFindHandler,
+    WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
+    WrapRequestHandler, wrap_client, wrap_context_menu_handler, wrap_dialog_handler,
+    wrap_display_handler, wrap_download_handler, wrap_download_image_callback, wrap_find_handler,
+    wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
+    wrap_request_handler,
 };
 use osmena_core::{
-    Cursor, DownloadPolicy, DownloadReport, DownloadState, EditState, EngineEvent, ExtensionSource,
-    LoadState, Media, MediaKind, Misspelling, PageContext, PendingTab, RgbaImage, TabId,
+    BlockedSites, Cursor, DownloadPolicy, DownloadReport, DownloadState, EditState, EngineEvent,
+    ExtensionSource, LoadState, Media, MediaKind, Misspelling, PageContext, PendingTab, RgbaImage,
+    TabId,
 };
 use url::Url;
 
@@ -96,6 +98,9 @@ pub(crate) struct DelegateState {
     /// The callback that cancels, pauses or resumes each download that
     /// is going, by Chromium's id for it.
     downloads: RefCell<HashMap<u32, DownloadItemCallback>>,
+    /// The sites the profile blocks, as the shell last said; a
+    /// main-frame navigation to one is cancelled in `on_before_browse`.
+    blocked: RefCell<BlockedSites>,
 }
 
 impl DelegateState {
@@ -174,6 +179,10 @@ impl DelegateState {
     /// asked for a tab): offer it to the last focused tab's window.
     pub(crate) fn set_download_policy(&self, policy: DownloadPolicy) {
         *self.download_policy.borrow_mut() = Some(policy);
+    }
+
+    pub(crate) fn set_blocked_sites(&self, sites: BlockedSites) {
+        *self.blocked.borrow_mut() = sites;
     }
 
     pub(crate) fn download_callback(&self, id: u32) -> Option<DownloadItemCallback> {
@@ -714,9 +723,13 @@ wrap_load_handler! {
             frame: Option<&mut CefFrame>,
             _transition_type: TransitionType,
         ) {
-            let main = frame.is_some_and(|f| f.is_main() != 0);
-            if main {
-                log::debug!("tab {:?}: load started", self.view.tab);
+            let main_url = frame
+                .as_deref()
+                .filter(|f| f.is_main() != 0)
+                .map(|f| text(f.url()));
+            let main = main_url.is_some();
+            if let Some(url) = &main_url {
+                log::debug!("tab {:?}: load started at {url}", self.view.tab);
             }
             if self.view.focused.get()
                 && main
@@ -953,6 +966,42 @@ wrap_request_handler! {
     }
 
     impl RequestHandler {
+        /// Every navigation of this tab, before any request goes out.
+        /// A main-frame load of a blocked site is cancelled here and
+        /// reported, and the model puts the block page up; the blank
+        /// page it sits over has no site and passes.
+        fn on_before_browse(
+            &self,
+            _browser: Option<&mut Browser>,
+            frame: Option<&mut CefFrame>,
+            request: Option<&mut Request>,
+            _user_gesture: ::std::os::raw::c_int,
+            is_redirect: ::std::os::raw::c_int,
+        ) -> ::std::os::raw::c_int {
+            let main_frame = frame.is_some_and(|f| f.is_main() != 0);
+            let Some(request) = request else {
+                return 0;
+            };
+            let url = text(request.url());
+            let blocked =
+                blocked_navigation(&self.view.delegate.blocked.borrow(), &url, main_frame);
+            match blocked {
+                Some(url) => {
+                    log::info!(
+                        "tab {:?}: blocked navigation to {url}{}",
+                        self.view.tab,
+                        if is_redirect != 0 { " (a redirect)" } else { "" }
+                    );
+                    self.view.push(EngineEvent::NavigationBlocked {
+                        tab: self.view.tab,
+                        url,
+                    });
+                    1
+                }
+                None => 0,
+            }
+        }
+
         fn on_open_urlfrom_tab(
             &self,
             _browser: Option<&mut Browser>,
@@ -1112,6 +1161,22 @@ fn page_context(params: &ContextMenuParams) -> PageContext {
         editable,
         misspelling,
     }
+}
+
+/// The navigation `on_before_browse` cancels: a main-frame load of a
+/// URL on a blocked site. A subframe passes (nothing is blocked
+/// inside a page), and so does anything that is no web page, since
+/// `BlockedSites::site_for` gives nothing outside `http` and
+/// `https`: `about:`, `data:`, `view-source:`, Chromium's own
+/// `chrome:` and `devtools:` pages, extension pages, and text that
+/// is no URL. Over plain text so tests need no CEF.
+pub(crate) fn blocked_navigation(sites: &BlockedSites, url: &str, main_frame: bool) -> Option<Url> {
+    if !main_frame {
+        return None;
+    }
+    let url = Url::parse(url).ok()?;
+    sites.blocks(&url)?;
+    Some(url)
 }
 
 /// A string CEF hands back, as Rust text.
@@ -1615,5 +1680,47 @@ mod tests {
         assert_eq!(edit_command(FLAG_COMMAND | FLAG_SHIFT, 0x43), None);
         assert_eq!(edit_command(FLAG_COMMAND, 0x42), None);
         assert_eq!(edit_command(0, 0x43), None);
+    }
+
+    use super::blocked_navigation;
+    use osmena_core::BlockedSites;
+
+    fn blocking(site: &str) -> BlockedSites {
+        let mut b = BlockedSites::default();
+        b.add(site);
+        b
+    }
+
+    #[test]
+    fn a_main_frame_load_of_a_blocked_site_or_its_subdomain_is_cancelled() {
+        let b = blocking("example.com");
+        let hit = blocked_navigation(&b, "https://example.com/page", true).unwrap();
+        assert_eq!(hit.as_str(), "https://example.com/page");
+        assert!(blocked_navigation(&b, "https://www.example.com/", true).is_some());
+        assert!(blocked_navigation(&b, "http://m.example.com:8080/x?y", true).is_some());
+        assert!(blocked_navigation(&b, "https://notexample.com/", true).is_none());
+        assert!(blocked_navigation(&b, "https://example.org/", true).is_none());
+    }
+
+    #[test]
+    fn subframes_and_pages_without_a_site_pass() {
+        let mut b = blocking("example.com");
+        assert!(blocked_navigation(&b, "https://example.com/", false).is_none());
+        // Even with the engine pages' "hosts" in the list, they pass:
+        // only web pages have sites.
+        b.add("extensions");
+        b.add("devtools");
+        b.add("abcdefghijklmnop");
+        for url in [
+            "about:blank",
+            "data:text/html,<a href='https://example.com/'>x</a>",
+            "view-source:https://example.com/",
+            "chrome://extensions/",
+            "devtools://devtools/bundled/inspector.html",
+            "chrome-extension://abcdefghijklmnop/popup.html",
+            "not a url",
+        ] {
+            assert!(blocked_navigation(&b, url, true).is_none(), "{url}");
+        }
     }
 }

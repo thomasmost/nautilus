@@ -399,6 +399,20 @@ impl TabHostApi for TabHost {
         });
     }
 
+    /// `location.replace` swaps the current entry for the blank page;
+    /// `load_url` would add one and leave the blocked page behind Back.
+    fn replace_with_blank(&self, tab: TabId) {
+        self.with(tab, |entry| {
+            if let Some(frame) = entry.browser.main_frame() {
+                frame.execute_java_script(
+                    Some(&CefString::from("location.replace('about:blank')")),
+                    None,
+                    0,
+                );
+            }
+        });
+    }
+
     fn back(&self, tab: TabId) {
         self.with(tab, |entry| {
             if entry.browser.can_go_back() != 0 {

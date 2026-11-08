@@ -21,8 +21,8 @@ use cef::{
     wrap_life_span_handler,
 };
 use osmena_core::{
-    DownloadPolicy, EngineEvent, EngineInfo, ExtensionSource, ExtensionSupport, PageTools,
-    PendingTab,
+    BlockedSites, DownloadPolicy, EngineEvent, EngineInfo, ExtensionSource, ExtensionSupport,
+    PageTools, PendingTab,
 };
 use osmena_engine::raw_window_handle::{DisplayHandle, WindowHandle};
 use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker};
@@ -286,6 +286,10 @@ impl osmena_engine::Engine for Engine {
 
     fn configure_downloads(&self, policy: DownloadPolicy) {
         self.delegate.set_download_policy(policy);
+    }
+
+    fn configure_blocked_sites(&self, sites: BlockedSites) {
+        self.delegate.set_blocked_sites(sites);
     }
 
     fn cancel_download(&self, id: u32) {

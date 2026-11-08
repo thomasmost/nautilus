@@ -73,6 +73,12 @@ this repository holds only what is Chromium's.
 - **Page zoom.** Ctrl and + or − (or the wheel) zoom the page through
   Chromium's steps; every tab on the site follows and the site remembers
   its level; a chip beside the address bar shows it; Ctrl+0 resets.
+- **Blocked sites.** A per-profile list of websites the browser refuses
+  to show, by registrable domain; a tab's menu blocks a site behind a
+  confirmation, the settings window lists and unblocks them. Chromium's
+  before-browse hook cancels links, scripts and redirects to a blocked
+  site before any request; the shell stops typed addresses. The tab
+  shows a block page instead (osmena).
 - **Find in page.** Ctrl+F opens a bar at the top right of the page;
   Chromium highlights every match as you type and scrolls to the active
   one, with the count beside the field; Enter and F3 step forward,
@@ -405,7 +411,24 @@ engine glue. Each item must pass.
     example.com in a second tab: it opens at 125%. Ctrl+0: both tabs
     return to 100% and the chip goes; `zoom.toml` in the profile has no
     entry for the site.
-17. **Downloads.** Load a release asset's address (a `latest.toml` from
+17. **Blocked sites.** On example.com, right-click the tab and pick
+    "Block on this profile": the dialog names example.com and warns that
+    only the settings window unblocks; Block turns the page into the
+    profile colour's gradient with one of three lines and "example.com
+    is blocked on this profile" beneath; the address bar still reads
+    `https://example.com/`. Reload changes the line. Back goes to the
+    page before. Type `example.com/other` and press Enter: the block
+    page at once, and with `RUST_LOG=info,nautilus_engine=debug` the only
+    `load started` for the tab after it is `at about:blank`. On another
+    site, click a link to example.com: the block page, with `blocked
+    navigation to https://example.com/` in the log, then one `load
+    started at about:blank` and none naming example.com (with
+    `NAUTILUS_CEF_LOG=verbose`, no request to it either). Open the
+    settings window: "Blocked sites" lists `example.com`; Remove brings
+    the tab back to example.com without asking, and `blocked.toml` in
+    the profile is empty. `view-source:` of an unblocked page opens in a
+    new tab.
+18. **Downloads.** Load a release asset's address (a `latest.toml` from
     the Releases page): the file lands in the Downloads folder and a
     downloads button appears at the toolbar's right end. Ctrl+J opens
     the list with the file and its size; Open starts the default
@@ -413,20 +436,20 @@ engine glue. Each item must pass.
     a large file: the ring on the button fills as it arrives, the row
     shows received of total and the speed, Pause and Resume work, and
     Cmd+Q asks before quitting; Cancel leaves a row with Retry.
-18. **Session restore.** Turn on "Continue where you left off" in
+19. **Session restore.** Turn on "Continue where you left off" in
     Settings, open a second tab, move the window, quit. Launch again:
     the window is where it was with both tabs, the one that was active
     loaded and the other faint; click the faint tab and it loads. Kill
     the process (Task Manager) and launch: a bar under the toolbar
     offers the last session; Restore brings the tabs back and the
     home-page window goes; Dismiss leaves the home page.
-19. **Typing (macOS).** In a page's text field (a login form's email
+20. **Typing (macOS).** In a page's text field (a login form's email
     field), type a word with E and D in it, then press Backspace once:
     every letter appears, one character goes, and neither the emoji
     palette nor the dictation prompt opens. Left and Right move the
     caret one place per press. Ctrl+Cmd+Space opens the palette (what it
     inserts is still lost, E2 in `docs/upstream-issues.md`).
-20. **Default browser (macOS).** On a profile where Nautilus is not the
+21. **Default browser (macOS).** On a profile where Nautilus is not the
     default, a bar under the toolbar says so; "Make default" brings the
     system's question, and choosing Nautilus there makes the bar go and
     Settings → Default browser read "Nautilus is your default browser."
@@ -436,10 +459,10 @@ engine glue. Each item must pass.
     starts and shows only that link. "Open With → Nautilus" on an
     `.html` file in the Finder opens it. "Don't ask again" keeps the bar
     away after a restart; the Settings checkbox brings it back.
-21. **Dock icon (macOS).** While running, the Dock shows the same icon
+22. **Dock icon (macOS).** While running, the Dock shows the same icon
     as the Finder: a white rounded square on Apple's grid, as large as
     its neighbours, with no black outline.
-22. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+23. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging
@@ -625,6 +648,11 @@ Upstream causes and the features they block are tracked in
   CEF distribution; building CEF from Thorium's tree is possible but is a
   multi-hour Chromium build, so Nautilus tracks stock CEF for now. See
   `docs/design-plans/2026-10-19-nautilus-chromium-browser.md`.
+- Typing `chrome://extensions` into a `view-source:` tab did not
+  navigate in a debug run. The likely cause is Chromium or CEF refusing
+  a WebUI navigation out of a view-source tab, not Nautilus's hook,
+  which logs every cancel and logged none. It was not tried on a normal
+  tab.
 
 ## Todo
 
