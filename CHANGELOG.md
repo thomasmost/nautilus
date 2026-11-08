@@ -24,6 +24,19 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- The Launch Panel's field completes an address ahead of the typist
+  (osmena). Before the first space, the most visited page whose
+  address starts with the typing stands in the field, the rest of its
+  address selected after the caret (`github.com` after `gi`), so
+  typing on replaces it and Enter opens the page. Backspace drops the
+  completion and leaves the typing, and a space makes the text a
+  phrase; either way Enter then searches. The dropdown's first row is
+  always what Enter opens: the completed page with its title, the
+  typed address with "Open", or the words with "Search Google" (the
+  engine's name), lit while no match is picked, with the matches under
+  a hairline; while the text is a search the engine's name sits in a
+  small chip at the field's right end.
+
 - Blocked sites. A profile keeps websites it refuses to show, by
   registrable domain, so blocking `youtube.com` covers every subdomain:
   "Block on this profile" in a tab's menu (behind a confirmation) or

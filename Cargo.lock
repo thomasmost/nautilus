@@ -2240,7 +2240,7 @@ dependencies = [
 [[package]]
 name = "osmena-chrome"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=8d38f1185b4f32c53c41849e9f86e6f51de98838#8d38f1185b4f32c53c41849e9f86e6f51de98838"
+source = "git+https://github.com/thomasmost/osmena?rev=773adce3e664c0acd273ac40ca85d210879d27f2#773adce3e664c0acd273ac40ca85d210879d27f2"
 dependencies = [
  "dpi",
  "egui",
@@ -2260,7 +2260,7 @@ dependencies = [
 [[package]]
 name = "osmena-core"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=8d38f1185b4f32c53c41849e9f86e6f51de98838#8d38f1185b4f32c53c41849e9f86e6f51de98838"
+source = "git+https://github.com/thomasmost/osmena?rev=773adce3e664c0acd273ac40ca85d210879d27f2#773adce3e664c0acd273ac40ca85d210879d27f2"
 dependencies = [
  "directories",
  "keyboard-types",
@@ -2273,7 +2273,7 @@ dependencies = [
 [[package]]
 name = "osmena-engine"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=8d38f1185b4f32c53c41849e9f86e6f51de98838#8d38f1185b4f32c53c41849e9f86e6f51de98838"
+source = "git+https://github.com/thomasmost/osmena?rev=773adce3e664c0acd273ac40ca85d210879d27f2#773adce3e664c0acd273ac40ca85d210879d27f2"
 dependencies = [
  "dpi",
  "glow",
@@ -2288,7 +2288,7 @@ dependencies = [
 [[package]]
 name = "osmena-shell"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=8d38f1185b4f32c53c41849e9f86e6f51de98838#8d38f1185b4f32c53c41849e9f86e6f51de98838"
+source = "git+https://github.com/thomasmost/osmena?rev=773adce3e664c0acd273ac40ca85d210879d27f2#773adce3e664c0acd273ac40ca85d210879d27f2"
 dependencies = [
  "arboard",
  "block2 0.6.2",
@@ -2324,7 +2324,7 @@ dependencies = [
 [[package]]
 name = "osmena-xtask"
 version = "0.1.0"
-source = "git+https://github.com/thomasmost/osmena?rev=8d38f1185b4f32c53c41849e9f86e6f51de98838#8d38f1185b4f32c53c41849e9f86e6f51de98838"
+source = "git+https://github.com/thomasmost/osmena?rev=773adce3e664c0acd273ac40ca85d210879d27f2#773adce3e664c0acd273ac40ca85d210879d27f2"
 dependencies = [
  "icns",
  "ico",
@@ -4436,3 +4436,23 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "osmena-chrome"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "osmena-core"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "osmena-engine"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "osmena-shell"
+version = "0.1.0"
+
+[[patch.unused]]
+name = "osmena-xtask"
+version = "0.1.0"
