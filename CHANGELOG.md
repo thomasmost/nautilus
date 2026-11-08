@@ -6,6 +6,22 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ## [Unreleased]
 
+### Changed
+
+- The chrome's look, after Thorium with Zen's softness (osmena): the
+  toolbar's Back, Forward, Reload and Stop are painted glyphs in round
+  buttons that fill only under the pointer and fade when they cannot
+  act; the address bar is a filled pill that turns white with a ring
+  in the profile's colour while it has the keyboard. Each profile's
+  colour now gives an accent, the deep shade of its swatch's family
+  (its pastel in a dark system theme), to every focused field, the
+  text selection, the picked suggestion and the lit chips; popups sit
+  on a surface tinted by the colour with a soft shadow. The Launch
+  Panel fades and rises in on a surface of its own, its field carries
+  a magnifier, its tiles are cards on rows as tall as their tallest
+  tile, and Most visited is a shelf of shortcut discs across the
+  panel, so the mosaic has no hole.
+
 ### Added
 
 - Blocked sites. A profile keeps websites it refuses to show, by
