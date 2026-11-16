@@ -371,6 +371,23 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
+## Status and handoff (2026-11-16)
+
+Alt codes on Windows (Alt+0151 for an em dash) typed nothing. The
+cause and most of the fix are osmena's (winit drops the `WM_CHAR`
+that follows Alt's release; the shell's message hook delivers it, to a
+page as `EngineInput::ImeCommit`). Here, `host.rs` now passes
+`ime_commit_text` CEF's invalid range (`u32::MAX`, `u32::MAX`) for
+"replace nothing": with `None` the call inserted nothing, which no
+one had seen because no IME text reaches a page yet. Verified on
+Windows with the debug build and `keybd_event` (Alt held, keypad
+digits, Alt released): a textarea received `a`, U+2014, `b`, U+E9,
+read from the title its `input` handler set; the address bar showed
+`x—y`. Also `cargo test --workspace`, clippy, fmt. Not verified:
+macOS (no Alt codes there; `ImeCommit` is otherwise unreachable),
+`ime_set_composition`, which still passes `None` ranges and may need
+the same.
+
 ## Status and handoff (2026-11-08)
 
 Blocked sites over Chromium's before-browse hook (osmena has the list,

@@ -610,7 +610,13 @@ impl TabHostApi for TabHost {
                 host.ime_set_composition(Some(&CefString::from(text.as_str())), None, None, None);
             }
             EngineInput::ImeCommit(text) => {
-                host.ime_commit_text(Some(&CefString::from(text.as_str())), None, 0);
+                // "Replace nothing" is CEF's invalid range, said out loud:
+                // with no range at all the call inserted nothing.
+                let nothing = cef::Range {
+                    from: u32::MAX,
+                    to: u32::MAX,
+                };
+                host.ime_commit_text(Some(&CefString::from(text.as_str())), Some(&nothing), 0);
             }
             EngineInput::ImeDismissed => host.ime_cancel_composition(),
         }
