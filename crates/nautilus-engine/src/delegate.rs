@@ -24,16 +24,15 @@ use cef::{
     ImplFindHandler, ImplFrame, ImplImage, ImplKeyboardHandler, ImplLifeSpanHandler,
     ImplLoadHandler, ImplPermissionHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
     ImplRunContextMenuCallback, KeyEvent, KeyEventType, KeyboardHandler, LifeSpanHandler,
-    LoadHandler, LogSeverity, MediaAccessCallback, MediaAccessPermissionTypes, MenuModel,
-    PaintElementType, PermissionHandler, ProcessId, ProcessMessage, Rect, RenderHandler, Request,
-    RequestHandler, RunContextMenuCallback, ScreenInfo, TerminationStatus, TransitionType,
-    WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDialogHandler,
-    WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback, WrapFindHandler,
-    WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapPermissionHandler,
-    WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_context_menu_handler,
-    wrap_dialog_handler, wrap_display_handler, wrap_download_handler, wrap_download_image_callback,
-    wrap_find_handler, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
-    wrap_permission_handler, wrap_render_handler, wrap_request_handler,
+    LoadHandler, LogSeverity, MediaAccessCallback, MenuModel, PaintElementType, PermissionHandler,
+    ProcessId, ProcessMessage, Rect, RenderHandler, Request, RequestHandler,
+    RunContextMenuCallback, ScreenInfo, TerminationStatus, TransitionType, WindowOpenDisposition,
+    WrapClient, WrapContextMenuHandler, WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler,
+    WrapDownloadImageCallback, WrapFindHandler, WrapKeyboardHandler, WrapLifeSpanHandler,
+    WrapLoadHandler, WrapPermissionHandler, WrapRenderHandler, WrapRequestHandler, wrap_client,
+    wrap_context_menu_handler, wrap_dialog_handler, wrap_display_handler, wrap_download_handler,
+    wrap_download_image_callback, wrap_find_handler, wrap_keyboard_handler, wrap_life_span_handler,
+    wrap_load_handler, wrap_permission_handler, wrap_render_handler, wrap_request_handler,
 };
 use osmena_core::{
     BlockedSites, Cursor, DownloadPolicy, DownloadReport, DownloadState, EditState, EngineEvent,
@@ -632,8 +631,12 @@ wrap_client! {
 /// else (capturing the screen or its sound, or nothing at all), which
 /// is left to Chromium's default, a refusal.
 pub(crate) fn media_request(id: u64, origin: &str, permissions: u32) -> Option<MediaRequest> {
-    let microphone = MediaAccessPermissionTypes::DEVICE_AUDIO_CAPTURE.get_raw();
-    let camera = MediaAccessPermissionTypes::DEVICE_VIDEO_CAPTURE.get_raw();
+    // The enum itself, not the binding's `get_raw`: that returns the
+    // enum's C type, `u32` on macOS and `i32` on Windows, and the
+    // handler's bits are `u32` on both.
+    use cef::sys::cef_media_access_permission_types_t as Permission;
+    let microphone = Permission::CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE as u32;
+    let camera = Permission::CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE as u32;
     if permissions == 0 || permissions & !(microphone | camera) != 0 {
         return None;
     }
