@@ -180,6 +180,28 @@ delivered after the answer. Do not turn the question into something
 that stays open while events flow (a prompt in the chrome, an
 asynchronous sheet) without settling this first.
 
+### C14: CEF's external message pump is not asked for all of Chromium's work
+
+With `external_message_pump` on, CEF asks for work through
+`on_schedule_message_pump_work`, and the application's event loop
+spins it when woken. CEF's header says the application must also run
+the work unasked, about every 33 ms ("The application must also
+schedule CefDoMessageLoopWork() calls when no callback is received",
+`cef_browser_process_handler.h`). Without that, on macOS (CEF 154, window not in
+front, Nautilus's side-panel scripted run), the DevTools
+`Runtime.evaluate` that loads an unpacked extension from
+`chrome://extensions` was never answered, and the pump did not spin
+again for the rest of a 160 s run (the watch log: "no spin for 137354
+ms; CEF asked 0 time(s) since it ended; timer pending: false"). With a
+33 ms fallback tick the same load was answered at once and the run
+passed. A 600 s clamp, which changes only the replace rule, did not
+clear it: the pump was idle for seconds with the timer pending, and
+the load was answered about four seconds later.
+**Workaround (2026-11-17):** the message pump runs CEF's work 30 times a
+second when nothing else has asked, after every spin (`PumpScheduler`
+in `engine.rs`, `NAUTILUS_PUMP_TICK_MS=0` switches it off to reproduce).
+Re-check on a CEF bump whether the header still asks for it.
+
 ## egui and winit
 
 ### E1: IME is enabled only for egui's own text fields

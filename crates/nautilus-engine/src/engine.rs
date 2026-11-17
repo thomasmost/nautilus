@@ -405,9 +405,11 @@ fn forget_chromium_session(engine_dir: &Path) {
 }
 
 /// Turns CEF's "do work in `delay` ms" requests, which arrive on any
-/// thread, into wakes of the application's event loop: immediately for a
-/// zero delay, otherwise from a timer thread at the earliest requested
-/// time.
+/// thread, into wakes of the application's event loop: a zero-delay
+/// request wakes at once; a delayed one replaces the pending one and is
+/// clamped to the interval; after every spin the timer is armed at the
+/// interval when nothing is pending, so CEF's work runs even when CEF
+/// does not ask for it.
 struct PumpScheduler {
     waker: Arc<dyn Waker>,
     deadline: Mutex<Option<Instant>>,
@@ -418,9 +420,18 @@ struct PumpScheduler {
     stats: PumpStats,
 }
 
-/// The fallback's default. Off while the stall is being investigated
-/// (Task 11 of the side-panel plan's Phase 1); Task 12 turns it on.
-const DEFAULT_PUMP_INTERVAL: Option<Duration> = None;
+/// The longest the pump goes without running CEF's work, when the
+/// fallback is on: cefclient's `kMaxTimerDelay`, 30 times a second.
+const MAX_PUMP_INTERVAL: Duration = Duration::from_millis(1000 / 30);
+
+/// The fallback is on: CEF asks for work through
+/// `on_schedule_message_pump_work` but does not promise to ask for all
+/// of it ("The application must also schedule CefDoMessageLoopWork()
+/// calls when no callback is received", `cef_browser_process_handler.h`),
+/// and without the tick extension calls stalled for seconds (C14 in
+/// `docs/upstream-issues.md`). `NAUTILUS_PUMP_TICK_MS=0` switches it off
+/// to reproduce that.
+const DEFAULT_PUMP_INTERVAL: Option<Duration> = Some(MAX_PUMP_INTERVAL);
 
 /// The pump's interval: `NAUTILUS_PUMP_TICK_MS` in milliseconds when a
 /// scripted run sets it (0 switches the fallback off), else `default`.

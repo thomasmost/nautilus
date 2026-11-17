@@ -29,7 +29,7 @@ use super::evaluation;
 use super::install::HELPER_ID;
 use super::rewrite::BRIDGE_DIR;
 use super::table::{TabTable, parse_targets, query_rows, target_id_of};
-use crate::delegate::DelegateState;
+use crate::delegate::{DelegateState, ViewState};
 
 /// The key of the helper's page among the hidden pages; a relay's key
 /// is its extension's id, which this can never be.
@@ -315,11 +315,11 @@ impl Bridge {
     }
 
     /// A tab's browser exists: ask it for its DevTools target id.
-    pub(crate) fn track(self: &Rc<Self>, tab: TabId, browser: &Browser) {
+    pub(crate) fn track(self: &Rc<Self>, tab: TabId, browser: &Browser, view: Rc<ViewState>) {
         let Some(host) = browser.host() else {
             return;
         };
-        let mut observer = TabProbe::new(self.clone(), tab);
+        let mut observer = TabProbe::new(self.clone(), tab, view);
         let registration = host.add_dev_tools_message_observer(Some(&mut observer));
         if host.execute_dev_tools_method(0, Some(&"Target.getTargetInfo".into()), None) == 0 {
             log::warn!("bridge: cannot ask {tab:?} for its target id");
@@ -709,6 +709,7 @@ wrap_dev_tools_message_observer! {
     struct TabProbe {
         bridge: Rc<Bridge>,
         tab: TabId,
+        view: Rc<ViewState>,
     }
 
     impl DevToolsMessageObserver {
@@ -721,6 +722,28 @@ wrap_dev_tools_message_observer! {
         ) {
             self.bridge
                 .target_known(self.tab, success != 0, result.unwrap_or_default());
+        }
+
+        /// A debugger is attached to the tab (the extension's
+        /// `chrome.debugger`, or DevTools). Its renderer must keep running
+        /// while it is: a hidden one answers no input and no screenshot,
+        /// and the debugger waits for the answer (about 5 s each in the
+        /// probe, Task 11's H5). The tab is painted again at once.
+        fn on_dev_tools_agent_attached(&self, browser: Option<&mut Browser>) {
+            self.view.dev_tools_attached.set(true);
+            if let Some(host) = browser.and_then(|b| b.host()) {
+                host.was_hidden(0);
+            }
+        }
+
+        /// The debugger went: a tab that is behind another is hidden again.
+        fn on_dev_tools_agent_detached(&self, browser: Option<&mut Browser>) {
+            self.view.dev_tools_attached.set(false);
+            if self.view.hidden.get()
+                && let Some(host) = browser.and_then(|b| b.host())
+            {
+                host.was_hidden(1);
+            }
         }
     }
 }

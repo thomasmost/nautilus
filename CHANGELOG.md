@@ -106,6 +106,17 @@ has no releases yet; `Unreleased` holds everything on `main`.
   enables (C9 in `docs/upstream-issues.md`).
 - A mouse button pressed in a tab that then closed stayed pressed for
   the window's other tabs until the next click.
+- Extensions' calls into the browser, and anything else waiting on
+  Chromium's main thread, could stop being answered for seconds at a
+  time, or until the next input, while the window was not in front.
+  Chromium does not ask an embedder for every piece of its work; the
+  message pump now also runs that work 30 times a second without being
+  asked, as CEF's own sample does.
+- A tab with a debugger attached (DevTools, or an extension's
+  `chrome.debugger`) that was behind another tab stopped answering
+  input and screenshots, so each of the debugger's calls to it waited
+  about five seconds. Such a tab is kept painting while a debugger is
+  attached.
 
 ### Added
 

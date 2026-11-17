@@ -277,7 +277,13 @@ mod stub {
 
         pub(crate) fn shutdown(&self) {}
 
-        pub(crate) fn track_tab(&self, _tab: osmena_core::TabId, _browser: &cef::Browser) {}
+        pub(crate) fn track_tab(
+            &self,
+            _tab: osmena_core::TabId,
+            _browser: &cef::Browser,
+            _view: std::rc::Rc<crate::delegate::ViewState>,
+        ) {
+        }
 
         pub(crate) fn untrack_tab(&self, _tab: osmena_core::TabId) {}
 
@@ -649,8 +655,13 @@ mod native {
             }
         }
 
-        pub(crate) fn track_tab(&self, tab: TabId, browser: &cef::Browser) {
-            self.bridge.track(tab, browser);
+        pub(crate) fn track_tab(
+            &self,
+            tab: TabId,
+            browser: &cef::Browser,
+            view: Rc<crate::delegate::ViewState>,
+        ) {
+            self.bridge.track(tab, browser, view);
         }
 
         pub(crate) fn untrack_tab(&self, tab: TabId) {

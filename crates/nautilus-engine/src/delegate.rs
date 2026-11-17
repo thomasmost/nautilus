@@ -372,6 +372,14 @@ pub(crate) struct ViewState {
     /// focus can be told again to a renderer that arrives later
     /// (`on_load_start`).
     pub focused: Cell<bool>,
+    /// Whether a DevTools session is attached to the tab's browser. A
+    /// hidden renderer answers no input, so a tab under a debugger is
+    /// kept painting (`TabProbe::on_dev_tools_agent_attached`, and
+    /// `TabHost::hide` skips the hide while this is set).
+    pub dev_tools_attached: Cell<bool>,
+    /// Whether the window has the tab behind another (`TabHost::hide`
+    /// until `TabHost::show`), so that a debugger's detach can hide it.
+    pub hidden: Cell<bool>,
     /// The drag the page is carrying out, while it is.
     pub drag: RefCell<Option<DragSession>>,
     /// The cursor the page last asked for, to put back after a drag
@@ -414,6 +422,8 @@ impl ViewState {
             closing: Cell::new(false),
             context_menu: RefCell::new(None),
             focused: Cell::new(false),
+            dev_tools_attached: Cell::new(false),
+            hidden: Cell::new(false),
             drag: RefCell::new(None),
             cursor: Cell::new(Cursor::Default),
             media_requests: RefCell::new(HashMap::new()),

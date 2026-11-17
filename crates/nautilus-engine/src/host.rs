@@ -345,7 +345,7 @@ impl TabHostApi for TabHost {
         );
         match browser {
             Some(browser) => {
-                self.extensions.track_tab(tab, &browser);
+                self.extensions.track_tab(tab, &browser, view.clone());
                 self.tabs.insert(tab, TabEntry { browser, view });
             }
             None => log::error!("Chromium could not create a browser for {tab:?} at {url}"),
@@ -374,7 +374,7 @@ impl TabHostApi for TabHost {
                     host.was_resized();
                 }
                 view.adopt(tab);
-                self.extensions.track_tab(tab, &browser);
+                self.extensions.track_tab(tab, &browser, view.clone());
                 self.tabs.insert(tab, TabEntry { browser, view });
                 true
             }
@@ -454,15 +454,26 @@ impl TabHostApi for TabHost {
 
     /// The tab is the window's visible tab: paint it.
     fn show(&self, tab: TabId) {
+        if let Some(entry) = self.tabs.get(&tab) {
+            entry.view.hidden.set(false);
+        }
         self.with_host(tab, |host| {
             host.was_hidden(0);
             host.invalidate(cef::PaintElementType::VIEW);
         });
     }
 
-    /// The tab is behind another: stop painting it.
+    /// The tab is behind another: stop painting it, unless a debugger is
+    /// attached to it (a hidden renderer answers no input, and DevTools
+    /// waits on that answer; see `TabProbe`).
     fn hide(&self, tab: TabId) {
-        self.with_host(tab, |host| host.was_hidden(1));
+        let Some(entry) = self.tabs.get(&tab) else {
+            return;
+        };
+        entry.view.hidden.set(true);
+        if !entry.view.dev_tools_attached.get() {
+            self.with_host(tab, |host| host.was_hidden(1));
+        }
     }
 
     fn set_focused(&self, tab: TabId, focused: bool) {
