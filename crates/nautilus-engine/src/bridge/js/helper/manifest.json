@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "Nautilus Helper",
+  "version": "1",
+  "description": "Part of Nautilus: lets the browser match its tabs to Chromium's tab ids.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqNTks762WmIrgdaqakpkTXe6yzCAbPsqndJFczvz04nvJz2wEunmZm7fcqyT71LbOx+ng84BEnwAkK+QpkcuJWZ1j3GibzZABLGNL2reQOQce4p4Id/DyJY5kQqbCCzQ1yJ309faw/7JlNf9svnFcELtXtY2qS1s3WLatGC8Ea6Nzw5f2l3ccc3mNd5qM4PRjMkwSJqR2XfaEQV7923B0F7QHLiV4/EzXtWL5/GREJGIW/0clOHLQw6/P/pdwxN3dJixFCxE2hVkgtjOzii8lx+BJQ0VBBCkhB7elYxlxMMAVU1+XjO1o7K4QU9oqXZGWo9JGHyrnGrdVjOdp2/FsQIDAQAB",
+  "permissions": ["debugger"]
+}

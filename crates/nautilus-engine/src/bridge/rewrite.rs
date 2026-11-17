@@ -1,5 +1,3 @@
-#![allow(dead_code)] // Used by the bridge's CEF side from Task 5; removed there.
-
 //! The manifest rewrite that puts the bridge ahead of an extension's
 //! service worker, and the loader it points the manifest at. Pure.
 //!

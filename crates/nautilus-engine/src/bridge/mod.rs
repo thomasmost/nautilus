@@ -10,5 +10,6 @@
 //! `rewrite` and `table` are pure. `relay` and `native` hold the CEF
 //! side.
 
+pub(crate) mod install;
 pub(crate) mod rewrite;
 pub(crate) mod table;
