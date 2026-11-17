@@ -21,6 +21,7 @@ has no releases yet; `Unreleased` holds everything on `main`.
   a magnifier, its tiles are cards on rows as tall as their tallest
   tile, and Most visited is a shelf of shortcut discs across the
   panel, so the mosaic has no hole.
+- An extension's toolbar action with no popup now shows its button in the toolbar and the puzzle menu; pressing it does nothing until the extension bridge answers it.
 
 ### Added
 

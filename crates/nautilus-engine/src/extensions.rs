@@ -45,6 +45,148 @@ pub fn web_store_item_id(url: &Url) -> Option<String> {
         .find(|segment| crate::crx::is_extension_id(segment))
 }
 
+/// Which platform's `suggested_key` a command takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub(crate) enum KeyPlatform {
+    Mac,
+    Windows,
+}
+
+impl KeyPlatform {
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub(crate) const CURRENT: KeyPlatform = if cfg!(target_os = "macos") {
+        KeyPlatform::Mac
+    } else {
+        KeyPlatform::Windows
+    };
+
+    fn key(self) -> &'static str {
+        match self {
+            KeyPlatform::Mac => "mac",
+            KeyPlatform::Windows => "windows",
+        }
+    }
+}
+
+/// An extension's toolbar action as its manifest declares it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ActionFacts {
+    /// The popup page, relative to the extension's root.
+    pub popup: Option<String>,
+    /// The title, unless it is absent or a `__MSG_name__` key.
+    pub title: Option<String>,
+}
+
+/// One entry of the manifest's `commands`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommandFacts {
+    pub name: String,
+    pub description: String,
+    /// The manifest's suggestion for this platform, as written.
+    pub suggested_key: Option<String>,
+}
+
+/// What an extension's `manifest.json` says that the engine acts on.
+/// Anything missing or of the wrong type is simply absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub(crate) struct ManifestFacts {
+    /// `action`, `browser_action` or `page_action`, with or without a
+    /// popup.
+    pub action: Option<ActionFacts>,
+    /// The icon to show, relative to the extension's root.
+    pub icon_path: Option<String>,
+    /// `background.service_worker`.
+    pub worker: Option<String>,
+    /// `background.type` is `"module"`.
+    pub module_worker: bool,
+    /// `side_panel.default_path`. Read by Phase 6, whose step that first
+    /// reads it removes the `allow` below.
+    #[allow(dead_code)]
+    pub side_panel: Option<String>,
+    /// `commands`, by name. Read by Phase 7, whose step that first reads
+    /// it removes the `allow` below.
+    #[allow(dead_code)]
+    pub commands: Vec<CommandFacts>,
+}
+
+/// Read `manifest` (the parsed `manifest.json`).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub(crate) fn manifest_facts(manifest: &serde_json::Value, platform: KeyPlatform) -> ManifestFacts {
+    let string = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let action = ["action", "browser_action", "page_action"]
+        .iter()
+        .find_map(|key| manifest.get(*key))
+        .filter(|a| a.is_object());
+    let icon_path = largest_icon(manifest.get("icons"))
+        .or_else(|| largest_icon(action.and_then(|a| a.get("default_icon"))))
+        .or_else(|| string(action.and_then(|a| a.get("default_icon"))));
+    let background = manifest.get("background");
+    let mut commands: Vec<CommandFacts> = manifest
+        .get("commands")
+        .and_then(|c| c.as_object())
+        .map(|map| {
+            map.iter()
+                .map(|(name, command)| {
+                    let keys = command.get("suggested_key");
+                    CommandFacts {
+                        name: name.clone(),
+                        description: string(command.get("description")).unwrap_or_default(),
+                        suggested_key: string(keys.and_then(|k| k.get(platform.key())))
+                            .or_else(|| string(keys.and_then(|k| k.get("default")))),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    commands.sort_by(|a, b| a.name.cmp(&b.name));
+    ManifestFacts {
+        action: action.map(|a| ActionFacts {
+            popup: string(a.get("default_popup")),
+            // A localised title is a `__MSG_name__` key; the name
+            // serves then.
+            title: string(a.get("default_title")).filter(|t| !t.starts_with("__MSG_")),
+        }),
+        icon_path,
+        worker: string(background.and_then(|b| b.get("service_worker"))),
+        module_worker: background
+            .and_then(|b| b.get("type"))
+            .and_then(|t| t.as_str())
+            == Some("module"),
+        side_panel: string(
+            manifest
+                .get("side_panel")
+                .and_then(|s| s.get("default_path")),
+        ),
+        commands,
+    }
+}
+
+/// The path of the largest icon of a `{"16": "a.png", ...}` map that
+/// is no bigger than 128 (bigger ones are splash art), or the
+/// largest of all otherwise.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn largest_icon(icons: Option<&serde_json::Value>) -> Option<String> {
+    let map = icons?.as_object()?;
+    let mut sizes: Vec<(u32, &str)> = map
+        .iter()
+        .filter_map(|(size, path)| Some((size.parse().ok()?, path.as_str()?)))
+        .collect();
+    sizes.sort_unstable();
+    sizes
+        .iter()
+        .rev()
+        .find(|(size, _)| *size <= 128)
+        .or(sizes.last())
+        .map(|(_, path)| path.to_string())
+}
+
 /// Store downloads are unpacked on a worker thread: writing an
 /// extension's files takes seconds, and seconds spent inside a CEF
 /// callback (the download's completion) leave CEF's external message
@@ -690,21 +832,22 @@ mod native {
                     read_manifest(Path::new(&path))
                 };
                 let name = text("name");
+                let action = manifest.facts.action.as_ref();
+                let enabled = text("state") == "ENABLED";
                 known.push(Known {
                     id: id.clone(),
-                    popup: manifest.popup.clone(),
+                    popup: action.and_then(|a| a.popup.clone()),
                 });
                 extensions.push(Extension {
                     id,
                     name: name.clone(),
                     version: text("version"),
                     description: text("description"),
-                    enabled: text("state") == "ENABLED",
+                    enabled,
                     icon: manifest.icon,
-                    action_title: manifest
-                        .popup
-                        .is_some()
-                        .then(|| manifest.action_title.unwrap_or(name)),
+                    // Any toolbar action has a title, with or without a
+                    // popup: the host decides what a click does.
+                    action_title: action.map(|a| a.title.clone().unwrap_or(name)),
                 });
             }
             log::info!(
@@ -769,13 +912,12 @@ mod native {
     /// What the manifest adds to the listing.
     #[derive(Default)]
     struct ManifestInfo {
-        popup: Option<String>,
-        action_title: Option<String>,
+        facts: super::ManifestFacts,
         icon: Option<Favicon>,
     }
 
-    /// The action and icon from an extension's `manifest.json`. Anything
-    /// missing or unreadable is simply absent.
+    /// The manifest's facts and the decoded icon of the extension in
+    /// `dir`. Anything missing or unreadable is simply absent.
     fn read_manifest(dir: &Path) -> ManifestInfo {
         let Ok(text) = std::fs::read_to_string(dir.join("manifest.json")) else {
             return ManifestInfo::default();
@@ -783,47 +925,12 @@ mod native {
         let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
             return ManifestInfo::default();
         };
-        let action = ["action", "browser_action", "page_action"]
-            .iter()
-            .find_map(|key| manifest.get(*key))
-            .filter(|a| a.is_object());
-        let string = |v: Option<&serde_json::Value>| {
-            v.and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        };
-        let popup = string(action.and_then(|a| a.get("default_popup")));
-        // A localised title is a `__MSG_name__` key; the name serves then.
-        let action_title = string(action.and_then(|a| a.get("default_title")))
-            .filter(|t| !t.starts_with("__MSG_"));
-        let icon_path = largest_icon(manifest.get("icons"))
-            .or_else(|| largest_icon(action.and_then(|a| a.get("default_icon"))))
-            .or_else(|| string(action.and_then(|a| a.get("default_icon"))));
-        let icon = icon_path.and_then(|p| decode_png(&dir.join(p.trim_start_matches('/'))));
-        ManifestInfo {
-            popup,
-            action_title,
-            icon,
-        }
-    }
-
-    /// The path of the largest icon of a `{"16": "a.png", ...}` map that
-    /// is no bigger than 128 (bigger ones are splash art), or the
-    /// largest of all otherwise.
-    fn largest_icon(icons: Option<&serde_json::Value>) -> Option<String> {
-        let map = icons?.as_object()?;
-        let mut sizes: Vec<(u32, &str)> = map
-            .iter()
-            .filter_map(|(size, path)| Some((size.parse().ok()?, path.as_str()?)))
-            .collect();
-        sizes.sort_unstable();
-        sizes
-            .iter()
-            .rev()
-            .find(|(size, _)| *size <= 128)
-            .or(sizes.last())
-            .map(|(_, path)| path.to_string())
+        let facts = super::manifest_facts(&manifest, super::KeyPlatform::CURRENT);
+        let icon = facts
+            .icon_path
+            .as_deref()
+            .and_then(|p| decode_png(&dir.join(p.trim_start_matches('/'))));
+        ManifestInfo { facts, icon }
     }
 
     /// Decode a PNG file to straight RGBA8, whatever its colour type.
@@ -1113,8 +1220,124 @@ mod native {
 }
 #[cfg(test)]
 mod tests {
-    use super::web_store_item_id;
+    use super::{CommandFacts, KeyPlatform, manifest_facts, web_store_item_id};
     use url::Url;
+
+    fn facts(json: &str, platform: KeyPlatform) -> super::ManifestFacts {
+        manifest_facts(&serde_json::from_str(json).unwrap(), platform)
+    }
+
+    #[test]
+    fn an_action_without_a_popup_is_still_an_action() {
+        let f = facts(
+            r#"{"action": {"default_title": " Open panel "}}"#,
+            KeyPlatform::Mac,
+        );
+        let action = f.action.unwrap();
+        assert_eq!(action.popup, None);
+        assert_eq!(action.title.as_deref(), Some("Open panel"));
+        // An empty action object is an action too; no key at all is none.
+        assert!(
+            facts(r#"{"action": {}}"#, KeyPlatform::Mac)
+                .action
+                .is_some()
+        );
+        assert!(facts(r#"{"name": "x"}"#, KeyPlatform::Mac).action.is_none());
+        assert!(
+            facts(r#"{"action": "yes"}"#, KeyPlatform::Mac)
+                .action
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_older_action_keys_and_a_localised_title_are_read_as_before() {
+        let f = facts(
+            r#"{"browser_action": {"default_popup": "/p.html", "default_title": "__MSG_title__"}}"#,
+            KeyPlatform::Windows,
+        );
+        let action = f.action.unwrap();
+        assert_eq!(action.popup.as_deref(), Some("/p.html"));
+        assert_eq!(action.title, None);
+        assert!(
+            facts(r#"{"page_action": {}}"#, KeyPlatform::Mac)
+                .action
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_icon_is_the_largest_up_to_128_then_the_actions() {
+        let f = facts(
+            r#"{"icons": {"16": "a.png", "128": "b.png", "512": "c.png"}}"#,
+            KeyPlatform::Mac,
+        );
+        assert_eq!(f.icon_path.as_deref(), Some("b.png"));
+        let f = facts(
+            r#"{"action": {"default_icon": {"32": "d.png"}}}"#,
+            KeyPlatform::Mac,
+        );
+        assert_eq!(f.icon_path.as_deref(), Some("d.png"));
+        let f = facts(r#"{"action": {"default_icon": "e.png"}}"#, KeyPlatform::Mac);
+        assert_eq!(f.icon_path.as_deref(), Some("e.png"));
+    }
+
+    #[test]
+    fn the_worker_entry_and_its_kind_are_read() {
+        let f = facts(
+            r#"{"background": {"service_worker": "bg/sw.js", "type": "module"}}"#,
+            KeyPlatform::Mac,
+        );
+        assert_eq!(f.worker.as_deref(), Some("bg/sw.js"));
+        assert!(f.module_worker);
+        let f = facts(
+            r#"{"background": {"service_worker": "sw.js"}}"#,
+            KeyPlatform::Mac,
+        );
+        assert!(!f.module_worker);
+        // A Manifest V2 background page is no worker.
+        let f = facts(r#"{"background": {"scripts": ["a.js"]}}"#, KeyPlatform::Mac);
+        assert_eq!(f.worker, None);
+    }
+
+    #[test]
+    fn the_side_panel_and_the_commands_are_read_with_this_platforms_key() {
+        let json = r#"{
+            "side_panel": {"default_path": "panel.html"},
+            "commands": {
+                "toggle": {
+                    "suggested_key": {"default": "Ctrl+E", "mac": "Command+E"},
+                    "description": "Toggle the panel"
+                },
+                "_execute_action": {"suggested_key": {"default": "Ctrl+Shift+U"}},
+                "bare": {}
+            }
+        }"#;
+        let mac = facts(json, KeyPlatform::Mac);
+        assert_eq!(mac.side_panel.as_deref(), Some("panel.html"));
+        assert_eq!(
+            mac.commands,
+            vec![
+                CommandFacts {
+                    name: "_execute_action".to_string(),
+                    description: String::new(),
+                    suggested_key: Some("Ctrl+Shift+U".to_string()),
+                },
+                CommandFacts {
+                    name: "bare".to_string(),
+                    description: String::new(),
+                    suggested_key: None,
+                },
+                CommandFacts {
+                    name: "toggle".to_string(),
+                    description: "Toggle the panel".to_string(),
+                    suggested_key: Some("Command+E".to_string()),
+                },
+            ]
+        );
+        let windows = facts(json, KeyPlatform::Windows);
+        assert_eq!(windows.commands[2].suggested_key.as_deref(), Some("Ctrl+E"));
+    }
 
     #[test]
     fn store_item_pages_yield_the_id() {
