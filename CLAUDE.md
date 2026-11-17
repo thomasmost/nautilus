@@ -6,7 +6,8 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-08 (blocked sites over Chromium's before-browse
+_Last updated: 2026-11-17 (popups are browsers Chromium creates, so
+`window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
 for their titles and favicons; before that drags carried out within
 the page; before that macOS typing fixes: keys without text carry AppKit's characters,
@@ -160,12 +161,24 @@ Ninja on `PATH`:
   else AppKit's `NSDeleteCharacter` or `NS…FunctionKey`), and a
   modifier key's own event carries its modifier flag only on the press
   (osmena's `keyutils::with_own_modifier`).
-- **Page-opened tabs are URLs.** `on_before_popup` and `on_open_urlfrom_tab`
-  cancel Chromium's popup and report `EngineEvent::NewTabRequested` with a
-  `PendingTab` that holds the URL (`background` for the
-  `NEW_BACKGROUND_TAB` disposition of a middle- or Ctrl-click), or
-  `NewWindowRequested` for `NEW_WINDOW` (Shift-click); `AdoptTab`
-  creates a fresh browser at it. The opener gets no `window` handle.
+- **A popup is a browser Chromium creates; a clicked link is a URL.**
+  `on_before_popup` (`window.open`, a link or form with a target)
+  returns 0 and lets Chromium create the popup, having made it
+  windowless in the opener's window and given it a tab client whose
+  `ViewState` is no tab yet (`ViewState::popup_of`). Only that keeps
+  `window.open`'s result, `window.opener` and window names working,
+  which sign-in popups depend on; never go back to cancelling it and
+  loading the URL in a fresh browser. The popup's own
+  `on_after_created` reports `EngineEvent::NewTabRequested` with a
+  `PendingTab` holding the view and the browser (`Pending::Popup`),
+  and `AdoptTab` makes them the tab. Until then the view has no
+  `TabId`: every event for a tab goes through `ViewState::report`,
+  which holds it and replays it at `ViewState::adopt`; a discarded
+  popup is closed. `on_open_urlfrom_tab` (a middle-, Ctrl- or
+  Shift-click) still cancels and reports a `PendingTab` holding the
+  URL (`Pending::Url`, `background` for `NEW_BACKGROUND_TAB`), or
+  `NewWindowRequested` for `NEW_WINDOW`, which `on_before_popup` also
+  does for that disposition; those get a fresh browser and no opener.
 - **Input to CEF is logical pixels.** `EngineInput` carries physical pixels
   relative to the page area; `TabHost::input` divides by the scale factor
   and tracks click counts and held buttons, which CEF expects the embedder
@@ -370,6 +383,38 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-17)
+
+The user's report: on a Metabase login page, "Sign in with Google"
+opened two sign-in pages, one that never loaded and one that signed in
+but never returned to Metabase. Cause: `on_before_popup` cancelled
+every popup and opened an unrelated tab at its URL, so `window.open`
+returned null and the sign-in page had no `window.opener` to post the
+credential to; a page that opens a blank named window and then sends a
+form or a second `window.open` to that name got a second tab, the
+first staying blank. Now Chromium creates the popup (see Conventions).
+
+Verified on the Mac with the bundle and local probe pages, run by
+`NAUTILUS_TEST_PAGE_SCRIPT` with
+`NAUTILUS_CHROMIUM_SWITCHES=disable-popup-blocking` (a scripted
+`window.open` has no click behind it, and Chromium blocks it before
+`on_before_popup`; a real click needs no switch). Before the change:
+`window.open returned null`, `popup: opener is null`, the opener's
+title unchanged, and three tabs for the blank-then-named-form page.
+After: `window.open returned a window`, `popup: opener is present,
+name=signin`, the opener's title set from the popup's `postMessage`,
+two tabs for the named-form page, and a popup that posts and calls
+`window.close()` leaves one tab; each run exits cleanly. Also `cargo
+test --workspace` (the held-events and disposition tests among them),
+clippy, fmt.
+
+Not verified: the real Google sign-in by hand (scripted clicks need
+Accessibility on this Mac), that the popup's tab paints and takes
+input by eye (the probes read only logs), a popup opened in the
+background, a popup whose opener's window closes before adoption
+(`Pending::discard`), Windows. A popup's `width`/`height` features
+are ignored: it is a tab.
 
 ## Status and handoff (2026-11-16)
 

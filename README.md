@@ -298,7 +298,11 @@ engine glue. Each item must pass.
    opens at the URL right after the current one, which stays active
    (Ctrl+Shift-click activates the new tab). Shift-click a link: it
    opens in a new window. Let a page call `window.open`: a new tab opens
-   at the URL in the same window and becomes active.
+   at the URL in the same window and becomes active, and the two pages
+   can reach each other (`window.open` returns the window, the new page
+   has `window.opener`). Sign in to a site with its "Sign in with
+   Google" button: one sign-in tab opens, and when it is done it closes
+   and the site is signed in.
 9. **Windows and menu.** Cmd+N (Ctrl+N on Windows), or New window chosen
    with the mouse from the "☰" menu, opens a second window; each window's
    tabs, address bar, and page are independent, and closing one leaves the
@@ -584,8 +588,8 @@ Upstream causes and the features they block are tracked in
   renderer processes still apply.
 - Page frames go through system memory (CEF's software off-screen path);
   CEF's shared-texture path would skip the copy and is a later step.
-- `window.open` opens a tab at the URL but the opener gets no handle to it
-  (the call returns null), so pages that script the new window do not work.
+- A popup is always a tab: the size and position a page gives
+  `window.open` are ignored.
 - No IME composition for page text fields yet: egui-winit only enables IME
   for its own fields. The emoji palette (Ctrl+Cmd+Space) and dictation
   open, but winit drops the text they insert (E2 in

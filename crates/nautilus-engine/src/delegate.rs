@@ -72,9 +72,9 @@ type NativeCursor = cef::CursorHandle;
 #[derive(Default)]
 pub(crate) struct DelegateState {
     events: RefCell<VecDeque<EngineEvent>>,
-    /// Tabs page content asked for (`window.open`, middle-click), by the
-    /// URL they should load, held until the model adopts them.
-    pending: RefCell<HashMap<PendingTab, Url>>,
+    /// Tabs page content asked for (`window.open`, middle-click), held
+    /// until the model adopts them.
+    pending: RefCell<HashMap<PendingTab, Pending>>,
     next_pending: Cell<u64>,
     /// Browsers created and not yet destroyed (`on_after_created` to
     /// `on_before_close`); CEF may only shut down at zero.
@@ -112,7 +112,7 @@ impl DelegateState {
         self.events.borrow_mut().push_back(event);
     }
 
-    pub(crate) fn take_pending(&self, pending: PendingTab) -> Option<Url> {
+    pub(crate) fn take_pending(&self, pending: PendingTab) -> Option<Pending> {
         self.pending.borrow_mut().remove(&pending)
     }
 
@@ -210,14 +210,86 @@ impl DelegateState {
     /// `background` when it should open beside the opener without taking
     /// its place.
     pub(crate) fn request_tab(&self, opener: TabId, url: Url, background: bool) {
+        self.request(opener, Pending::Url(url), background);
+    }
+
+    /// Record that Chromium created `browser` for a popup of `opener`
+    /// (`window.open`, a link with a target) and report it as a new tab.
+    fn request_popup(
+        &self,
+        opener: TabId,
+        view: Rc<ViewState>,
+        browser: Browser,
+        background: bool,
+    ) {
+        self.request(opener, Pending::Popup { view, browser }, background);
+    }
+
+    fn request(&self, opener: TabId, tab: Pending, background: bool) {
         let pending = PendingTab(self.next_pending.get());
         self.next_pending.set(pending.0 + 1);
-        self.pending.borrow_mut().insert(pending, url);
+        self.pending.borrow_mut().insert(pending, tab);
         self.push(EngineEvent::NewTabRequested {
             opener,
             pending,
             background,
         });
+    }
+}
+
+/// A tab page content asked for, until the model adopts it.
+pub(crate) enum Pending {
+    /// A URL to load in a browser of its own, unrelated to the page that
+    /// asked (a middle- or Ctrl-click on a link, a tab Chromium opened
+    /// on its own).
+    Url(Url),
+    /// A popup Chromium created itself, so that it and its opener keep
+    /// their handles to each other (`window.open`'s result,
+    /// `window.opener`, a window found again by its name).
+    Popup {
+        view: Rc<ViewState>,
+        browser: Browser,
+    },
+}
+
+impl Pending {
+    /// Nothing adopted the tab: a popup's browser is closed.
+    pub(crate) fn discard(self) {
+        if let Pending::Popup { view, browser } = self {
+            view.closing.set(true);
+            if let Some(host) = browser.host() {
+                host.close_browser(1);
+            }
+        }
+    }
+}
+
+/// What a popup's view remembers from `on_before_popup` until Chromium
+/// has created its browser.
+#[derive(Clone, Copy)]
+pub(crate) struct PopupRequest {
+    opener: TabId,
+    background: bool,
+}
+
+/// How Nautilus opens what `on_before_popup` is asked for.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PopupPlan {
+    /// Cancel Chromium's popup and open a window at its URL
+    /// (Shift-click on a link with a target).
+    Window,
+    /// Let Chromium create the popup, shown as a tab: in front, or
+    /// `background` behind its opener.
+    Tab { background: bool },
+}
+
+pub(crate) fn popup_plan(disposition: WindowOpenDisposition) -> PopupPlan {
+    if disposition == WindowOpenDisposition::NEW_WINDOW {
+        PopupPlan::Window
+    } else {
+        PopupPlan::Tab {
+            background: disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB,
+        }
     }
 }
 
@@ -256,10 +328,23 @@ pub(crate) struct DragSession {
     pub hotspot: (i32, i32),
 }
 
+/// An event of a view that is not a tab yet, made once it is one.
+type HeldEvent = Box<dyn FnOnce(TabId) -> EngineEvent>;
+
 /// What one tab's handlers need: the tab id, the geometry CEF asks about,
 /// and the frame CEF paints into.
 pub(crate) struct ViewState {
-    pub tab: TabId,
+    /// The tab this view is, once the model has said: at once for a tab
+    /// the shell creates, at adoption for a popup Chromium creates.
+    tab: Cell<Option<TabId>>,
+    /// What the browser reported before the view was a tab, told to the
+    /// model when it becomes one.
+    held: RefCell<Vec<HeldEvent>>,
+    /// For a popup's view: who opened it, until its browser exists.
+    popup: Cell<Option<PopupRequest>>,
+    /// The native window the tab belongs to, which a popup of this tab
+    /// belongs to as well.
+    pub parent: cef::sys::cef_window_handle_t,
     pub delegate: Rc<DelegateState>,
     /// The view size in logical pixels (CSS pixels at zoom 1).
     pub dip_size: Cell<(i32, i32)>,
@@ -288,8 +373,85 @@ pub(crate) struct ViewState {
 }
 
 impl ViewState {
+    /// Report an event that names no tab.
     fn push(&self, event: EngineEvent) {
         self.delegate.push(event);
+    }
+
+    /// The view of a tab the shell creates, in the native window
+    /// `parent`, `dip_size` logical pixels at `scale`.
+    pub(crate) fn new(
+        tab: TabId,
+        delegate: Rc<DelegateState>,
+        parent: cef::sys::cef_window_handle_t,
+        dip_size: (i32, i32),
+        scale: f32,
+        origin: Rc<Cell<(i32, i32)>>,
+    ) -> ViewState {
+        ViewState {
+            tab: Cell::new(Some(tab)),
+            held: RefCell::new(Vec::new()),
+            popup: Cell::new(None),
+            parent,
+            delegate,
+            dip_size: Cell::new(dip_size),
+            scale: Cell::new(scale),
+            origin,
+            frame: RefCell::new(Frame::default()),
+            closing: Cell::new(false),
+            context_menu: RefCell::new(None),
+            focused: Cell::new(false),
+            drag: RefCell::new(None),
+            cursor: Cell::new(Cursor::Default),
+        }
+    }
+
+    /// The view of a popup `opener` asked for: in the same window, at
+    /// the same size, and no tab until the model adopts it.
+    fn popup_of(&self, opener: TabId, background: bool) -> ViewState {
+        ViewState {
+            tab: Cell::new(None),
+            popup: Cell::new(Some(PopupRequest { opener, background })),
+            ..ViewState::new(
+                opener,
+                self.delegate.clone(),
+                self.parent,
+                self.dip_size.get(),
+                self.scale.get(),
+                self.origin.clone(),
+            )
+        }
+    }
+
+    /// The tab this view is, if it is one yet.
+    pub(crate) fn tab(&self) -> Option<TabId> {
+        self.tab.get()
+    }
+
+    /// The tab's name in a log line.
+    pub(crate) fn label(&self) -> String {
+        match self.tab.get() {
+            Some(tab) => format!("{tab:?}"),
+            None => "(a popup not yet adopted)".to_string(),
+        }
+    }
+
+    /// Report what `event` makes for this view's tab: now, or when the
+    /// view becomes a tab.
+    pub(crate) fn report(&self, event: impl FnOnce(TabId) -> EngineEvent + 'static) {
+        match self.tab.get() {
+            Some(tab) => self.delegate.push(event(tab)),
+            None => self.held.borrow_mut().push(Box::new(event)),
+        }
+    }
+
+    /// The model adopted this popup's view as `tab`: it reports as that
+    /// tab from now on, starting with what it held back.
+    pub(crate) fn adopt(&self, tab: TabId) {
+        self.tab.set(Some(tab));
+        for event in self.held.take() {
+            self.delegate.push(event(tab));
+        }
     }
 
     /// Page content asked for `url` somewhere else: a tab beside this one
@@ -300,16 +462,24 @@ impl ViewState {
         let Some(url) = url.and_then(|u| Url::parse(&u.to_string()).ok()) else {
             return;
         };
-        if disposition == WindowOpenDisposition::NEW_WINDOW {
-            self.push(EngineEvent::NewWindowRequested {
-                opener: self.tab,
-                url,
-            });
-        } else {
-            let background = disposition == WindowOpenDisposition::NEW_BACKGROUND_TAB;
-            self.delegate.request_tab(self.tab, url, background);
+        let Some(opener) = self.tab.get() else {
+            log::debug!("a popup not yet adopted asked for {url}; ignored");
+            return;
+        };
+        match popup_plan(disposition) {
+            PopupPlan::Window => self
+                .delegate
+                .push(EngineEvent::NewWindowRequested { opener, url }),
+            PopupPlan::Tab { background } => self.delegate.request_tab(opener, url, background),
         }
     }
+}
+
+/// The settings of a tab's windowless browser.
+pub(crate) fn apply_tab_settings(settings: &mut cef::BrowserSettings) {
+    settings.windowless_frame_rate = 60;
+    // Opaque: the frame is uploaded without blending.
+    settings.background_color = 0xFFFF_FFFF;
 }
 
 /// Build the client for one tab.
@@ -502,7 +672,7 @@ wrap_render_handler! {
 
         fn on_popup_show(&self, _browser: Option<&mut Browser>, show: ::std::os::raw::c_int) {
             self.view.frame.borrow_mut().show_popup(show != 0);
-            self.view.push(EngineEvent::FrameReady(self.view.tab));
+            self.view.report(EngineEvent::FrameReady);
         }
 
         fn on_popup_size(&self, _browser: Option<&mut Browser>, rect: Option<&Rect>) {
@@ -543,7 +713,7 @@ wrap_render_handler! {
                 frame.paint_view(width as u32, height as u32, pixels, &rects);
             }
             drop(frame);
-            self.view.push(EngineEvent::FrameReady(self.view.tab));
+            self.view.report(EngineEvent::FrameReady);
         }
 
         // The page started a drag (`dragstart` on a draggable element,
@@ -591,11 +761,8 @@ wrap_render_handler! {
                 operation: DragOperationsMask::default(),
                 hotspot,
             });
-            log::debug!(
-                "tab {:?}: drag started at ({x}, {y}), allowed {allowed_ops:?}",
-                self.view.tab
-            );
-            self.view.push(EngineEvent::FrameReady(self.view.tab));
+            log::debug!("tab {}: drag started at ({x}, {y}), allowed {allowed_ops:?}", self.view.label());
+            self.view.report(EngineEvent::FrameReady);
             1
         }
 
@@ -605,8 +772,8 @@ wrap_render_handler! {
             if let Some(session) = self.view.drag.borrow_mut().as_mut() {
                 session.operation = operation;
             }
-            self.view.push(EngineEvent::CursorChanged {
-                tab: self.view.tab,
+            self.view.report(move |tab| EngineEvent::CursorChanged {
+                tab,
                 cursor: drag_cursor(operation),
             });
         }
@@ -664,30 +831,64 @@ wrap_life_span_handler! {
             target_disposition: WindowOpenDisposition,
             _user_gesture: ::std::os::raw::c_int,
             _popup_features: Option<&cef::PopupFeatures>,
-            _window_info: Option<&mut cef::WindowInfo>,
-            _client: Option<&mut Option<Client>>,
-            _settings: Option<&mut cef::BrowserSettings>,
+            window_info: Option<&mut cef::WindowInfo>,
+            client: Option<&mut Option<Client>>,
+            settings: Option<&mut cef::BrowserSettings>,
             _extra_info: Option<&mut Option<cef::DictionaryValue>>,
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
-            // A popup becomes an ordinary tab (or window) at its URL,
-            // opened by the model where it decides
-            // (`EngineAction::AdoptTab`). The page gets no handle to it
-            // (`window.open` returns null).
-            self.view.open_elsewhere(target_url, target_disposition);
-            1
+            // Chromium creates the popup itself, as one more windowless
+            // browser, so the page and its popup keep their handles to
+            // each other: `window.open` returns the window,
+            // `window.opener` is set, and a later `window.open` or form
+            // with the same target name finds it again. A sign-in popup
+            // answers its opener through exactly those. The model hears
+            // of it as a new tab once the browser exists
+            // (`on_after_created`).
+            let background = match popup_plan(target_disposition) {
+                PopupPlan::Tab { background } => background,
+                PopupPlan::Window => {
+                    self.view.open_elsewhere(target_url, target_disposition);
+                    return 1;
+                }
+            };
+            let (Some(opener), Some(window_info), Some(client)) =
+                (self.view.tab(), window_info, client)
+            else {
+                // A popup of a popup the model has not adopted yet, or
+                // nowhere to say how to create it: no popup.
+                log::debug!("tab {}: a popup was refused", self.view.label());
+                return 1;
+            };
+            let view = Rc::new(self.view.popup_of(opener, background));
+            *window_info = cef::WindowInfo::default().set_as_windowless(self.view.parent);
+            if let Some(settings) = settings {
+                apply_tab_settings(settings);
+            }
+            *client = Some(client_for(view));
+            0
         }
 
-        fn on_after_created(&self, _browser: Option<&mut Browser>) {
+        fn on_after_created(&self, browser: Option<&mut Browser>) {
             let delegate = &self.view.delegate;
             delegate.live_browsers.set(delegate.live_browsers.get() + 1);
-            log::debug!("tab {:?}: browser created", self.view.tab);
+            log::debug!("tab {}: browser created", self.view.label());
+            if let Some(request) = self.view.popup.take()
+                && let Some(browser) = browser
+            {
+                delegate.request_popup(
+                    request.opener,
+                    self.view.clone(),
+                    browser.clone(),
+                    request.background,
+                );
+            }
         }
 
         fn do_close(&self, _browser: Option<&mut Browser>) -> ::std::os::raw::c_int {
             if !self.view.closing.get() {
                 // The page closed itself (`window.close()`).
-                self.view.push(EngineEvent::TabClosed(self.view.tab));
+                self.view.report(EngineEvent::TabClosed);
             }
             // Let the close proceed; `on_before_close` follows.
             0
@@ -729,7 +930,7 @@ wrap_load_handler! {
                 .map(|f| text(f.url()));
             let main = main_url.is_some();
             if let Some(url) = &main_url {
-                log::debug!("tab {:?}: load started at {url}", self.view.tab);
+                log::debug!("tab {}: load started at {url}", self.view.label());
             }
             if self.view.focused.get()
                 && main
@@ -753,9 +954,8 @@ wrap_load_handler! {
                 log::info!("TEST HOOK: running the page script");
                 frame.execute_java_script(Some(&CefString::from(script.as_str())), None, 0);
             }
-            let tab = self.view.tab;
-            log::debug!("tab {tab:?}: loading = {}", is_loading != 0);
-            self.view.push(EngineEvent::LoadStateChanged {
+            log::debug!("tab {}: loading = {}", self.view.label(), is_loading != 0);
+            self.view.report(move |tab| EngineEvent::LoadStateChanged {
                 tab,
                 state: if is_loading != 0 {
                     LoadState::Loading
@@ -763,7 +963,7 @@ wrap_load_handler! {
                     LoadState::Complete
                 },
             });
-            self.view.push(EngineEvent::HistoryChanged {
+            self.view.report(move |tab| EngineEvent::HistoryChanged {
                 tab,
                 can_go_back: can_go_back != 0,
                 can_go_forward: can_go_forward != 0,
@@ -837,8 +1037,8 @@ wrap_display_handler! {
                 return;
             }
             if let Some(url) = url.and_then(|u| Url::parse(&u.to_string()).ok()) {
-                self.view.push(EngineEvent::UrlChanged {
-                    tab: self.view.tab,
+                self.view.report(move |tab| EngineEvent::UrlChanged {
+                    tab,
                     url,
                 });
             }
@@ -846,9 +1046,9 @@ wrap_display_handler! {
 
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
             let title = title.map(CefString::to_string).unwrap_or_default();
-            log::debug!("tab {:?}: title {title:?}", self.view.tab);
-            self.view.push(EngineEvent::TitleChanged {
-                tab: self.view.tab,
+            log::debug!("tab {}: title {title:?}", self.view.label());
+            self.view.report(move |tab| EngineEvent::TitleChanged {
+                tab,
                 title,
             });
         }
@@ -879,10 +1079,9 @@ wrap_display_handler! {
         }
 
         fn on_status_message(&self, _browser: Option<&mut Browser>, value: Option<&CefString>) {
-            self.view.push(EngineEvent::StatusChanged {
-                tab: self.view.tab,
-                text: value.map(CefString::to_string).unwrap_or_default(),
-            });
+            let text = value.map(CefString::to_string).unwrap_or_default();
+            self.view
+                .report(move |tab| EngineEvent::StatusChanged { tab, text });
         }
 
         fn on_console_message(
@@ -918,8 +1117,8 @@ wrap_display_handler! {
         ) -> ::std::os::raw::c_int {
             let cursor = cursor_from(type_);
             self.view.cursor.set(cursor);
-            self.view.push(EngineEvent::CursorChanged {
-                tab: self.view.tab,
+            self.view.report(move |tab| EngineEvent::CursorChanged {
+                tab,
                 cursor,
             });
             1
@@ -988,12 +1187,12 @@ wrap_request_handler! {
             match blocked {
                 Some(url) => {
                     log::info!(
-                        "tab {:?}: blocked navigation to {url}{}",
-                        self.view.tab,
+                        "tab {}: blocked navigation to {url}{}",
+                        self.view.label(),
                         if is_redirect != 0 { " (a redirect)" } else { "" }
                     );
-                    self.view.push(EngineEvent::NavigationBlocked {
-                        tab: self.view.tab,
+                    self.view.report(move |tab| EngineEvent::NavigationBlocked {
+                        tab,
                         url,
                     });
                     1
@@ -1039,10 +1238,10 @@ wrap_request_handler! {
             } else {
                 format!("The page's renderer process {what}: {detail} (code {error_code}).")
             };
-            log::warn!("tab {:?}: {reason}", self.view.tab);
+            log::warn!("tab {}: {reason}", self.view.label());
             log::error!("tab crashed: {reason}");
-            self.view.push(EngineEvent::TabCrashed {
-                tab: self.view.tab,
+            self.view.report(move |tab| EngineEvent::TabCrashed {
+                tab,
                 reason,
             });
         }
@@ -1082,10 +1281,11 @@ wrap_context_menu_handler! {
                 y,
             });
             let scale = self.view.scale.get();
-            self.view.push(EngineEvent::ContextMenuRequested {
-                tab: self.view.tab,
+            let context = page_context(params);
+            self.view.report(move |tab| EngineEvent::ContextMenuRequested {
+                tab,
                 position: Some((x as f32 * scale, y as f32 * scale)),
-                context: page_context(params),
+                context,
             });
             1
         }
@@ -1336,8 +1536,8 @@ wrap_find_handler! {
             active_match_ordinal: ::std::os::raw::c_int,
             final_update: ::std::os::raw::c_int,
         ) {
-            self.view.push(EngineEvent::FindResult {
-                tab: self.view.tab,
+            self.view.report(move |tab| EngineEvent::FindResult {
+                tab,
                 current: u32::try_from(active_match_ordinal).unwrap_or(0),
                 total: u32::try_from(count).unwrap_or(0),
                 final_update: final_update != 0,
@@ -1526,8 +1726,8 @@ wrap_download_image_callback! {
                 return;
             };
             if let Some(favicon) = image_from(image) {
-                self.view.push(EngineEvent::FaviconChanged {
-                    tab: self.view.tab,
+                self.view.report(move |tab| EngineEvent::FaviconChanged {
+                    tab,
                     favicon,
                 });
             }
@@ -1620,7 +1820,89 @@ fn image_from(image: &mut Image) -> Option<RgbaImage> {
 mod tests {
     #[cfg(not(target_os = "macos"))]
     use super::strings_of;
-    use super::{EditCommand, edit_command, escape_html};
+    use super::{
+        DelegateState, EditCommand, PopupPlan, ViewState, edit_command, escape_html, popup_plan,
+    };
+    use cef::WindowOpenDisposition;
+    use osmena_core::{EngineEvent, TabId};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn view(delegate: &Rc<DelegateState>, tab: TabId) -> ViewState {
+        // SAFETY: a window handle is a pointer (or a pointer-sized id) on
+        // every platform, and all-zero is its "no window"; nothing here
+        // hands it to Chromium.
+        let parent = unsafe { std::mem::zeroed() };
+        ViewState::new(
+            tab,
+            delegate.clone(),
+            parent,
+            (800, 600),
+            2.0,
+            Rc::new(Cell::new((10, 20))),
+        )
+    }
+
+    #[test]
+    fn a_popup_is_a_tab_chromium_creates_unless_it_asks_for_a_window() {
+        assert_eq!(
+            popup_plan(WindowOpenDisposition::NEW_POPUP),
+            PopupPlan::Tab { background: false }
+        );
+        assert_eq!(
+            popup_plan(WindowOpenDisposition::NEW_FOREGROUND_TAB),
+            PopupPlan::Tab { background: false }
+        );
+        assert_eq!(
+            popup_plan(WindowOpenDisposition::NEW_BACKGROUND_TAB),
+            PopupPlan::Tab { background: true }
+        );
+        assert_eq!(
+            popup_plan(WindowOpenDisposition::NEW_WINDOW),
+            PopupPlan::Window
+        );
+    }
+
+    #[test]
+    fn a_tabs_view_reports_at_once() {
+        let delegate = Rc::new(DelegateState::default());
+        let view = view(&delegate, TabId(4));
+        view.report(EngineEvent::FrameReady);
+        assert_eq!(delegate.drain(), [EngineEvent::FrameReady(TabId(4))]);
+    }
+
+    #[test]
+    fn a_popups_view_holds_its_events_until_it_is_adopted_as_a_tab() {
+        let delegate = Rc::new(DelegateState::default());
+        let opener = view(&delegate, TabId(4));
+        let popup = opener.popup_of(TabId(4), false);
+        assert_eq!(popup.tab(), None);
+        assert_eq!(popup.dip_size.get(), (800, 600));
+        assert!(Rc::ptr_eq(&popup.origin, &opener.origin));
+
+        // What the popup's browser says before the model knows it.
+        popup.report(|tab| EngineEvent::TitleChanged {
+            tab,
+            title: "Sign in".to_string(),
+        });
+        popup.report(EngineEvent::TabClosed);
+        assert!(delegate.drain().is_empty(), "no tab to report them for yet");
+
+        popup.adopt(TabId(9));
+        assert_eq!(popup.tab(), Some(TabId(9)));
+        assert_eq!(
+            delegate.drain(),
+            [
+                EngineEvent::TitleChanged {
+                    tab: TabId(9),
+                    title: "Sign in".to_string(),
+                },
+                EngineEvent::TabClosed(TabId(9)),
+            ]
+        );
+        popup.report(EngineEvent::FrameReady);
+        assert_eq!(delegate.drain(), [EngineEvent::FrameReady(TabId(9))]);
+    }
     #[cfg(not(target_os = "macos"))]
     use cef::CefStringList;
 

@@ -19,7 +19,9 @@ use osmena_engine::{EngineError, FrameRef, PagePaint, ScreenRect, TabHost as Tab
 use raw_window_handle::RawWindowHandle;
 use url::Url;
 
-use crate::delegate::{ClipboardImageCallback, DelegateState, ViewState, client_for};
+use crate::delegate::{
+    ClipboardImageCallback, DelegateState, Pending, ViewState, apply_tab_settings, client_for,
+};
 use crate::devtools;
 use crate::engine::Engine;
 use crate::extensions::ExtensionManager;
@@ -201,8 +203,8 @@ impl TabHost {
                     host.drag_target_drag_over(Some(&event), allowed);
                 } else if entered {
                     host.drag_target_drag_leave();
-                    self.delegate.push(EngineEvent::CursorChanged {
-                        tab: entry.view.tab,
+                    entry.view.report(|tab| EngineEvent::CursorChanged {
+                        tab,
                         cursor: osmena_core::Cursor::NotAllowed,
                     });
                 }
@@ -211,7 +213,7 @@ impl TabHost {
                     .frame
                     .borrow_mut()
                     .set_drag_rect(x.round() as i32 - hotspot.0, y.round() as i32 - hotspot.1);
-                self.delegate.push(EngineEvent::FrameReady(entry.view.tab));
+                entry.view.report(EngineEvent::FrameReady);
                 true
             }
             EngineInput::MouseLeft => {
@@ -254,7 +256,7 @@ impl TabHost {
                 ..
             } => {
                 if entry.view.drag.borrow().is_some() {
-                    log::debug!("tab {:?}: a drag outlived its gesture", entry.view.tab);
+                    log::debug!("tab {}: a drag outlived its gesture", entry.view.label());
                     self.end_drag(entry, host, None);
                 }
                 false
@@ -298,20 +300,20 @@ impl TabHost {
         host.drag_source_ended_at(x, y, operation);
         host.drag_source_system_drag_ended();
         entry.view.frame.borrow_mut().hide_drag_image();
-        let tab = entry.view.tab;
         log::debug!(
-            "tab {tab:?}: drag ended at ({x}, {y}), {}",
+            "tab {}: drag ended at ({x}, {y}), {}",
+            entry.view.label(),
             if operation == none {
                 "cancelled"
             } else {
                 "dropped"
             }
         );
-        self.delegate.push(EngineEvent::FrameReady(tab));
-        self.delegate.push(EngineEvent::CursorChanged {
-            tab,
-            cursor: entry.view.cursor.get(),
-        });
+        entry.view.report(EngineEvent::FrameReady);
+        let cursor = entry.view.cursor.get();
+        entry
+            .view
+            .report(move |tab| EngineEvent::CursorChanged { tab, cursor });
     }
 }
 
@@ -320,27 +322,18 @@ impl TabHostApi for TabHost {
     fn create_tab(&mut self, tab: TabId, url: Url) {
         let (width, height) = self.content_size.get();
         let scale = self.scale.get();
-        let view = Rc::new(ViewState {
+        let view = Rc::new(ViewState::new(
             tab,
-            delegate: self.delegate.clone(),
-            dip_size: Cell::new(dip_size(width, height, scale)),
-            scale: Cell::new(scale),
-            origin: self.origin.clone(),
-            frame: RefCell::new(Frame::default()),
-            closing: Cell::new(false),
-            context_menu: RefCell::new(None),
-            focused: Cell::new(false),
-            drag: RefCell::new(None),
-            cursor: Cell::new(osmena_core::Cursor::Default),
-        });
+            self.delegate.clone(),
+            self.parent,
+            dip_size(width, height, scale),
+            scale,
+            self.origin.clone(),
+        ));
         let mut client = client_for(view.clone());
         let window_info = WindowInfo::default().set_as_windowless(self.parent);
-        let settings = BrowserSettings {
-            windowless_frame_rate: 60,
-            // Opaque: the frame is uploaded without blending.
-            background_color: 0xFFFF_FFFF,
-            ..BrowserSettings::default()
-        };
+        let mut settings = BrowserSettings::default();
+        apply_tab_settings(&mut settings);
         let browser = cef::browser_host_create_browser_sync(
             Some(&window_info),
             Some(&mut client),
@@ -357,14 +350,32 @@ impl TabHostApi for TabHost {
         }
     }
 
-    /// Create the tab page content asked for. Returns false if the engine
-    /// no longer holds the request.
+    /// Make the tab page content asked for: a browser at its URL, or the
+    /// popup Chromium already created, which becomes `tab`. Returns false
+    /// if the engine no longer holds the request.
     fn adopt_tab(&mut self, pending: PendingTab, tab: TabId) -> bool {
-        let Some(url) = self.delegate.take_pending(pending) else {
-            return false;
-        };
-        self.create_tab(tab, url);
-        true
+        match self.delegate.take_pending(pending) {
+            None => false,
+            Some(Pending::Url(url)) => {
+                self.create_tab(tab, url);
+                true
+            }
+            Some(Pending::Popup { view, browser }) => {
+                // The popup was sized like its opener when it was asked
+                // for; the window may have changed since.
+                let (width, height) = self.content_size.get();
+                let scale = self.scale.get();
+                view.scale.set(scale);
+                view.dip_size.set(dip_size(width, height, scale));
+                if let Some(host) = browser.host() {
+                    host.notify_screen_info_changed();
+                    host.was_resized();
+                }
+                view.adopt(tab);
+                self.tabs.insert(tab, TabEntry { browser, view });
+                true
+            }
+        }
     }
 
     /// Close the tab's browser, and its developer tools if they are

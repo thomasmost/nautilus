@@ -51,6 +51,15 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- "Sign in with Google" (and any sign-in that opens a popup) never
+  came back signed in, and opened two tabs, one of them blank for
+  good. A page's `window.open` used to be cancelled and replaced by an
+  unrelated tab at the URL, so the call returned null, the new page
+  had no `window.opener` to hand the result to, and a page that opens
+  a blank named window and then sends the sign-in page to that name
+  got a second tab. Chromium now creates the popup itself, shown as a
+  tab: the opener gets its window, the popup its opener, and a window
+  is found again by its name.
 - Alt codes typed nothing on Windows: Alt+0151 on the numeric keypad
   now types an em dash, in a page and in the address bar. The shell
   delivers the character winit dropped (osmena); here the commit of

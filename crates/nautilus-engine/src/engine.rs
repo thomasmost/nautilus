@@ -249,8 +249,9 @@ impl osmena_engine::Engine for Engine {
     }
 
     fn discard_pending(&self, pending: PendingTab) {
-        if self.delegate.take_pending(pending).is_none() {
-            log::debug!("no pending tab {pending:?} to discard");
+        match self.delegate.take_pending(pending) {
+            Some(tab) => tab.discard(),
+            None => log::debug!("no pending tab {pending:?} to discard"),
         }
     }
 
