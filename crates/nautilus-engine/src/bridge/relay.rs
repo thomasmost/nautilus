@@ -347,7 +347,6 @@ impl Bridge {
 
     /// Any tab the table could name, for a test click when no tab has
     /// had the focus yet.
-    #[allow(dead_code)]
     pub(crate) fn any_tab(&self) -> Option<TabId> {
         self.inner.borrow().probes.keys().min().copied()
     }
@@ -692,7 +691,6 @@ impl Bridge {
     }
 
     /// The table, for a scripted run's log.
-    #[allow(dead_code)]
     pub(crate) fn log_table(&self) {
         let inner = self.inner.borrow();
         for row in inner.table.rows() {

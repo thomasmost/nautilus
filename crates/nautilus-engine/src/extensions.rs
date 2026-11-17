@@ -281,6 +281,8 @@ mod stub {
 
         pub(crate) fn untrack_tab(&self, _tab: osmena_core::TabId) {}
 
+        pub(crate) fn poll_control(&self) {}
+
         pub(crate) fn click_action(&self, _id: &str, _tab: osmena_core::TabId) -> bool {
             false
         }
@@ -391,6 +393,13 @@ mod native {
         Uninstall { id: String },
     }
 
+    /// A scripted run's command directory (`NAUTILUS_TEST_CONTROL`).
+    struct Control {
+        dir: PathBuf,
+        /// The number of the next `cmd-N.json` to carry out.
+        next: u32,
+    }
+
     /// What the manager remembers of an extension beyond the model.
     struct Known {
         id: String,
@@ -429,6 +438,8 @@ mod native {
         /// The helper extension was missing from a listing and its load
         /// has been asked for.
         helper_requested: bool,
+        /// The scripted run's command directory, if one was named.
+        control: Option<Control>,
     }
 
     /// The management browser (never shown) and what it learnt. One per
@@ -487,6 +498,16 @@ mod native {
                     loads: VecDeque::new(),
                     loading: false,
                     helper_requested: false,
+                    control: std::env::var_os("NAUTILUS_TEST_CONTROL").map(|dir| {
+                        log::info!(
+                            "TEST HOOK: commands are read from {}",
+                            Path::new(&dir).display()
+                        );
+                        Control {
+                            dir: PathBuf::from(dir),
+                            next: 1,
+                        }
+                    }),
                 }),
             });
             let mut client = ManagerClient::new(
@@ -609,8 +630,6 @@ mod native {
         /// the bridge into the copy, and load the copy. Phase 1 reaches
         /// this only from the test control (`poll_control`); Phase 5
         /// routes every install through it.
-        // Reached from `poll_control`, which the next commit adds.
-        #[allow(dead_code)]
         pub(crate) fn load_bridged(&self, source: PathBuf) {
             // Copying is file work on the UI thread: fine for a small
             // extension, and Phase 5 moves it to the unpacking thread.
@@ -751,6 +770,87 @@ mod native {
                 "chrome-extension://{id}/{}",
                 popup.trim_start_matches('/')
             ))
+        }
+
+        /// Carry out the next command of a scripted run, if one is
+        /// waiting. Called by the engine on every spin; does nothing
+        /// unless `NAUTILUS_TEST_CONTROL` was set.
+        pub(crate) fn poll_control(self: &Rc<Self>) {
+            let (number, text) = {
+                let mut inner = self.inner.borrow_mut();
+                let Some(control) = inner.control.as_mut() else {
+                    return;
+                };
+                let path = control.dir.join(format!("cmd-{}.json", control.next));
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    return;
+                };
+                control.next += 1;
+                (control.next - 1, text)
+            };
+            let command: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(command) => command,
+                Err(e) => {
+                    log::warn!("TEST HOOK: command {number} is not JSON: {e}");
+                    return;
+                }
+            };
+            if let Some(dir) = command.get("load").and_then(|v| v.as_str()) {
+                log::info!("TEST HOOK: command {number}: load {dir}");
+                self.load_bridged(PathBuf::from(dir));
+            } else if let Some(id) = command.get("click").and_then(|v| v.as_str()) {
+                let tab = self
+                    .delegate
+                    .last_focused()
+                    .or_else(|| self.bridge.any_tab());
+                let sent = tab.is_some_and(|tab| self.click_action(id, tab));
+                log::info!(
+                    "TEST HOOK: command {number}: click on {id} for {tab:?}: {}",
+                    if sent {
+                        "sent to the bridge"
+                    } else {
+                        "not sent"
+                    }
+                );
+            } else if let Some(message) = command.get("devtools").filter(|m| m.is_object()) {
+                let mut message = message.clone();
+                message["id"] = serde_json::json!(9000 + number);
+                log::info!(
+                    "TEST HOOK: command {number}: devtools {}",
+                    message
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("?")
+                );
+                let bytes = message.to_string().into_bytes();
+                let host = self.inner.borrow().browser.as_ref().and_then(|b| b.host());
+                if host.is_none_or(|host| host.send_dev_tools_message(Some(&bytes)) == 0) {
+                    log::warn!("TEST HOOK: command {number} could not be sent");
+                }
+            } else if command.get("table").is_some() {
+                log::info!("TEST HOOK: command {number}: table");
+                self.bridge.log_table();
+            } else {
+                log::warn!("TEST HOOK: command {number} is not understood: {command}");
+            }
+        }
+
+        /// Append a DevTools message of the management browser to the
+        /// scripted run's `devtools.log`.
+        fn control_log(&self, message: &[u8]) {
+            use std::io::Write;
+            let inner = self.inner.borrow();
+            let Some(control) = inner.control.as_ref() else {
+                return;
+            };
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(control.dir.join("devtools.log"));
+            if let Ok(mut file) = file {
+                let _ = file.write_all(message);
+                let _ = file.write_all(b"\n");
+            }
         }
 
         /// Close the management window and its browser; the engine then
@@ -1260,6 +1360,19 @@ mod native {
         }
 
         impl DevToolsMessageObserver {
+            // Every message, for a scripted run's log. 0: not handled,
+            // so the method results and events are still delivered.
+            fn on_dev_tools_message(
+                &self,
+                _browser: Option<&mut Browser>,
+                message: Option<&[u8]>,
+            ) -> ::std::os::raw::c_int {
+                if let Some(message) = message {
+                    self.manager.control_log(message);
+                }
+                0
+            }
+
             fn on_dev_tools_method_result(
                 &self,
                 _browser: Option<&mut Browser>,

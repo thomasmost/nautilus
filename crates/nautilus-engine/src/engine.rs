@@ -240,6 +240,8 @@ impl osmena_engine::Engine for Engine {
         // Store downloads unpacked on worker threads are loaded here, on
         // the UI thread.
         self.extensions.poll_unpacked();
+        // A scripted run's next command, if NAUTILUS_TEST_CONTROL is set.
+        self.extensions.poll_control();
         cef::do_message_loop_work();
         self.spinning.set(false);
     }
