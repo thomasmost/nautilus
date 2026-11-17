@@ -11,3 +11,4 @@
 //! side.
 
 pub(crate) mod rewrite;
+pub(crate) mod table;
