@@ -17,6 +17,10 @@
 // kept (and tested) everywhere, so its lints are quiet elsewhere.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod crx;
+// The bridge's pure parts are kept (and tested) everywhere; only
+// Windows and macOS run extensions.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+mod bridge;
 mod delegate;
 mod devtools;
 mod engine;
