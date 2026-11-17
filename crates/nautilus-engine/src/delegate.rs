@@ -127,6 +127,12 @@ impl DelegateState {
         *self.focused_browser.borrow_mut() = Some(browser.clone());
     }
 
+    /// The tab focused last, which is the tab an extension's action
+    /// click is about.
+    pub(crate) fn last_focused(&self) -> Option<TabId> {
+        self.last_focused.get()
+    }
+
     /// The browser of the last focused tab, for dialogs the user should
     /// see.
     #[cfg_attr(not(windows), allow(dead_code))]

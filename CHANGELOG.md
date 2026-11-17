@@ -25,6 +25,8 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- Each profile gets a small helper extension, written into it on start, that the extension bridge uses to find DevTools targets.
+
 - The Launch Panel's field completes an address ahead of the typist
   (osmena). Before the first space, the most visited page whose
   address starts with the typing stands in the field, the rest of its

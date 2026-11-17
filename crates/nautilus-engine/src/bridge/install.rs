@@ -1,8 +1,6 @@
 //! Writing the bridge into an extension's directory, and the helper
 //! extension into the profile. File work only; no CEF.
 
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 

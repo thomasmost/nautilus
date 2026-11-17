@@ -7,8 +7,6 @@
 //! tab id beside the same target id. The join of the two is the table.
 //! Pure: the CEF calls that feed it are in `native`.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use osmena_core::TabId;
@@ -141,7 +139,9 @@ impl TabTable {
             .map(|row| row.chromium)
     }
 
-    /// The Nautilus tab Chromium calls `chromium`.
+    /// The Nautilus tab Chromium calls `chromium`. Only tests ask for it
+    /// so far.
+    #[allow(dead_code)]
     pub(crate) fn tab(&self, chromium: i64) -> Option<TabId> {
         self.rows
             .iter()

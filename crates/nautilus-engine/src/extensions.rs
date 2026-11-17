@@ -276,13 +276,21 @@ mod stub {
         }
 
         pub(crate) fn shutdown(&self) {}
+
+        pub(crate) fn track_tab(&self, _tab: osmena_core::TabId, _browser: &cef::Browser) {}
+
+        pub(crate) fn untrack_tab(&self, _tab: osmena_core::TabId) {}
+
+        pub(crate) fn click_action(&self, _id: &str, _tab: osmena_core::TabId) -> bool {
+            false
+        }
     }
 }
 
 #[cfg(any(windows, target_os = "macos"))]
 mod native {
     use std::cell::{Cell, RefCell};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
@@ -306,9 +314,10 @@ mod native {
         wrap_load_handler, wrap_run_file_dialog_callback, wrap_urlrequest_client,
         wrap_window_delegate,
     };
-    use osmena_core::{EngineEvent, Extension, ExtensionSource, Favicon};
+    use osmena_core::{EngineEvent, Extension, ExtensionSource, Favicon, TabId};
 
     use super::UnpackQueue;
+    use crate::bridge::{self, Bridge};
     use crate::crx;
     use crate::delegate::DelegateState;
 
@@ -387,6 +396,9 @@ mod native {
         id: String,
         /// The popup page of its toolbar action, relative to its root.
         popup: Option<String>,
+        /// Its worker is wrapped by the bridge's loader.
+        bridged: bool,
+        enabled: bool,
     }
 
     struct Inner {
@@ -410,6 +422,13 @@ mod native {
         /// The window exists (created, not yet destroyed). CEF may only
         /// shut down once it is gone.
         window_alive: bool,
+        /// Unpacked loads waiting their turn: `loadUnpacked`'s folder
+        /// dialog is answered from one slot, so one load runs at a time.
+        loads: VecDeque<PathBuf>,
+        loading: bool,
+        /// The helper extension was missing from a listing and its load
+        /// has been asked for.
+        helper_requested: bool,
     }
 
     /// The management browser (never shown) and what it learnt. One per
@@ -420,6 +439,8 @@ mod native {
         store_dir: PathBuf,
         /// Where the unpacking threads report.
         unpacked: Arc<UnpackQueue>,
+        /// The engine's end of the extension bridge.
+        bridge: Rc<Bridge>,
         /// When an extension was last installed, switched, or removed:
         /// Chromium writes its preferences up to ten seconds later, and
         /// nothing in CEF's shutdown flushes them (every exit counts as a
@@ -441,9 +462,14 @@ mod native {
             engine_dir: &Path,
             unpacked: Arc<UnpackQueue>,
         ) -> Rc<Self> {
+            let store_dir = engine_dir.join("extensions");
+            if let Err(e) = bridge::install::write_helper(&store_dir) {
+                log::error!("cannot write the helper extension: {e}");
+            }
             let manager = Rc::new(ExtensionManager {
+                bridge: Bridge::new(delegate.clone()),
                 delegate,
-                store_dir: engine_dir.join("extensions"),
+                store_dir,
                 unpacked,
                 last_change: Cell::new(None),
                 inner: RefCell::new(Inner {
@@ -458,6 +484,9 @@ mod native {
                     downloads: Vec::new(),
                     window: None,
                     window_alive: false,
+                    loads: VecDeque::new(),
+                    loading: false,
+                    helper_requested: false,
                 }),
             });
             let mut client = ManagerClient::new(
@@ -552,11 +581,73 @@ mod native {
             }
         }
 
-        /// Load the extension in `dir`: `loadUnpacked` opens a folder
-        /// dialog, which the engine's dialog handler answers with `dir`.
+        /// Load the extension in `dir`, after any load already going:
+        /// `loadUnpacked` opens a folder dialog, which the engine's dialog
+        /// handler answers with `dir`.
         fn load_unpacked(&self, dir: PathBuf) {
+            self.inner.borrow_mut().loads.push_back(dir);
+            self.next_load();
+        }
+
+        fn next_load(&self) {
+            let dir = {
+                let mut inner = self.inner.borrow_mut();
+                if inner.loading {
+                    return;
+                }
+                let Some(dir) = inner.loads.pop_front() else {
+                    return;
+                };
+                inner.loading = true;
+                dir
+            };
             self.delegate.answer_next_dialog(dir);
             self.run(LOAD_SCRIPT.to_string(), Request::Load);
+        }
+
+        /// Copy the unpacked extension at `source` into the profile, put
+        /// the bridge into the copy, and load the copy. Phase 1 reaches
+        /// this only from the test control (`poll_control`); Phase 5
+        /// routes every install through it.
+        // Reached from `poll_control`, which the next commit adds.
+        #[allow(dead_code)]
+        pub(crate) fn load_bridged(&self, source: PathBuf) {
+            // Copying is file work on the UI thread: fine for a small
+            // extension, and Phase 5 moves it to the unpacking thread.
+            match bridge::install::copy_and_rewrite(&source, &self.store_dir) {
+                Ok((copy, bridged)) => {
+                    log::info!(
+                        "extension at {} copied to {} (bridged: {bridged:?})",
+                        source.display(),
+                        copy.display()
+                    );
+                    self.load_unpacked(copy);
+                }
+                Err(e) => self.report_error(format!(
+                    "cannot load the extension in {}: {e}",
+                    source.display()
+                )),
+            }
+        }
+
+        pub(crate) fn track_tab(&self, tab: TabId, browser: &cef::Browser) {
+            self.bridge.track(tab, browser);
+        }
+
+        pub(crate) fn untrack_tab(&self, tab: TabId) {
+            self.bridge.untrack(tab);
+        }
+
+        /// Deliver a click on `id`'s popup-less action for `tab` to its
+        /// worker. False when the extension is not bridged.
+        pub(crate) fn click_action(&self, id: &str, tab: TabId) -> bool {
+            let bridged = self
+                .inner
+                .borrow()
+                .known
+                .iter()
+                .any(|k| k.id == id && k.bridged && k.enabled);
+            bridged && self.bridge.click(id, tab)
         }
 
         /// Ask the user for the directory, with a dialog owned by the
@@ -666,6 +757,7 @@ mod native {
         /// pumps until they are gone.
         pub(crate) fn shutdown(&self) {
             log::debug!("extension manager shutting down");
+            self.bridge.shutdown();
             let mut inner = self.inner.borrow_mut();
             inner.ready = false;
             inner.queued.clear();
@@ -700,8 +792,18 @@ mod native {
             }
         }
 
-        /// A `Runtime.evaluate` answered.
+        /// A `Runtime.evaluate` answered. Whatever a load's answer was,
+        /// the next queued load may start.
         fn on_result(self: &Rc<Self>, message_id: i32, success: bool, result: &[u8]) {
+            let was_load = self.inner.borrow().pending.get(&message_id) == Some(&Request::Load);
+            self.handle_result(message_id, success, result);
+            if was_load {
+                self.inner.borrow_mut().loading = false;
+                self.next_load();
+            }
+        }
+
+        fn handle_result(self: &Rc<Self>, message_id: i32, success: bool, result: &[u8]) {
             let Some(request) = self.inner.borrow_mut().pending.remove(&message_id) else {
                 return;
             };
@@ -810,6 +912,7 @@ mod native {
         fn on_list(&self, items: &[serde_json::Value]) {
             let mut known = Vec::new();
             let mut extensions = Vec::new();
+            let mut helper_loaded = false;
             for item in items {
                 let text = |key: &str| {
                     item.get(key)
@@ -825,6 +928,10 @@ mod native {
                 if id.is_empty() {
                     continue;
                 }
+                if id == bridge::install::HELPER_ID {
+                    helper_loaded = true;
+                    continue;
+                }
                 let path = text("path");
                 let manifest = if path.is_empty() {
                     ManifestInfo::default()
@@ -837,6 +944,12 @@ mod native {
                 known.push(Known {
                     id: id.clone(),
                     popup: action.and_then(|a| a.popup.clone()),
+                    bridged: manifest
+                        .facts
+                        .worker
+                        .as_deref()
+                        .is_some_and(bridge::rewrite::is_loader),
+                    enabled,
                 });
                 extensions.push(Extension {
                     id,
@@ -864,7 +977,21 @@ mod native {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            self.inner.borrow_mut().known = known;
+            let bridged: Vec<String> = known
+                .iter()
+                .filter(|k| k.bridged && k.enabled)
+                .map(|k| k.id.clone())
+                .collect();
+            let load_helper = {
+                let mut inner = self.inner.borrow_mut();
+                inner.known = known;
+                !helper_loaded && !std::mem::replace(&mut inner.helper_requested, true)
+            };
+            if load_helper {
+                log::info!("loading the helper extension");
+                self.load_unpacked(self.store_dir.join("nautilus-helper"));
+            }
+            self.bridge.sync(helper_loaded, &bridged);
             self.delegate
                 .push(EngineEvent::ExtensionsChanged(extensions));
         }
