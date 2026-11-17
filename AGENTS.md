@@ -6,8 +6,9 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-17 (popups are browsers Chromium creates, so
-`window.open` keeps its opener; before that blocked sites over Chromium's before-browse
+_Last updated: 2026-11-17 (a page's request for the microphone or the
+camera is answered through osmena's dialog; popups are browsers
+Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
 for their titles and favicons; before that drags carried out within
 the page; before that macOS typing fixes: keys without text carry AppKit's characters,
@@ -233,6 +234,23 @@ Ninja on `PATH`:
   and "Inspect" is `show_dev_tools` in a top-level window of its own
   (`devtools.rs`), closed with the tab. `ContextMenuClosed` drops the
   point.
+- **The microphone and the camera are the user's to give.** An Alloy
+  browser without a permission handler refuses every `getUserMedia`.
+  `TabPermissionHandler::on_request_media_access_permission`
+  (`delegate.rs`) keeps Chromium's callback with the permission bits
+  in `ViewState::media_requests` under an id from `DelegateState`,
+  reports `EngineEvent::MediaAccessRequested` (through
+  `ViewState::report`, so a popup's request waits for its tab) and
+  returns 1; `TabHost::answer_media_access` calls `cont` with exactly
+  the bits that were asked for (anything else is Chromium's
+  `INVALID_STATE`) or `cancel`. `media_request` maps the bits: the
+  microphone and the camera only, so screen capture and an empty
+  request return 0, which Chromium refuses. Who is asked, and what is
+  remembered, is osmena's. The request must not stay pending across a
+  loss of focus (C10 in `docs/upstream-issues.md`); osmena's modal
+  dialog sees to that. `on_show_permission_prompt` (notifications,
+  location and the rest) is not implemented: Chromium ignores those.
+  Never add `--enable-media-stream`: it grants every page everything.
 - **Downloads ask where to save.** `TabDownloadHandler` allows every
   download, answers `on_before_download` with CEF's Save As dialog
   (owned by the tab's window), and reports progress and the outcome as
@@ -383,6 +401,37 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-17, later)
+
+The user's report: a call from a web softphone failed with "Twilio
+31401: The browser or end-user denied permissions to user media".
+Cause: the tab's client had no permission handler, and CEF's Alloy
+style then refuses every media request without asking anyone. Now the
+request goes to the user (see Conventions; the question, the dialog
+and the run-long memory are osmena's). Made on the branch
+`fix/media-permission` in a worktree beside osmena's and merged to
+`main` the same day, with osmena at e111e50.
+
+Verified on the Mac with the bundle and a local probe page that calls
+`getUserMedia({audio: true})` and logs the outcome. Before:
+`NotAllowedError: Permission denied`, no question. After: the system's
+sheet on the window, and with Allow clicked by hand the page logs a
+live track from the headset; a second request in the same run is
+granted with no dialog; a refusal (scripted through a temporary hook
+in osmena, since removed) gives `NotAllowedError` for each request and
+asks again. Also `cargo test --workspace` (the permission bits among
+them), clippy, fmt. The egui prompt this started as is what found C10:
+with it, losing focus before answering made Allow fail.
+
+Not verified: a real Twilio call (the report's own page), Block by a
+real click, the camera, a request from a popup or from a background
+tab, the installed app (its first use will also bring macOS's own
+microphone question, since each ad-hoc build is a new app to the
+system), Windows. Observed twice and not traced: "Teardown watchdog
+expired; recording dump and terminating" from a helper at exit when a
+microphone stream was still open; the browser exited with code 0 and
+left no process.
 
 ## Status and handoff (2026-11-17)
 

@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 
 use cef::{
     Browser, BrowserSettings, CefString, DragOperationsMask, Frame as CefFrame, ImplBrowser,
-    ImplBrowserHost, ImplFrame, KeyEvent, KeyEventType, MouseButtonType, MouseEvent, WindowInfo,
+    ImplBrowserHost, ImplFrame, ImplMediaAccessCallback, KeyEvent, KeyEventType, MouseButtonType,
+    MouseEvent, WindowInfo,
 };
 use dpi::PhysicalSize;
 use keyboard_types::{Key, KeyState, NamedKey};
@@ -707,6 +708,25 @@ impl TabHostApi for TabHost {
     fn context_menu_closed(&self, tab: TabId) {
         if let Some(entry) = self.tabs.get(&tab) {
             entry.view.context_menu.borrow_mut().take();
+        }
+    }
+
+    /// The user's answer to a page's request for the microphone or the
+    /// camera: all that was asked for, or nothing. Chromium ignores an
+    /// answer to a request the page has since abandoned.
+    fn answer_media_access(&self, tab: TabId, request: u64, allow: bool) {
+        let Some(entry) = self.tabs.get(&tab) else {
+            return;
+        };
+        let held = entry.view.media_requests.borrow_mut().remove(&request);
+        let Some((callback, permissions)) = held else {
+            log::debug!("media request {request} is no longer held");
+            return;
+        };
+        if allow {
+            callback.cont(permissions);
+        } else {
+            callback.cancel();
         }
     }
 

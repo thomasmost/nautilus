@@ -22,22 +22,23 @@ use cef::{
     ImplContextMenuParams, ImplDialogHandler, ImplDisplayHandler, ImplDownloadHandler,
     ImplDownloadImageCallback, ImplDownloadItem, ImplDragData, ImplFileDialogCallback,
     ImplFindHandler, ImplFrame, ImplImage, ImplKeyboardHandler, ImplLifeSpanHandler,
-    ImplLoadHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
+    ImplLoadHandler, ImplPermissionHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
     ImplRunContextMenuCallback, KeyEvent, KeyEventType, KeyboardHandler, LifeSpanHandler,
-    LoadHandler, LogSeverity, MenuModel, PaintElementType, ProcessId, ProcessMessage, Rect,
-    RenderHandler, Request, RequestHandler, RunContextMenuCallback, ScreenInfo, TerminationStatus,
-    TransitionType, WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDialogHandler,
+    LoadHandler, LogSeverity, MediaAccessCallback, MediaAccessPermissionTypes, MenuModel,
+    PaintElementType, PermissionHandler, ProcessId, ProcessMessage, Rect, RenderHandler, Request,
+    RequestHandler, RunContextMenuCallback, ScreenInfo, TerminationStatus, TransitionType,
+    WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDialogHandler,
     WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback, WrapFindHandler,
-    WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapRenderHandler,
-    WrapRequestHandler, wrap_client, wrap_context_menu_handler, wrap_dialog_handler,
-    wrap_display_handler, wrap_download_handler, wrap_download_image_callback, wrap_find_handler,
-    wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
-    wrap_request_handler,
+    WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapPermissionHandler,
+    WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_context_menu_handler,
+    wrap_dialog_handler, wrap_display_handler, wrap_download_handler, wrap_download_image_callback,
+    wrap_find_handler, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
+    wrap_permission_handler, wrap_render_handler, wrap_request_handler,
 };
 use osmena_core::{
     BlockedSites, Cursor, DownloadPolicy, DownloadReport, DownloadState, EditState, EngineEvent,
-    ExtensionSource, LoadState, Media, MediaKind, Misspelling, PageContext, PendingTab, RgbaImage,
-    TabId,
+    ExtensionSource, LoadState, Media, MediaKind, MediaRequest, Misspelling, PageContext,
+    PendingTab, RgbaImage, TabId,
 };
 use url::Url;
 
@@ -101,6 +102,8 @@ pub(crate) struct DelegateState {
     /// The sites the profile blocks, as the shell last said; a
     /// main-frame navigation to one is cancelled in `on_before_browse`.
     blocked: RefCell<BlockedSites>,
+    /// The id of the next request for the microphone or the camera.
+    next_media_request: Cell<u64>,
 }
 
 impl DelegateState {
@@ -370,6 +373,11 @@ pub(crate) struct ViewState {
     /// (a drag shows its own, and Chromium does not repeat a cursor it
     /// believes is still shown).
     pub cursor: Cell<Cursor>,
+    /// The page's requests for the microphone or the camera that wait
+    /// for the user, by the id they were reported under: Chromium's
+    /// callback and the permissions it asked for, which an allowing
+    /// answer must repeat exactly.
+    pub media_requests: RefCell<HashMap<u64, (MediaAccessCallback, u32)>>,
 }
 
 impl ViewState {
@@ -403,6 +411,7 @@ impl ViewState {
             focused: Cell::new(false),
             drag: RefCell::new(None),
             cursor: Cell::new(Cursor::Default),
+            media_requests: RefCell::new(HashMap::new()),
         }
     }
 
@@ -494,6 +503,7 @@ pub(crate) fn client_for(view: Rc<ViewState>) -> Client {
         context_menu: TabContextMenuHandler::new(view.clone()),
         download: TabDownloadHandler::new(view.clone()),
         find: TabFindHandler::new(view.clone()),
+        permission: TabPermissionHandler::new(view.clone()),
         keyboard: TabKeyboardHandler::new(),
         dialog,
         view,
@@ -510,6 +520,7 @@ struct TabHandlers {
     context_menu: ContextMenuHandler,
     download: DownloadHandler,
     find: FindHandler,
+    permission: PermissionHandler,
     keyboard: KeyboardHandler,
     dialog: DialogHandler,
     view: Rc<ViewState>,
@@ -572,6 +583,10 @@ wrap_client! {
             Some(self.handlers.keyboard.clone())
         }
 
+        fn permission_handler(&self) -> Option<PermissionHandler> {
+            Some(self.handlers.permission.clone())
+        }
+
         fn render_handler(&self) -> Option<RenderHandler> {
             Some(self.handlers.render.clone())
         }
@@ -607,6 +622,68 @@ wrap_client! {
                 return 0;
             };
             self.handlers.view.delegate.store_request(request);
+            1
+        }
+    }
+}
+
+/// What a media request asks for, as the model's request: the
+/// microphone and the camera of `getUserMedia`. `None` for anything
+/// else (capturing the screen or its sound, or nothing at all), which
+/// is left to Chromium's default, a refusal.
+pub(crate) fn media_request(id: u64, origin: &str, permissions: u32) -> Option<MediaRequest> {
+    let microphone = MediaAccessPermissionTypes::DEVICE_AUDIO_CAPTURE.get_raw();
+    let camera = MediaAccessPermissionTypes::DEVICE_VIDEO_CAPTURE.get_raw();
+    if permissions == 0 || permissions & !(microphone | camera) != 0 {
+        return None;
+    }
+    Some(MediaRequest {
+        id,
+        origin: origin.to_string(),
+        microphone: permissions & microphone != 0,
+        camera: permissions & camera != 0,
+    })
+}
+
+wrap_permission_handler! {
+    struct TabPermissionHandler {
+        view: Rc<ViewState>,
+    }
+
+    impl PermissionHandler {
+        fn on_request_media_access_permission(
+            &self,
+            _browser: Option<&mut Browser>,
+            _frame: Option<&mut CefFrame>,
+            requesting_origin: Option<&CefString>,
+            requested_permissions: u32,
+            callback: Option<&mut MediaAccessCallback>,
+        ) -> ::std::os::raw::c_int {
+            let Some(callback) = callback else {
+                return 0;
+            };
+            let origin = requesting_origin
+                .map(CefString::to_string)
+                .unwrap_or_default();
+            let delegate = &self.view.delegate;
+            let id = delegate.next_media_request.get();
+            let Some(request) = media_request(id, &origin, requested_permissions) else {
+                log::info!(
+                    "refused media request of {origin} (permissions {requested_permissions:#x})"
+                );
+                return 0;
+            };
+            delegate.next_media_request.set(id + 1);
+            log::info!(
+                "media request {id}: {origin} asks for the {}",
+                request.devices()
+            );
+            self.view
+                .media_requests
+                .borrow_mut()
+                .insert(id, (callback.clone(), requested_permissions));
+            self.view
+                .report(move |tab| EngineEvent::MediaAccessRequested { tab, request });
             1
         }
     }
@@ -1821,7 +1898,8 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     use super::strings_of;
     use super::{
-        DelegateState, EditCommand, PopupPlan, ViewState, edit_command, escape_html, popup_plan,
+        DelegateState, EditCommand, PopupPlan, ViewState, edit_command, escape_html, media_request,
+        popup_plan,
     };
     use cef::WindowOpenDisposition;
     use osmena_core::{EngineEvent, TabId};
@@ -1905,6 +1983,24 @@ mod tests {
     }
     #[cfg(not(target_os = "macos"))]
     use cef::CefStringList;
+
+    /// Chromium's bits: 1 the microphone, 2 the camera, 4 and 8 the
+    /// screen's sound and picture.
+    #[test]
+    fn a_media_request_is_the_microphone_and_the_camera_or_nothing() {
+        let mic = media_request(3, "https://a.example", 1).unwrap();
+        assert_eq!((mic.id, mic.origin.as_str()), (3, "https://a.example"));
+        assert!(mic.microphone && !mic.camera);
+        let camera = media_request(4, "https://a.example", 2).unwrap();
+        assert!(!camera.microphone && camera.camera);
+        let both = media_request(5, "https://a.example", 3).unwrap();
+        assert!(both.microphone && both.camera);
+        // Screen capture, alone or with a device, and an empty request
+        // are not asked about: Chromium's default refuses them.
+        for other in [0, 4, 8, 12, 5, 10] {
+            assert_eq!(media_request(6, "https://a.example", other), None);
+        }
+    }
 
     /// Calls into libcef, which on macOS is loaded at run time from the
     /// app bundle (`LibraryLoader` in `engine.rs`): a test binary there

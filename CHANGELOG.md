@@ -51,6 +51,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- Calls and recordings in pages work: a page that asks for the
+  microphone or the camera gets a question from the system, "Allow
+  <site> to use your microphone?" with Allow and Block, where before
+  every request was refused without one (a Twilio call ended with
+  "31401: The browser or end-user denied permissions to user media").
+  A site you allow keeps the device until you quit Nautilus; a site
+  you block may ask again. Sharing the screen is still refused.
+
 - "Sign in with Google" (and any sign-in that opens a popup) never
   came back signed in, and opened two tabs, one of them blank for
   good. A page's `window.open` used to be cancelled and replaced by an

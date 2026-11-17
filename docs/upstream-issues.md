@@ -152,6 +152,34 @@ is cancelled at once, with it the drop zone gets `dragenter`, `drop`
 and the source gets `dragend` with `dropEffect=move`. Remove the switch
 on the CEF bump where the feature is on by default.
 
+### C10: a media request left pending across a loss of focus fails when it is allowed
+
+With a `CefPermissionHandler` that answers
+`OnRequestMediaAccessPermission` later (returns true, keeps the
+callback), calling `CefBrowserHost::SetFocus(false)` on the windowless
+browser while the request waits makes the eventual
+`Continue(requested_permissions)` fail: the page's `getUserMedia`
+rejects with `AbortError: Failed due to shutdown` (Chromium's
+`FAILED_DUE_TO_SHUTDOWN`, which `MediaStreamManager` reports when a
+request is removed while its response is pending), also when focus
+was given back before the answer. Seen on macOS (CEF 154) in all
+seven runs with a scripted `set_focus(0)` 0.3 to 3 seconds into the
+wait, and in one of two runs where the window really lost focus (the
+other, blurred within a second of the request, was still granted
+eight seconds later). Answers with no blur in the log succeeded after
+waits of 0, 3 and 9 seconds, and a stream already granted survives
+the blur. Each failing run logged `process_requirement.cc: Unable to
+derive validation category for current process` from the browser
+process within about a second of the blur; the line also appears at
+other moments and may be unrelated. What removes the request was not
+found, and nothing was reported upstream.
+**Workaround (2026-11-17):** the question is a modal dialog of the
+system's (osmena's `media_prompt`), answered inside the handler of the
+event that reported the request, so the window's change of focus is
+delivered after the answer. Do not turn the question into something
+that stays open while events flow (a prompt in the chrome, an
+asynchronous sheet) without settling this first.
+
 ## egui and winit
 
 ### E1: IME is enabled only for egui's own text fields

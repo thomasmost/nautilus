@@ -466,7 +466,13 @@ engine glue. Each item must pass.
 22. **Dock icon (macOS).** While running, the Dock shows the same icon
     as the Finder: a white rounded square on Apple's grid, as large as
     its neighbours, with no black outline.
-23. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
+23. **Microphone.** On a page that calls `getUserMedia({audio: true})`
+    (any web softphone, or a voice recorder page), a dialog of the
+    system's asks "Allow <site> to use your microphone?". Block: the
+    page reports that permission was denied, and asking again shows
+    the dialog again. Allow: the page gets sound, and asking again in
+    the same run shows no dialog. After a restart it asks once more.
+24. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
 
 ## Packaging
@@ -577,6 +583,13 @@ disabled in it. A rerun of a workflow run replaces that run's release.
   bundle: https://aka.ms/vs/17/release/vc_redist.x64.exe.
 
 ### Known limitations
+
+- A page may use the microphone and the camera after you allow it, for
+  that run only: there is no list of allowed sites and nothing is
+  remembered after a quit. Screen sharing (`getDisplayMedia`) and the
+  other permission prompts (notifications, location) are refused. On
+  macOS the system asks for the microphone once more itself, per
+  build, since the bundle is signed ad hoc.
 
 Upstream causes and the features they block are tracked in
 `docs/upstream-issues.md`.
