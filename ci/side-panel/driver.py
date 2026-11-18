@@ -400,6 +400,7 @@ def spike(ext):
     tabs_work('after a stop', mark)
     check('the extension\'s own onConnect listener never saw the bridge (U3)', not since(0, 'spy'),
           [r['data'] for r in since(0, 'spy')])
+    change_checks('spike run 2', engine_lines(2), ext_id)
 
     relay_recovery(control, ext_id, 2)
 
@@ -438,7 +439,34 @@ def classify_forget(after, ext_id, tab):
 
 
 def detector_lines(after, ext_id):
-    return [line for line in after if 'worker target changed' in line and ext_id in line]
+    return [line for line in after if 'worker target changed from' in line and ext_id in line]
+
+
+# Lines that show a relay of the extension was closed or opened again.
+CLOSE_MARKS = ('closed and opened again', 'could not say which worker', 'stopped listening')
+
+
+def change_checks(label, lines, ext_id):
+    """(I17) Each worker-target change of the extension is asked of its relay,
+    and a live relay answers and is kept: after the change, up to the next one,
+    no close of the relay and no reopen (`page <id> ready`). Run for a restart,
+    which must not cost a relay; the zombie run has its own checks."""
+    changes = [i for i, line in enumerate(lines) if 'worker target changed from' in line and ext_id in line]
+    check(label + ' (I17): the worker target changed for the extension', bool(changes),
+          'no "worker target changed" line for %s' % ext_id)
+    for n, i in enumerate(changes):
+        end = changes[n + 1] if n + 1 < len(changes) else len(lines)
+        ask = first_index(lines, 'asks its relay which worker it reaches', i)
+        kept = first_index(lines, 'reaches a live worker', ask) if ask >= 0 else -1
+        closes = [line for line in lines[i:end]
+                  if any(mark in line for mark in CLOSE_MARKS)
+                  or ('page %s is gone' % ext_id) in line or ('page %s ready' % ext_id) in line]
+        check(label + ' (I17): change %d was asked of its relay' % (n + 1), 0 <= i < ask < end,
+              'no ask after the change line')
+        check(label + ' (I17): change %d: the relay answered and is kept' % (n + 1), kept >= 0,
+              'no "reaches a live worker" line after the ask')
+        check(label + ' (I17): change %d: no close and no reopen of the relay' % (n + 1), not closes,
+              closes[:2])
 
 
 def reload_provocation(ext, zombie=False):
@@ -565,12 +593,21 @@ def zombie_checks(after, start, tab, chromium, lines_at_reload):
     check('zombie: no sync line says the extension is gone during the hold',
           not any('is gone)' in l for l in window), [l for l in window if 'is gone)' in l][:2])
     detector = [i for i in range(lines_at_reload, len(log_all))
-                if 'worker target changed' in log_all[i] and ext_id in log_all[i]]
+                if 'worker target changed from' in log_all[i] and ext_id in log_all[i]]
     if not check('zombie (I10 a): the worker-target detector saw the reload', bool(detector),
                  'no "worker target changed" line for %s after the reload' % ext_id):
         return
     at = detector[0]
     print('INFO zombie: the detector line: ' + log_all[at], flush=True)
+    # I17: the change is asked of its relay, and the zombie cannot answer: the
+    # ask fails, the relay is closed, and it was not kept by any answer.
+    asked = first_index(log_all, 'asks its relay which worker it reaches', at)
+    failed = first_index(log_all, 'could not say which worker it reaches', at)
+    check('zombie (I17): the change was asked of its relay', asked >= 0, 'no ask after the detector line')
+    check('zombie (I17): the ask failed, and the relay was closed for it', failed > asked >= 0,
+          'no "could not say which worker it reaches" line after the ask')
+    check('zombie (I17): no answer kept the zombie', first_index(log_all, 'reaches a live worker', at) < 0,
+          log_all[first_index(log_all, 'reaches a live worker', at)] if first_index(log_all, 'reaches a live worker', at) >= 0 else None)
     opened = first_index(log_all, 'opening at chrome-extension://%s/nautilus-bridge/relay.html' % ext_id, at)
     check('zombie: the relay was opened again after the detector', opened >= 0)
     ready = first_index(log_all, 'bridge: page %s ready' % ext_id, at)
@@ -794,6 +831,7 @@ def stop_provocation(ext):
             print('INFO   ' + line, flush=True)
     restarted = any('runs a new worker instance' in line for line in after_lines)
     check('stop (identity): the engine learned that the worker was started again', restarted)
+    change_checks('stop', after_lines, ext_id)
     tab_name = re.search(r'TabId\((\d+)\)', shown[-1]).group(0) if shown else 'TabId(?)'
     left = any(tab_name + ' has no debugger left' in line for line in after_lines)
     # M20: "hidden again" is the line that says the tab was hidden.
