@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-18 (review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-18 (review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -314,9 +314,11 @@ Ninja on `PATH`:
   not-attached or unknown (`policy::tabs_to_forget`); only not-attached
   forgets a debugger, and `policy::forgets` is the one gate (review cycle 4:
   uncertainty never forgets). A reloaded extension's worker target changes
-  (`policy::worker_target`, the helper lists it as type `worker`); the
-  relay is kept when a new instance says hello through it and closed as a
-  zombie otherwise (`policy::after_change`). Never key this on CEF's
+  (`policy::worker_target`, the helper lists it as type `worker`); the change
+  asks the relay which worker it reaches (`identify`, from `check_worker_targets`),
+  and the answer decides: a hello keeps the relay, and a failed answer closes it
+  as a zombie, only for the latest change (`policy::asks_on`, `policy::after_ask`).
+  A hello that arrives outside an ask decides nothing. Never key this on CEF's
   DevTools-agent callbacks: they fire for the engine's own
   `Target.getTargetInfo` probe and for every tab at creation, so they say
   nothing about an extension's debugger.
@@ -450,7 +452,133 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
+## Status and handoff (2026-11-18, review cycle 6 of Phase 1)
+
+The sixth review left I17 (Important) and M16, M23, M24 (Minor). The kept
+logs are `evidence/phase-1/review6-*` (not committed); names below are relative
+to it. Each run's exit status is in the `.status` file beside its `.out`.
+
+What changed:
+
+- **A worker-target change asks its relay, and the answer decides (I17).**
+  `policy::WorkerWatch` (one per extension) records the target and counts the
+  changes (`observe`, `is_latest`). `policy::asks_on` says that a change with an
+  open relay asks, and `policy::after_ask` decides: a hello keeps the relay; a
+  failed answer closes it for the latest change; an answer to an earlier change
+  is ignored. The ask is `identify`, sent from `relay.rs` `check_worker_targets`
+  (`ask`, `decide_ask`, `Pending::Ask`). Removed: the two-refresh grace
+  (`CHANGE_GRACE_REFRESHES`, `policy::after_change`), the hello counting
+  (`WorkerWatch::hello`), and their tests (11 superseded, 9 added). The cycle 5
+  defect: the new worker's hello came before the change was observed, so it
+  did not count, and the live relay was closed after the grace.
+- **`identify` rejects in a zombie (found while designing the ask).** The relay
+  page answered `identify()` from the hello it cached before a reload. A zombie
+  gets no port event, so the cache stayed, and an ask would have kept it. `relay.js`
+  `contextAlive` checks `chrome.runtime.id` first. Node check
+  `review6-identify-zombie-check.js`: red against the committed `relay.js`
+  (`review6-identify-zombie-red.txt`, status 1: the stale hello `B` resolved),
+  green on the tree (`review6-identify-zombie-green.txt`, status 0).
+- **Driver checks (I17).** `ci/side-panel/driver.py` `change_checks` (spike and
+  stop): each worker-target change of the extension was asked, the relay
+  answered and was kept, and no close and no reopen follows before the next
+  change. `zombie_checks`: the change was asked, the ask failed and the relay was
+  closed, and no answer kept it. The change is matched by its line's phrase
+  "worker target changed from": the ask's own line also says "worker target
+  changed", and the first version of the check counted it as a second change
+  (`review6-spike-prefix-driver-run1.out`, status 1, three checks failing, all
+  from that; the engine behaved as intended in it, see the runs).
+- **M16, the evidence names.** `review6-m16-check_evidence_names.py` (its last run: `review6-m16-check.txt`, status 0) resolves
+  every backticked token and every evidence-shaped token in the five documents
+  and the acceptance record. Fixed by eye in CLAUDE.md 746, 930, 1070 and
+  1147-1168 (the slash forms and the fragments are now full file names, such as
+  `task12-tick0-control.out` and `task12-f5-run1.out`), in the acceptance record (the
+  task 13, F5 and brace forms, and the run-name fragments, now name full files), and
+  in the cycle 5 M16 note (the run named early zombie is `review4-zombie-early.out`).
+- **M23.** The cycle 5 closes, from the kept logs: spike run 1 06:21:39 to
+  06:21:43 (4 s), spike run 2 06:27:34 to 06:27:37 (3 s), stop run 1 06:41:44 to
+  06:41:48 (4 s). "Three to four seconds" is the accurate figure.
+- **M24.** The Conventions bullet names `policy::asks_on` and `policy::after_ask`.
+
+Tests and checks on the final tree (exit status in brackets; kept outputs in
+`review6-*`):
+
+- `cargo fmt --all --check` [0, `review6-fmt-check.txt.status`]
+- `cargo test --workspace` [0, `review6-cargo-test-workspace.txt`: 147 + 2 passed;
+  cycle 5 was 149 + 2]
+- `cargo clippy --workspace --all-targets -- -D warnings` [0,
+  `review6-cargo-clippy-workspace.txt.status`]
+- `cargo build --workspace` [0, `review6-cargo-build-workspace.txt.status`]
+- `cargo xtask bundle-mac` [0, `review6-bundle-mac.txt.status`]
+- `sh -n ci/side-panel/run.sh` [0, `review6-sh-n.txt.status`]; the driver's AST
+  and compile check [ok, `review6-driver-compile.txt`; compiled without writing
+  bytecode, no `__pycache__`]; `node --check` on `bridge.js` and `relay.js` [0,
+  `review6-node-check.txt`].
+- The red step of the policy tests: `review6-i17-policy-tests-red.txt` [101]:
+  nine ask tests failed against stub functions (their names are in the output). Green: `review6-i17-policy-tests-green.txt` [0].
+
+Runs (final build; each launch's status in its `.status`; logs in the
+`review6-*-logs/` directories (each keeps the driver's log, the launches' logs and
+a results file, for example `review6-pump-run1-logs/results.jsonl`):
+
+| Run (`run.sh`) | Status | Checks | Kept files (`evidence/phase-1/`) |
+|---|---|---|---|
+| `spike`, 1 | 0 | 54 PASS, 0 FAIL | `review6-spike-run1.out`, `review6-spike-run1-logs/` |
+| `spike`, 2 | 0 | 54 PASS, 0 FAIL | `review6-spike-run2.out`, `review6-spike-run2-logs/` |
+| `zombie`, 1 | 0 | 21 PASS, 0 FAIL | `review6-zombie-run1.out`, `review6-zombie-run1-logs/` |
+| `zombie`, 2 | 0 | 21 PASS, 0 FAIL | `review6-zombie-run2.out`, `review6-zombie-run2-logs/` |
+| `pump`, 1 | 0 | 7 PASS, 0 FAIL | `review6-pump-run1.out`, `review6-pump-run1-logs/` |
+| `reload`, 1 | 0 | 7 PASS, 0 FAIL | `review6-reload-run1.out`, `review6-reload-run1-logs/` |
+| `stop`, 1 | 0 | 14 PASS, 0 FAIL | `review6-stop-run1.out`, `review6-stop-run1-logs/` |
+| `idle`, 1 | 0 | 9 PASS, 0 FAIL | `review6-idle-run1.out`, `review6-idle-run1-logs/` |
+| `broken`, 1 | 0 | 14 PASS, 0 FAIL | `review6-broken-run1.out`, `review6-broken-run1-logs/` |
+
+What the runs show:
+
+- **Restart, kept (I17), spike 1 and 2, stop 1.** One change each, the
+  restart after the stop: `review6-spike-run1-logs/run-2.log` lines 94 to 100
+  (the new worker's hello at 15:15:56, line 94, before the change, line 97; the
+  ask, line 98; "the relay is kept", line 100). Spike 2 has the same lines at
+  15:21:53 (`review6-spike-run2-logs/run-2.log`), and stop 1 at 15:34:18
+  (`review6-stop-run1-logs/run-1.log`, lines 133 to 139). No close and no reopen
+  follows in any of the three (the driver's I17 checks).
+- **Zombie (ask fails), zombie 1 and 2.** The change was asked and the relay
+  "could not say which worker it reaches", and it was closed and opened again
+  within the same second (`review6-zombie-run1-logs/run-1.log` lines 88 to 102,
+  15:13:10; `review6-zombie-run2-logs/run-1.log` lines 86 to 100, 15:26:53). The
+  reopened relay's identify (a debugger needed it) heard the hello, which
+  forgot the tab; "hidden again" followed. The driver's path line is `forgotten
+  by hello`.
+- **Pump (I7, latency).** The tab was shown at attach ("was hidden; shown for
+  the debugger of", `review6-pump-run1-logs/run-1.log` line 79) and hidden again
+  after the detach (line 83). From `review6-pump-run1-logs/results.jsonl`,
+  `Input.dispatchMouseEvent`: 40 calls, maximum 34 ms, none failed;
+  `Page.captureScreenshot`: 40 calls, maximum 90 ms; no call took a second or more.
+- **Reload.** The list showed the extension off during the reload, so the path
+  is `sync` ("forgotten by sync"), and the tab was hidden again.
+- **Idle.** No change and no ask after the stop, no restart in 90 s (I15).
+- **Broken.** Fourteen checks pass, including the give-up and the refused click.
+
+Not verified in this cycle:
+
+- A live relay closed by a wrong `identify` failure (a worker that does not say
+  hello within 5 s of the ask). The case is stated as the one wrong-close case and
+  it is not provoked. The ask is not retried.
+- An ask on a relay whose page is still loading (its probe not passed). The
+  expected result is a failed ask and a close, with nothing in flight, but it was
+  not provoked.
+- A call in flight across a restart window. The stop run's quiet click is not
+  timed against the change, so no run puts a `tabs.query` inside the window. Not
+  deterministic in this harness, and not faked.
+- A stop and restart repeated in a loop; a reload whose worker target id does not
+  change; Windows (nothing ran there).
+- The owner's toolbar click (Task 13 step 5).
+- Observed, not investigated: "hidden again" is logged twice in the same second for
+  the same tab in spike run 1 (`review6-spike-run1-logs/run-2.log` lines 70 and 80;
+  spike run 2 was not checked for it). It is logging only; the tab state is right.
+
 ## Status and handoff (2026-11-18, review cycle 5 of Phase 1)
+
+_Superseded in review cycle 6: the grace and `policy::after_change` are gone, and a restart's relay is kept by its ask (see review cycle 6 below). The cycle 5 runs and their figures stay as they were measured._
 
 The fifth review left I16 (Important) and M16, M20, M21, M22 (Minor). The kept
 logs are `evidence/phase-1/review5-*` (not committed); names below are relative
@@ -500,7 +628,7 @@ What changed:
 - **The old-shape hello (M21).** `table::hello_of` reads `attached` instead of
   `sessions` as a hello of its instance with no sessions. The doc said "no
   hello"; it now says what the code does, and the table test pins it.
-- **M16.** `early-zombie` is `review4-zombie-early.out` (the run's output file) in CLAUDE.md and AGENTS.md.
+- **M16.** The run named early zombie in this handoff is `review4-zombie-early.out` (the run's output file).
   The evidence names in the docs were checked mechanically
   (`check_evidence_names.py`, output in the acceptance record): 30 bare stems
   that name a run's group were rewritten to the run's `.out` file, two `/`
@@ -552,7 +680,7 @@ What the runs show:
 - Restart, in spike 1 and 2 and stop 1: each restart whose hello came before the
   refresh that saw the new target was closed after the grace and reopened, once
   (one "worker target changed" and one "is closed and opened again" line per
-  run, four seconds apart; the spike's restart and its checks still passed, 50
+  run, three to four seconds apart; the spike's restart and its checks still passed, 50
   of 50). This is the cost stated above, measured.
 - Reload 1: the list showed the extension off during the reload, so the path is
   `sync` ("forgotten by sync" in the driver's INFO line), and the tab was hidden
@@ -743,9 +871,9 @@ What changed:
 What the runs show (final build, `review3-final-*` and the sweeps below):
 
 - `reload` (I10): the new worker's `sendCommand` failed (session ended) and
-  the engine forgot the tab (`has no debugger left`); `final-reload` exited
-  0. Seven reload runs with the `alive` check (`review3-reload-after-attempt3.out`
-  to `-7`, `review3-final-reload.out`, and `review3-reload-final-extra-try.out`) all
+  the engine forgot the tab (`has no debugger left`); `review3-final-reload.out`
+  exited 0. Seven reload runs with the `alive` check (`review3-reload-after-attempt3.out`
+  to `review3-reload-after-attempt7.out`, `review3-final-reload.out`, and `review3-reload-final-extra-try.out`) all
   took the `sync` path: the list showed the extension off during the reload.
 - **Not shown fixed: the zombie path.** On the build before `alive`, a
   reload that left the relay page open with no port event left the tab
@@ -927,7 +1055,7 @@ Verification, final build (exit statuses are in `review2-*.status`):
   13 of 13).
 - Runs of `ci/side-panel/run.sh` on the final bundle (`review2-*.out`
   driver output, `review2-*.status` exit status, engine logs
-  `review2-*-engine-launch<n>.log`, per-call records `review2-*-results.jsonl`):
+  `review2-*-engine-launch*.log`, per-call records `review2-*-results.jsonl`):
   - spike, run 1: exit 0; 50 PASS, 0 FAIL; unfocused latency max 71 ms,
     p95 64 ms, 0 timeouts; the relay recovery passed (below).
   - spike, run 2: exit 0; 50 PASS, 0 FAIL; unfocused max 68 ms, p95 63 ms.
@@ -1067,7 +1195,7 @@ claim no file keeps):
 - `ci/side-panel/run.sh pump`, three runs. Run 1 (`review-pump-final-run1.out`,
   line 10: `RESULT all checks passed`) has an engine log
   (`review-pump-final-run1-engine.log`) with no panic, abort or shutdown
-  line. Runs 2 and 3 (`review-pump-final-run2.out` and `-run3.out`, line
+  line. Runs 2 and 3 (`review-pump-final-run2.out` and `review-pump-final-run3.out`, line
   10: `RESULT all checks passed`) have no engine log kept, so no abort is
   shown for them. Exit statuses were not kept (claimed in the session:
   0). Latency (INFO lines): max 725 ms in run 1 (one
@@ -1144,8 +1272,8 @@ the tick off on the instrumented build the pump logged `no spin for
 (claimed in the session; no engine log was kept) and the latency run did
 not finish (`task11-pump-tick0-run1.out`, a FAIL); a second
 tick-off run, on the fix build, failed the same way
-(`task12/tick0-control`). With a 33 ms tick the run passed
-(`task11/pump-tick33-run1`: max 90 ms, p95 63 ms). H2 (a lost delayed
+(`task12-tick0-control.out`). With a 33 ms tick the run passed
+(`task11-pump-tick33-run1.out`: max 90 ms, p95 63 ms). H2 (a lost delayed
 request) is ruled out: with the replace rule and a 600000 ms interval,
 the timer pending and nothing asking sooner, the run still stalled, two
 calls taking 20005 and 20010 ms (claimed in the session;
@@ -1162,10 +1290,10 @@ see below). The F5 fix for it
 tab at all, because the agent attached for the probe's own target lookup;
 the figures below from F5 runs were measured on that build, not on an
 intended one (see 2026-11-18). Passing `run.sh pump` runs, 202
-calls each, unfocused: F1 alone, `task12/fix-run2` and `fix-run3` (max 77
-and 68 ms, p95 64 ms); with F5 (no tab hidden), five runs `task12/f5-run1`
-to `f5-run5` (max 65 to 77 ms, p95 63 to 64 ms). Without F5 one run in
-three failed (`fix-run1`). Idle cost of the tick: about 0.5 %
+calls each, unfocused: F1 alone, `task12-fix-run2.out` and `task12-fix-run3.out`
+(max 77 and 68 ms, p95 64 ms); with F5 (no tab hidden), five runs
+`task12-f5-run1.out` to `task12-f5-run5.out` (max 65 to 77 ms, p95 63 to 64
+ms). Without F5 one run in three failed (`task12-fix-run1.out`). Idle cost of the tick: about 0.5 %
 CPU and 416 wake-ups, against 0.0 % and 201 without it (sampled in the
 session; no log was kept).
 

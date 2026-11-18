@@ -11,7 +11,10 @@ removed `alive`, stopped `gone` from asking the worker anything, and added
 the worker-target check and the debugger rule (below). Review cycle 5 made a
 worker-target change wait for a hello received after the change was observed
 (I16, below), and bounded the whole hello, the target list included, at 2 s.
-They change the message shapes without a new number, because `install`
+Review cycle 6 replaced that wait with an ask: a worker-target change asks the
+relay which worker it reaches, and the answer decides the relay (I17, below);
+`identify` rejects in a reloaded extension's zombie page instead of answering
+from the hello it cached. They change the message shapes without a new number, because `install`
 rewrites `bridge.js` and `relay.js` on every load, so a copy loaded by this
 build always carries them. A copy written by an earlier build is not handled
 (see the limits).
@@ -75,7 +78,7 @@ engine only by resolving a promise the engine is waiting on.
 | `nautilusRelay.next()` | `[{call: …}, {hello: …}, {gone: true}, …]`, when the worker has asked something or its identity or port changed | The engine keeps exactly one pending per relay and calls it again after each answer. It stays pending for as long as the worker is quiet. |
 | `nautilusRelay.reply(id, {result} \| {error}, instance)` | `true` if posted | The answer to call `id` of worker instance `instance`. The bridge takes only the answers for its own instance. |
 | `nautilusRelay.deliver({id, event, tabId})` | `{ok, error?, attempts, received}` | Hand an event to the worker, starting it if stopped. |
-| `nautilusRelay.identify()` | `{instance, sessions}`, the worker's hello | Which worker instance the relay reaches, and the state of its session on each tab. It connects, so a stopped worker starts: the engine asks only when a relay has just passed its probe and an extension holds a debugger or a queued debugger report needs it (`Bridge::needs_identity`), never on a `gone` (I15). Rejects when no hello comes within 5 s, and then the relay is closed and opened again, its debuggers kept. |
+| `nautilusRelay.identify()` | `{instance, sessions}`, the worker's hello | Which worker instance the relay reaches, and the state of its session on each tab. It connects, so a stopped worker starts: the engine asks only when a relay has just passed its probe and an extension holds a debugger or a queued debugger report needs it (`Bridge::needs_identity`), never on a `gone` (I15). Rejects when no hello comes within 5 s, and then the relay is closed and opened again, its debuggers kept. Rejects at once in a reloaded extension's zombie page (its `chrome.runtime.id` is gone), whatever hello it cached. A worker-target change asks it too, and the answer decides the relay (the ask, below; review cycle 6). |
 
 `alive()` was removed in review cycle 4. The engine asks for a table refresh
 every 2 s while a relay is open (`REFRESH_INTERVAL`), and a worker whose
@@ -219,67 +222,97 @@ activity. The helper lists an extension's service worker with type `worker`
 (`chrome.debugger.getTargets`: a fact measured in the probe; `service_worker`
 is accepted too), with the extension's URL (`policy::worker_target`,
 `table::worker_target_of`). A target other than the recorded one is a change
-(`WorkerTarget::Changed`, logged "worker target changed"). A change does not
-close the relay by itself. `policy::WorkerWatch`, one per extension, decides,
-and only a hello that came through this relay after the change was observed
-can count. A hello received before the refresh that sees the change is about
-the worker before it: if it counted, a reload after a restart (the restart's
-hello, then the reload) would keep a zombie relay that no hello can reach
-(I16; the sequence is tested in `policy::tests`). After the change:
+(`WorkerTarget::Changed`, logged "worker target changed from ... to ..."). The
+recorded target is kept through an absence (an idle stop), and `policy::WorkerWatch`
+(one per extension) counts the changes; a change's number names its ask.
 
-- A new worker instance says hello through this relay before the grace ends:
-  the relay reaches the live worker, and it is kept
-  (`check_worker_targets`: "said hello through its relay: the relay is kept").
-- No such hello for `CHANGE_GRACE_REFRESHES` (2) refreshes: the relay is a
-  zombie (a reloaded extension's page cannot reach the new worker). It is
-  closed, the next turn opens a fresh one, and the fresh relay's probe and hello
-  decide the debuggers (`close_relay`; logged "the relay is closed and opened
-  again", with the zombie and the live-but-early cases named in the line).
+**The ask (review cycle 6, I17).** A change asks the relay that reaches the old
+worker which worker instance it reaches now. The ask is the relay's `identify`
+(`check_worker_targets`, `ask`), the same evaluation the engine uses for an
+extension's debuggers. Only a change with a relay open asks (`policy::asks_on`):
+an absence and a first target never ask, so the ask never starts a stopped
+worker (I15); a change with no relay open asks nothing, and a relay opened later
+says who its worker is when a debugger needs it. The answer decides the relay
+(`policy::after_ask`, applied by `decide_ask`):
 
-The price of this rule: a restart whose hello came before the refresh that
-sees the new target is closed after the grace and opened again, one reopen
-per such restart. The engine cannot tell that relay from a zombie from the
-hello alone (a hello carries no target id). Asking the relay which instance it
-reaches at the change would separate the two, and was not built in this cycle:
-it is a new mechanism, and this cycle's fix is the smallest rule that keeps a
-zombie out. A hello that comes after the change is seen keeps the relay with no
-reopen.
+- **A hello answers:** the relay reaches a live worker, and it is kept. The
+  hello is applied as any hello is (a session it says is not attached is
+  forgotten, the rest are kept). Nothing in flight on the relay's port is touched.
+- **No hello answers** (an error, a throw, no hello within the 5 s of
+  `identify`, or a hello with no instance): for the latest change the relay is
+  a zombie. It is closed, and the next turn opens a fresh one; the fresh relay's
+  own `identify` decides the debuggers. An answer to an earlier change is
+  ignored: the latest change's own ask decides (a second change while an ask is
+  out is decided by its own answer).
+- **A hello that came before the change was observed decides nothing.** The
+  hello is not an input any more, and no refresh count is waited for: the
+  two-refresh grace of cycles 4 and 5 (`CHANGE_GRACE_REFRESHES`,
+  `policy::after_change`) is removed, with its tests.
 
-**A restart after a stop changes the target, and the relay is kept.** Measured:
-`ServiceWorker.stopAllWorkers`, then a delivery that starts the worker again,
-comes back under a NEW target id (`review4-stop-run1.out`,
-`review4-spike-run2.out`, cycle 4: the change was logged and the relay kept,
-because the restarted instance's hello came through the relay that the delivery
-connected). So every restart produces a change. Cycle 5 changed what keeps the
-relay: only a hello after the change is seen counts (above). Measured in cycle
-5 (`review5-spike-run1-logs/run-2.log`, `review5-spike-run2-logs/run-2.log`,
-`review5-stop-run1-logs/run-1.log`): the restarted instance's hello came first,
-so the change was logged, the relay was closed four seconds later, and it was
-opened again. The whole cycle is bounded: a
-change starts no worker (it asks nothing; the relay that the hello reaches is
-already connected), an idle stop removes the target and is not a change
-(`WorkerTarget::Absent`, the recorded target is kept), and each change produces
-at most one relay close, after the grace. Not measured: a stop and restart
-repeated in a loop; the runs had one restart.
+A zombie cannot answer from memory. After a reload the relay page keeps the
+hello of the old worker and gets no port event, so a cached hello would answer
+for a worker that is gone. `identify` therefore checks the page's extension
+context first and rejects when `chrome.runtime.id` is gone (`relay.js`,
+`contextAlive`). The check is node-tested: the committed file resolves with the
+stale hello (`review6-identify-zombie-red.txt`, status 1); the tree rejects
+(`review6-identify-zombie-green.txt`, status 0).
 
-**The delivery guarantee across a change.** A kept relay interrupts nothing:
-its calls and deliveries in flight on its port complete as before (the spike run 2's
-`tabs.query` and clicks after the restart, and the stop run's restart check). When a
-zombie relay is closed, what is pending on it is dropped: a delivery sent
-through it and not acknowledged is logged as unknown and is never retried
-(`after_delivery`: a failed evaluation is not retried, so it is at most once);
-a click queued but not yet sent waits for the new relay and is delivered once
-(`job_turn`); a tab list or debugger report of the old instance is dropped, or
-is applied and not answered (`job_kept`, `reply_due`), because its call ids
-belong to a worker that is gone. The pure parts are tested
-(`policy::after_change`, `job_kept`, `reply_due`, `after_delivery`).
+The sequences are the tests of `policy::tests` (the ask is `policy::asks_on`
+and `policy::after_ask` over `WorkerWatch::observe`): a restart kept by its
+answer with no close; a reload the detector sees, closed by its failed ask; the
+I16 sequence (a restart and a reload in one window: the ask goes to the zombie,
+which cannot answer, so it is closed); a restart and then a reload (the first
+kept, the second closed); two changes with an ask out (the first's failure is
+ignored, the second's decides); a change with no relay open; an absence racing
+the ask (no ask, the outstanding one still decides); and a failed ask that closes
+once and is not repeated while the target stays.
 
-An earlier build of this code lost a `tabs.query` in flight on the relay that
-the restart closed (a spike run's "the browser stopped listening"; its output
-was overwritten by the rerun, so the failure is claimed in the session and not
-kept). The grace above is the fix: a relay is closed by a change only after
-the grace, so a call in flight at the change completes, and the reopen after a
-restart (when its hello came first) is the one the grace allows.
+**Cost and bounds.** A live relay is closed only when its `identify` fails, that
+is when its worker does not say hello within 5 s of the ask. That is the one case
+of a wrong close: it costs one reopen, and what is in flight on the relay is
+failed (below). The ask is made once per change, and it is not retried: a zombie
+answers at once, so a retry would repeat the answer, and no run had a worker
+that was slow to say hello (not measured). A failed ask closes at most one relay
+per change. The reopened relay's identify is the only other ask, and it happens
+only when a debugger needs the worker's identity (`needs_identity`, on the probe).
+
+**Measured (review cycle 6 final runs).** In spike run 1 and run 2 and stop run 1
+the restart's change was asked and the relay was kept, with no close and no
+reopen (`review6-spike-run1-logs/run-2.log`: change at 15:15:56, the ask and
+"the relay is kept" at the same second; `review6-spike-run2-logs/run-2.log`:
+15:21:53; `review6-stop-run1-logs/run-1.log`: 15:34:18). In both spike runs the
+new worker's hello reached the engine before the change was observed (lines 94
+and 97 of each `review6-spike-run1-logs/run-2.log` and `review6-spike-run2-logs/run-2.log`), which is the cycle 5 case that was closed after
+the grace; the ask keeps the relay. In zombie runs 1 and 2
+(`review6-zombie-run1-logs/run-1.log` at 15:13:10,
+`review6-zombie-run2-logs/run-1.log` at 15:26:53) the ask failed at the change
+("could not say which worker it reaches"), the relay was closed and opened
+again within the same second, the reopened relay's hello forgot the tab, and
+"hidden again" was logged. The cycle 5 spike close was three to four seconds
+after the change (`review5-spike-run2-logs/run-2.log`: 06:27:34 to 06:27:37).
+Not measured: a slow start longer than 5 s, a stop and restart repeated in a
+loop, a reload whose target id does not change, and Windows.
+
+**The delivery guarantee across a change.** A kept relay interrupts nothing: its
+calls and deliveries in flight on its port complete, as the ask cannot close
+it. When a zombie relay is closed, whatever is pending on it is dropped. A
+delivery sent through it and not acknowledged is logged as unknown and is not
+retried (`drop_pending`; `after_delivery` never retries a failed evaluation, so
+it is at most once). A click queued but not yet sent waits for the fresh relay
+and is delivered once (`job_turn`). A tab list or debugger report of the old
+instance is dropped, or applied and not answered (`job_kept`, `reply_due`),
+because its call ids belong to a worker that is gone. In the zombie runs no
+delivery was in flight on the closed relay, so the runs show the close and the
+hello, not a lost call. A call in flight across a restart window was not
+provoked deterministically: the stop run's quiet click is not timed against the
+change, so no run puts a `tabs.query` inside the window. The pure parts are
+tested (`policy::after_ask`, `asks_on`, `job_kept`, `reply_due`, `after_delivery`).
+
+Earlier builds: cycle 4 closed a relay at the change unless a new instance had
+said hello through it, and a restart's hello could cover a later reload (I16).
+Cycle 5 counted only a hello received after the change, with a two-refresh grace,
+which closed a live relay after every restart whose hello came first (one
+reopen, three to four seconds after the change). Cycle 6 asks the relay instead.
 
 ## Calls (bridge to engine)
 
@@ -413,7 +446,7 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   (`review3-reload-before-attempt1.out`, `review3-reload-after-attempt2.out`). Cycle 4
   reaches it on purpose with the list held (`run.sh zombie`): the worker target
   changes, the relay is opened again, and the new hello forgets the tab
-  (`review4-zombie-run1.out` to `-run3.out`; the path line "forgotten by
+  (`review4-zombie-run1.out` to `review4-zombie-run3.out`; the path line "forgotten by
   hello"). Not shown: a reload in which the worker's target id does not change
   (every reload and restart in the kept runs changed it; no run had one that
   did not, so the case is not exercised).
