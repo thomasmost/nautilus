@@ -26,6 +26,11 @@ png = "0.18"
 # key too, so the right one is found by hashing.
 sha2 = "0.10"
 
+[dev-dependencies]
+# The rewrite and the unpacked-extension copy are tested over real
+# directories.
+tempfile = "3"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Giving winit's NSApplication the protocol CEF requires (mac_app.rs),
 # and the borderless window that holds an extension's action popup

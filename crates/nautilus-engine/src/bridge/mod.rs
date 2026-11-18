@@ -10,11 +10,22 @@
 //! `rewrite`, `table`, `debugger` and `policy` are pure. `relay` holds
 //! the CEF side.
 
+#![allow(dead_code)]
+
 pub(crate) mod debugger;
 pub(crate) mod install;
 pub(crate) mod policy;
 pub(crate) mod rewrite;
 pub(crate) mod table;
+
+mod differ;
+mod ids;
+pub(crate) mod pattern;
+mod router;
+mod shape;
+mod snapshot;
+mod state;
+pub(crate) mod transport;
 
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod relay;
