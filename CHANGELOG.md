@@ -24,6 +24,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
 - An extension's toolbar action with no popup now shows its button in
   the toolbar and the puzzle menu; pressing it does nothing until the
   extension bridge answers it.
+- A loaded unpacked extension's copy in the profile no longer includes
+  dot-files and dot-directories (`.git`, `.DS_Store`). An extension whose
+  worker's entry is under one fails to load, with a message that says so.
 
 ### Added
 

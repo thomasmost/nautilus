@@ -1,5 +1,8 @@
 //! Writing the bridge into an extension's directory, and the helper
-//! extension into the profile. File work only; no CEF.
+//! extension into the profile: the rewrite on disk, the marker that
+//! makes it happen once per version of the script, and the copy of a
+//! folder the user loads (the user's folder is never written to; dot-files
+//! are left out of the copy). File work only; no CEF.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -62,13 +65,15 @@ pub(crate) fn rewrite_in_place(dir: &Path, skipped: &[PathBuf]) -> Result<Bridge
         return Ok(Bridged::NoWorker);
     }
     // The loader imports the worker's entry: without it the worker cannot
-    // run, so the load fails here rather than leaving a broken copy.
-    if let Rewrite::Wrapped { original, .. } = &rewrite {
-        entry_in_copy(
-            &original.service_worker,
-            dir.join(&original.service_worker).is_file(),
-            skipped,
-        )?;
+    // run, so the load fails here rather than leaving a broken copy. A
+    // manifest that already names the loader (a bridged copy) is checked
+    // against the entry the first rewrite recorded.
+    let entry = match &rewrite {
+        Rewrite::Wrapped { original, .. } => Some(original.service_worker.clone()),
+        _ => recorded_entry(dir),
+    };
+    if let Some(entry) = entry {
+        entry_in_copy(&entry, dir.join(&entry).is_file(), skipped)?;
     }
     let bridge_dir = dir.join(BRIDGE_DIR);
     fs::create_dir_all(&bridge_dir)
@@ -96,6 +101,59 @@ pub(crate) fn rewrite_in_place(dir: &Path, skipped: &[PathBuf]) -> Result<Bridge
         write(&manifest_path, &text)?;
     }
     Ok(Bridged::Yes)
+}
+
+/// The file beside the manifest that records which version of the bridge
+/// script the directory holds. Its name does not start with `_`:
+/// Chromium refuses to load a directory holding such a file.
+pub(crate) const MARKER: &str = "nautilus-bridge.json";
+
+/// The version a bridge script is recorded under: 16 hex digits of its
+/// SHA-256, so any change to the script re-applies it everywhere at the
+/// next start.
+pub(crate) fn version_of(script: &str) -> String {
+    Sha256::digest(script.as_bytes())
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Make sure the extension in `dir` carries the bridge at `version`,
+/// calling `apply` (the rewrite: [`rewrite_in_place`]) only when the
+/// marker does not already say so. Returns whether anything was written.
+/// A failed `apply` writes no marker, so the next call tries again.
+pub(crate) fn ensure_bridged(
+    dir: &Path,
+    version: &str,
+    apply: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<bool, String> {
+    if !dir.join("manifest.json").is_file() {
+        return Err(format!("{} holds no manifest.json", dir.display()));
+    }
+    let recorded = fs::read_to_string(dir.join(MARKER))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
+    if recorded.as_deref() == Some(version) {
+        return Ok(false);
+    }
+    apply(dir)?;
+    write_marker(dir, version)?;
+    Ok(true)
+}
+
+fn write_marker(dir: &Path, version: &str) -> Result<(), String> {
+    let marker = dir.join(MARKER);
+    write(
+        &marker,
+        &serde_json::json!({ "version": version }).to_string(),
+    )
 }
 
 /// The directory name of the profile's copy of the unpacked extension
@@ -127,28 +185,49 @@ pub(crate) fn copy_name(source: &Path) -> String {
     format!("unpacked-{slug}-{hash}")
 }
 
-/// Copy the unpacked extension at `source` into `store_dir`, replacing
-/// an earlier copy of it, and put the bridge into the copy. The
-/// source is only read.
-pub(crate) fn copy_and_rewrite(
+/// Bring the extension at `path` into the profile's `store_dir` at
+/// `version`, and return the directory it is loaded from and what became
+/// of it. A marked copy in the store is rewritten in place: it is not
+/// copied again, so a newer build's bridge reaches it. Anything else is a
+/// source folder: it is copied into the store, bridged, and moved into
+/// place (`copy_and_bridge`). The source is only read.
+pub(crate) fn bridge_source(
+    path: &Path,
+    store_dir: &Path,
+    version: &str,
+) -> Result<(PathBuf, Bridged), String> {
+    let path =
+        std::path::absolute(path).map_err(|e| format!("resolving {}: {e}", path.display()))?;
+    let store = std::path::absolute(store_dir)
+        .map_err(|e| format!("resolving {}: {e}", store_dir.display()))?;
+    if path != store && path.starts_with(&store) && path.join(MARKER).is_file() {
+        let bridged = rewrite_in_place(&path, &[])?;
+        write_marker(&path, version)?;
+        return Ok((path, bridged));
+    }
+    if !path.join("manifest.json").is_file() {
+        return Err(format!("{} holds no manifest.json", path.display()));
+    }
+    fs::create_dir_all(&store).map_err(|e| format!("creating {}: {e}", store.display()))?;
+    refuse_nested(&path, &store)?;
+    copy_and_bridge(&path, &store, version)
+}
+
+/// Copy the source at `source` into `store_dir` and bridge the copy at
+/// `version`, replacing an earlier copy of the same folder. The copy is
+/// built beside its place and moved there only once the bridge is in, so a
+/// failure leaves the store as it was: no partial copy, and the previous
+/// copy, if any, intact. The name hashes the absolute path, so a relative
+/// and an absolute spelling of one folder land in one copy.
+fn copy_and_bridge(
     source: &Path,
     store_dir: &Path,
+    version: &str,
 ) -> Result<(PathBuf, Bridged), String> {
-    if !source.join("manifest.json").is_file() {
-        return Err(format!("{} has no manifest.json", source.display()));
-    }
-    // The name hashes the absolute path, so a relative and an absolute
-    // spelling of one folder land in one copy.
-    let source =
-        &std::path::absolute(source).map_err(|e| format!("resolving {}: {e}", source.display()))?;
-    fs::create_dir_all(store_dir).map_err(|e| format!("creating {}: {e}", store_dir.display()))?;
-    refuse_nested(source, store_dir)?;
     let copy = store_dir.join(copy_name(source));
-    // Built beside the copy and renamed into place, so a failure leaves
-    // nothing half-written in the store.
     let staging = store_dir.join(format!("{}.partial", copy_name(source)));
     let _ = fs::remove_dir_all(&staging);
-    match stage(source, &staging, &copy) {
+    match stage(source, &staging, &copy, version) {
         Ok(bridged) => Ok((copy, bridged)),
         Err(e) => {
             let _ = fs::remove_dir_all(&staging);
@@ -157,18 +236,58 @@ pub(crate) fn copy_and_rewrite(
     }
 }
 
-/// Copy `source` into `staging`, bridge the copy, and move it to `copy`,
-/// replacing an earlier copy.
-fn stage(source: &Path, staging: &Path, copy: &Path) -> Result<Bridged, String> {
-    let mut skipped = Vec::new();
-    copy_dir(source, staging, Path::new(""), &mut skipped)?;
-    let bridged = rewrite_in_place(staging, &skipped)?;
+/// Copy `source` into `staging`, bridge the copy under the marker, and
+/// move it to `copy`, replacing an earlier copy.
+fn stage(source: &Path, staging: &Path, copy: &Path, version: &str) -> Result<Bridged, String> {
+    let (_, skipped) = copy_unpacked(source, staging)?;
+    let mut bridged = Bridged::Yes;
+    ensure_bridged(staging, version, |at| {
+        bridged = rewrite_in_place(at, &skipped)?;
+        Ok(())
+    })?;
     if copy.exists() {
         fs::remove_dir_all(copy).map_err(|e| format!("clearing {}: {e}", copy.display()))?;
     }
     fs::rename(staging, copy)
         .map_err(|e| format!("moving the copy into {}: {e}", copy.display()))?;
     Ok(bridged)
+}
+
+/// Copy the source at `source` into `dest`, replacing what `dest` held,
+/// leaving out every dot-file and dot-directory at any depth (`.git`,
+/// `.DS_Store`, a `.cache` folder: nothing a browser loads from them). Links
+/// are not followed: each one is skipped, logged, and returned by its place
+/// in the extension, so the load can tell whether the worker's entry was
+/// one. Returns `dest` and that list. `dest` must not be inside `source`.
+pub(crate) fn copy_unpacked(source: &Path, dest: &Path) -> Result<(PathBuf, Vec<PathBuf>), String> {
+    if !source.join("manifest.json").is_file() {
+        return Err(format!("{} holds no manifest.json", source.display()));
+    }
+    let (absolute_source, absolute_dest) = (
+        std::path::absolute(source).map_err(|e| format!("resolving {}: {e}", source.display()))?,
+        std::path::absolute(dest).map_err(|e| format!("resolving {}: {e}", dest.display()))?,
+    );
+    if absolute_dest.starts_with(&absolute_source) {
+        return Err(format!(
+            "{} is inside {}; refusing to copy a folder into itself",
+            dest.display(),
+            source.display()
+        ));
+    }
+    if dest.exists() {
+        fs::remove_dir_all(dest).map_err(|e| format!("clearing {}: {e}", dest.display()))?;
+    }
+    let mut skipped = Vec::new();
+    copy_dir(source, dest, Path::new(""), &mut skipped)?;
+    Ok((dest.to_path_buf(), skipped))
+}
+
+/// The worker's entry the first rewrite recorded in a bridged copy, if
+/// there is a record.
+fn recorded_entry(dir: &Path) -> Option<String> {
+    let text = fs::read_to_string(dir.join(BRIDGE_DIR).join("original.json")).ok()?;
+    let record: serde_json::Value = serde_json::from_str(&text).ok()?;
+    record.get("service_worker")?.as_str().map(str::to_string)
 }
 
 /// Refuse a source that is the store, inside it, or holds it: copying
@@ -198,6 +317,13 @@ pub(crate) fn entry_in_copy(entry: &str, is_file: bool, skipped: &[PathBuf]) -> 
     if skipped.iter().any(|link| link == Path::new(entry)) {
         return Err(format!(
             "the worker's entry {entry} is a symbolic link, and links are not copied: the extension cannot load its worker"
+        ));
+    }
+    if Path::new(entry).components().any(
+        |part| matches!(part, Component::Normal(name) if name.to_string_lossy().starts_with('.')),
+    ) {
+        return Err(format!(
+            "the worker's entry {entry} is under a dot-file or dot-directory, which is not copied: the extension cannot load its worker"
         ));
     }
     Err(format!(
@@ -246,6 +372,14 @@ fn copy_dir(
     for entry in entries {
         let entry = entry.map_err(|e| format!("reading {}: {e}", from.display()))?;
         let name = entry.file_name();
+        // Dot-files and dot-directories are not part of the copy.
+        if name.to_string_lossy().starts_with('.') {
+            log::debug!(
+                "bridge: {} is not copied into the extension's copy",
+                entry.path().display()
+            );
+            continue;
+        }
         let (source, target) = (entry.path(), to.join(&name));
         let place = prefix.join(&name);
         // `symlink_metadata` does not follow a link. A link is skipped:
@@ -273,6 +407,322 @@ fn copy_dir(
 mod tests {
     use super::*;
     use crate::bridge::rewrite::LOADER_NAME;
+    use std::cell::Cell;
+
+    /// The version the spike's tests bridge at (any text will do).
+    const VERSION: &str = "test-version";
+
+    /// The spike's `copy_and_rewrite`, now the entry point `bridge_source`
+    /// at a fixed version, so the spike's tests keep their assertions.
+    fn copy_and_rewrite(source: &Path, store: &Path) -> Result<(PathBuf, Bridged), String> {
+        bridge_source(source, store, VERSION)
+    }
+
+    fn put(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    const MANIFEST: &str = r#"{"manifest_version": 3, "name": "T", "version": "1", "background": {"service_worker": "sw.js"}}"#;
+
+    #[test]
+    fn the_bridge_is_put_in_once_per_version() {
+        let dir = tempfile::tempdir().unwrap();
+        put(&dir.path().join("manifest.json"), MANIFEST);
+        let applied = Cell::new(0);
+        let apply = |at: &Path| {
+            assert_eq!(at, dir.path());
+            applied.set(applied.get() + 1);
+            Ok(())
+        };
+        assert_eq!(ensure_bridged(dir.path(), "v1", apply), Ok(true));
+        assert_eq!(ensure_bridged(dir.path(), "v1", apply), Ok(false));
+        assert_eq!(applied.get(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(MARKER)).unwrap(),
+            r#"{"version":"v1"}"#
+        );
+        // Another script version: once more.
+        assert_eq!(ensure_bridged(dir.path(), "v2", apply), Ok(true));
+        assert_eq!(applied.get(), 2);
+        // A marker that is not ours to read counts as none.
+        put(&dir.path().join(MARKER), "not json");
+        assert_eq!(ensure_bridged(dir.path(), "v2", apply), Ok(true));
+        assert_eq!(applied.get(), 3);
+    }
+
+    #[test]
+    fn a_failed_rewrite_leaves_no_marker_and_no_manifest_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        put(&dir.path().join("manifest.json"), MANIFEST);
+        assert_eq!(
+            ensure_bridged(dir.path(), "v1", |_| Err(
+                "the manifest is not JSON".to_string()
+            )),
+            Err("the manifest is not JSON".to_string())
+        );
+        assert!(!dir.path().join(MARKER).exists());
+        let empty = tempfile::tempdir().unwrap();
+        let outcome = ensure_bridged(empty.path(), "v1", |_| Ok(()));
+        assert!(outcome.unwrap_err().ends_with("holds no manifest.json"));
+    }
+
+    #[test]
+    fn versions_are_sixteen_hex_digits_of_the_script() {
+        let one = version_of("a");
+        assert_eq!(one.len(), 16);
+        assert!(one.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(one, version_of("a"));
+        assert_ne!(one, version_of("b"));
+    }
+
+    #[test]
+    fn dot_files_and_dot_directories_are_left_out_at_every_depth() {
+        let source = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        put(&source.path().join("manifest.json"), MANIFEST);
+        put(&source.path().join("sw.js"), "// worker");
+        put(&source.path().join("icons/16.png"), "png");
+        put(&source.path().join("src/y.js"), "y");
+        put(&source.path().join(".git/config"), "secret");
+        put(&source.path().join(".DS_Store"), "junk");
+        put(&source.path().join("icons/.keep"), "");
+        put(&source.path().join(".hidden/a.js"), "a");
+        put(&source.path().join("src/.cache/x.js"), "x");
+        let dest = store.path().join("copy");
+        let (copy, skipped) = copy_unpacked(source.path(), &dest).unwrap();
+        assert_eq!(copy, dest);
+        assert!(skipped.is_empty(), "{skipped:?}");
+        for present in ["manifest.json", "sw.js", "icons/16.png", "src/y.js"] {
+            assert!(dest.join(present).is_file(), "{present}");
+        }
+        for absent in [".git", ".DS_Store", "icons/.keep", ".hidden", "src/.cache"] {
+            assert!(!dest.join(absent).exists(), "{absent}");
+        }
+    }
+
+    #[test]
+    fn a_folder_is_copied_and_bridged_under_the_marker_and_the_source_is_left_alone() {
+        let source = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        put(&source.path().join("manifest.json"), MANIFEST);
+        put(&source.path().join("sw.js"), "// worker");
+        put(&source.path().join("icons/16.png"), "png");
+        put(&source.path().join("src/deep/er/x.js"), "x");
+        let (copy, bridged) = bridge_source(source.path(), store.path(), "v1").unwrap();
+        assert_eq!(bridged, Bridged::Yes);
+        assert_eq!(copy.parent(), Some(store.path()));
+        // The name is Phase 1's scheme, of the absolute path.
+        assert_eq!(
+            copy.file_name().unwrap().to_string_lossy(),
+            copy_name(&std::path::absolute(source.path()).unwrap())
+        );
+        assert!(copy.join("src/deep/er/x.js").is_file());
+        assert!(copy.join("icons/16.png").is_file());
+        assert!(copy.join("nautilus-loader.js").is_file());
+        assert!(copy.join("nautilus-bridge/bridge.js").is_file());
+        assert_eq!(
+            fs::read_to_string(copy.join(MARKER)).unwrap(),
+            r#"{"version":"v1"}"#
+        );
+        // The source: untouched.
+        assert_eq!(
+            fs::read_to_string(source.path().join("manifest.json")).unwrap(),
+            MANIFEST
+        );
+        assert!(!source.path().join(MARKER).exists());
+        assert!(!source.path().join("nautilus-bridge").exists());
+        assert!(!source.path().join("nautilus-loader.js").exists());
+        // Loading the same folder again replaces the copy, at the same
+        // place: an edit arrives, a deleted file goes.
+        put(&source.path().join("sw.js"), "// edited");
+        fs::remove_file(source.path().join("icons/16.png")).unwrap();
+        let (again, _) = bridge_source(source.path(), store.path(), "v1").unwrap();
+        assert_eq!(again, copy);
+        assert_eq!(
+            fs::read_to_string(again.join("sw.js")).unwrap(),
+            "// edited"
+        );
+        assert!(!again.join("icons/16.png").exists());
+        assert!(again.join(MARKER).is_file());
+    }
+
+    #[test]
+    fn a_folder_without_a_manifest_is_not_copied() {
+        let source = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        put(&source.path().join("readme.txt"), "no extension here");
+        let error = bridge_source(source.path(), store.path(), "v1").unwrap_err();
+        assert!(error.ends_with("holds no manifest.json"), "{error}");
+        assert_eq!(fs::read_dir(store.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_worker_under_a_dot_directory_fails_the_load_and_leaves_no_copy() {
+        let source = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        put(
+            &source.path().join("manifest.json"),
+            r#"{"background":{"service_worker":".bg/sw.js"}}"#,
+        );
+        put(&source.path().join(".bg/sw.js"), "// hidden");
+        let error = bridge_source(source.path(), store.path(), "v1").unwrap_err();
+        assert!(error.contains("not copied"), "{error}");
+        assert_eq!(fs::read_dir(store.path()).unwrap().count(), 0);
+    }
+
+    /// Phase 1's rewrite, through the marker: applying it again (a new
+    /// script version) must not wrap the loader in a loader, and must
+    /// leave the worker's file the current script.
+    #[test]
+    fn the_rewrite_can_be_applied_again() {
+        let dir = tempfile::tempdir().unwrap();
+        put(&dir.path().join("manifest.json"), MANIFEST);
+        put(&dir.path().join("sw.js"), "// worker");
+        let apply = |at: &Path| rewrite_in_place(at, &[]).map(|_| ());
+        assert_eq!(ensure_bridged(dir.path(), "v1", apply), Ok(true));
+        let first = fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+        assert_ne!(first, MANIFEST);
+        let loader = fs::read_to_string(dir.path().join("nautilus-loader.js")).unwrap();
+        // An older build's script on disk, and a newer version asked for.
+        fs::write(
+            dir.path().join("nautilus-bridge/bridge.js"),
+            "// an older bridge",
+        )
+        .unwrap();
+        assert_eq!(ensure_bridged(dir.path(), "v2", apply), Ok(true));
+        let second = fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("sw.js")).unwrap(),
+            "// worker"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("nautilus-loader.js")).unwrap(),
+            loader
+        );
+        // The script the worker loads is the current one, in the one
+        // file the loader imports.
+        assert_eq!(
+            fs::read_to_string(dir.path().join("nautilus-bridge/bridge.js")).unwrap(),
+            crate::bridge::worker_script()
+        );
+        assert!(
+            fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with('_'))
+        );
+    }
+
+    #[test]
+    fn a_marked_copy_is_rewritten_in_place_and_not_copied_again() {
+        let source = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        put(&source.path().join("manifest.json"), MANIFEST);
+        put(&source.path().join("sw.js"), "// worker");
+        let (copy, _) = bridge_source(source.path(), store.path(), "v1").unwrap();
+        put(&copy.join("stale.txt"), "x");
+        put(
+            &copy.join("nautilus-bridge/bridge.js"),
+            "// an older bridge",
+        );
+        let (again, bridged) = bridge_source(&copy, store.path(), "v2").unwrap();
+        assert_eq!(again, copy);
+        assert_eq!(bridged, Bridged::Yes);
+        assert!(
+            copy.join("stale.txt").exists(),
+            "copied again instead of rewritten"
+        );
+        assert_eq!(
+            fs::read_to_string(copy.join("nautilus-bridge/bridge.js")).unwrap(),
+            crate::bridge::worker_script()
+        );
+        assert_eq!(
+            fs::read_to_string(copy.join(MARKER)).unwrap(),
+            r#"{"version":"v2"}"#
+        );
+        let entries: Vec<_> = fs::read_dir(store.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![copy.file_name().unwrap().to_os_string()]);
+    }
+
+    #[test]
+    fn a_failed_load_leaves_no_partial_copy_and_the_previous_copy_intact() {
+        let source = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        put(&source.path().join("manifest.json"), MANIFEST);
+        put(&source.path().join("sw.js"), "// worker");
+        let (copy, _) = bridge_source(source.path(), store.path(), "v1").unwrap();
+        let manifest_before = fs::read_to_string(copy.join("manifest.json")).unwrap();
+        // The source's manifest is now broken: the new copy is staged, its
+        // rewrite fails, and the store keeps only the previous copy.
+        put(&source.path().join("manifest.json"), "not json");
+        let error = bridge_source(source.path(), store.path(), "v2").unwrap_err();
+        assert!(error.contains("not JSON"), "{error}");
+        let names: Vec<_> = fs::read_dir(store.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![copy.file_name().unwrap().to_os_string()]);
+        assert_eq!(
+            fs::read_to_string(copy.join("manifest.json")).unwrap(),
+            manifest_before
+        );
+        assert_eq!(
+            fs::read_to_string(copy.join(MARKER)).unwrap(),
+            r#"{"version":"v1"}"#
+        );
+    }
+
+    #[test]
+    fn a_failed_rewrite_of_a_marked_copy_writes_nothing_and_keeps_its_marker() {
+        let source = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        put(&source.path().join("manifest.json"), MANIFEST);
+        put(&source.path().join("sw.js"), "// worker");
+        let (copy, _) = bridge_source(source.path(), store.path(), "v1").unwrap();
+        put(
+            &copy.join("nautilus-bridge/bridge.js"),
+            "// an older bridge",
+        );
+        // A broken manifest in the copy: the rewrite reads it first and fails
+        // before any bridge file is written; the marker stays at v1, so the
+        // next start tries again.
+        put(&copy.join("manifest.json"), "not json");
+        let error = bridge_source(&copy, store.path(), "v2").unwrap_err();
+        assert!(error.contains("not JSON"), "{error}");
+        assert_eq!(
+            fs::read_to_string(copy.join("nautilus-bridge/bridge.js")).unwrap(),
+            "// an older bridge"
+        );
+        assert_eq!(
+            fs::read_to_string(copy.join(MARKER)).unwrap(),
+            r#"{"version":"v1"}"#
+        );
+        assert!(copy.join("sw.js").is_file());
+        assert!(copy.join("nautilus-loader.js").is_file());
+    }
+
+    #[test]
+    fn a_marked_copy_whose_worker_is_gone_fails_the_rewrite() {
+        let source = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        put(&source.path().join("manifest.json"), MANIFEST);
+        put(&source.path().join("sw.js"), "// worker");
+        let (copy, _) = bridge_source(source.path(), store.path(), "v1").unwrap();
+        // The manifest already names the loader, so the entry check reads the
+        // worker's name from the record the first rewrite wrote.
+        fs::remove_file(copy.join("sw.js")).unwrap();
+        let error = bridge_source(&copy, store.path(), "v2").unwrap_err();
+        assert!(error.contains("missing"), "{error}");
+        assert_eq!(
+            fs::read_to_string(copy.join(MARKER)).unwrap(),
+            r#"{"version":"v1"}"#
+        );
+    }
 
     /// An empty directory of this test's own under the system's
     /// temporary directory.

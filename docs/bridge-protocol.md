@@ -492,6 +492,33 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   is inside the extension. An extension with two such targets would be followed
   by its first only.
 
+## Installing an unpacked extension
+
+`bridge/install.rs` puts the bridge into an extension's directory.
+
+- A folder the user loads is copied into the profile's store as
+  `unpacked-<name>-<hash>` (`copy_name`). The copy is built beside its
+  place and moved there only once the bridge is in, so a failed load leaves
+  no partial copy and keeps the previous one. Links are not followed: each
+  is skipped and logged. Dot-files and dot-directories at any depth are not
+  copied (`.git`, `.DS_Store`).
+- A worker whose entry is a link, is absent, or is under a dot-file or
+  dot-directory fails the load, with a message that says which. Nothing is
+  installed.
+- The bridge's version is 16 hex digits of the SHA-256 of the bridge script.
+  The bridged copy records it in `nautilus-bridge.json` beside the manifest
+  (the marker). `ensure_bridged` rewrites a directory only when its marker
+  names another version. A failed rewrite writes no marker, so the next call
+  tries again.
+- `bridge_source` is the load's entry point. A marked copy in the store is
+  rewritten in place and not copied again, so a newer build's `bridge.js`
+  reaches it. Any other folder is copied and bridged as above. Store
+  installs and the start-up check reach the bridge through `ensure_bridged`.
+- A rewrite of a marked copy reads its manifest first, so a broken manifest
+  leaves the copy and its marker as they were. A failure while the bridge
+  files are being written could leave some of them new; the next load
+  rewrites all of them.
+
 ## Phase 5 reconciliation
 
 This section records how the Phase 5 plan (tabs and windows, the side

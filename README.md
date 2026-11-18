@@ -691,6 +691,8 @@ Upstream causes and the features they block are tracked in
   `docs/bridge-protocol.md`, "Limits in protocol 1"). A symlink in an
   unpacked extension is not copied: it is skipped with a warning that
   names it, and a worker entry that is a link or missing fails the load.
+  Dot-files and dot-directories (`.git`, `.DS_Store`) are not copied
+  either; a worker entry under one fails the load with a message saying so.
   The bridge builds on Windows but has not run there; the test control's
   Unix owner-and-mode rule and its Windows profile-folder rule are not run
   there either.

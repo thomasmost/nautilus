@@ -656,7 +656,8 @@ mod native {
         pub(crate) fn load_bridged(&self, source: PathBuf) {
             // Copying is file work on the UI thread: fine for a small
             // extension, and Phase 5 moves it to the unpacking thread.
-            match bridge::install::copy_and_rewrite(&source, &self.store_dir) {
+            let version = bridge::install::version_of(&crate::bridge::worker_script());
+            match bridge::install::bridge_source(&source, &self.store_dir, &version) {
                 Ok((copy, bridged)) => {
                     log::info!(
                         "extension at {} copied to {} (bridged: {bridged:?})",
