@@ -8,10 +8,13 @@ misread raises the number in the port's name. Review cycle 3 added the
 instance id, the hello, `gone`, `identify` and the give-up (below); review
 cycle 4 changed the hello's shape (its sessions carry three states),
 removed `alive`, stopped `gone` from asking the worker anything, and added
-the worker-target check and the debugger rule (below). They change the
-message shapes without a new number, because `install` rewrites `bridge.js`
-and `relay.js` on every load, so a copy loaded by this build always carries
-them. A copy written by an earlier build is not handled (see the limits).
+the worker-target check and the debugger rule (below). Review cycle 5 made a
+worker-target change wait for a hello received after the change was observed
+(I16, below), and bounded the whole hello, the target list included, at 2 s.
+They change the message shapes without a new number, because `install`
+rewrites `bridge.js` and `relay.js` on every load, so a copy loaded by this
+build always carries them. A copy written by an earlier build is not handled
+(see the limits).
 
 ## The debugger rule (review cycle 4)
 
@@ -128,9 +131,10 @@ A session's state is decided by asking, not by `chrome.debugger.getTargets()`
 alone: `getTargets` marks a tab attached when any client is, the engine's
 own DevTools probe included. So each tab the list names is asked with
 `sendCommand` (`Runtime.evaluate` of `1`), and only a session this extension
-opened answers. Each probe is raced against 1 s (`PROBE_TIMEOUT_MS`) and the
-whole hello against 2 s; a probe that has not answered is `unknown`, which
-keeps the debugger. The probe's `Runtime.evaluate` is a trivial expression
+opened answers. Each probe is raced against 1 s (`PROBE_TIMEOUT_MS`), and the
+whole chain, `getTargets` included, against 2 s (`HELLO_TIMEOUT_MS`): when the
+chain has not settled by then the hello names no session, which forgets
+nothing. A probe that has not answered is `unknown`, which keeps the debugger. The probe's `Runtime.evaluate` is a trivial expression
 with no side effect; whether it answers on a page paused by `Debugger.pause`
 or on a hidden tab was not verified in this cycle (no run paused a page),
 and the timeout makes that harmless (the state is `unknown`, the debugger is
@@ -216,30 +220,47 @@ activity. The helper lists an extension's service worker with type `worker`
 is accepted too), with the extension's URL (`policy::worker_target`,
 `table::worker_target_of`). A target other than the recorded one is a change
 (`WorkerTarget::Changed`, logged "worker target changed"). A change does not
-close the relay by itself. `policy::after_change` decides from one fact: did a
-new worker instance say hello through this relay since the last refresh?
+close the relay by itself. `policy::WorkerWatch`, one per extension, decides,
+and only a hello that came through this relay after the change was observed
+can count. A hello received before the refresh that sees the change is about
+the worker before it: if it counted, a reload after a restart (the restart's
+hello, then the reload) would keep a zombie relay that no hello can reach
+(I16; the sequence is tested in `policy::tests`). After the change:
 
-- Yes: the relay reaches the live worker, and it is kept
-  (`check_worker_targets`: "already said hello through its relay", or "said
-  hello through its relay: the relay is kept").
-- No, for `CHANGE_GRACE_REFRESHES` (2) refreshes: the relay is a zombie (a
-  reloaded extension's page cannot reach the new worker). It is closed, the
-  next turn opens a fresh one, and the fresh relay's probe and hello decide the
-  debuggers (`close_relay`; logged "is a zombie").
+- A new worker instance says hello through this relay before the grace ends:
+  the relay reaches the live worker, and it is kept
+  (`check_worker_targets`: "said hello through its relay: the relay is kept").
+- No such hello for `CHANGE_GRACE_REFRESHES` (2) refreshes: the relay is a
+  zombie (a reloaded extension's page cannot reach the new worker). It is
+  closed, the next turn opens a fresh one, and the fresh relay's probe and hello
+  decide the debuggers (`close_relay`; logged "the relay is closed and opened
+  again", with the zombie and the live-but-early cases named in the line).
+
+The price of this rule: a restart whose hello came before the refresh that
+sees the new target is closed after the grace and opened again, one reopen
+per such restart. The engine cannot tell that relay from a zombie from the
+hello alone (a hello carries no target id). Asking the relay which instance it
+reaches at the change would separate the two, and was not built in this cycle:
+it is a new mechanism, and this cycle's fix is the smallest rule that keeps a
+zombie out. A hello that comes after the change is seen keeps the relay with no
+reopen.
 
 **A restart after a stop changes the target, and the relay is kept.** Measured:
 `ServiceWorker.stopAllWorkers`, then a delivery that starts the worker again,
 comes back under a NEW target id (`review4-stop-run1.out`,
-`review4-spike-run2.out`: the change is logged and the relay is kept, the
-hello having come through it). So every restart produces a change. It does
-not produce a reopen, because the restarted instance's hello comes through the
-relay that the delivery connected. Without a hello in the grace (a reload: the
-zombie), the relay is closed once. The whole cycle is bounded: a change
-starts no worker (it asks nothing; the relay that the hello reaches is already
-connected), an idle stop removes the target and is not a change
-(`WorkerTarget::Absent`, the recorded target is kept), and each change
-produces at most one relay close, after two refreshes without a hello. Not
-measured: a stop and restart repeated in a loop; the runs had one restart.
+`review4-spike-run2.out`, cycle 4: the change was logged and the relay kept,
+because the restarted instance's hello came through the relay that the delivery
+connected). So every restart produces a change. Cycle 5 changed what keeps the
+relay: only a hello after the change is seen counts (above). Measured in cycle
+5 (`review5-spike-run1-logs/run-2.log`, `review5-spike-run2-logs/run-2.log`,
+`review5-stop-run1-logs/run-1.log`): the restarted instance's hello came first,
+so the change was logged, the relay was closed four seconds later, and it was
+opened again. The whole cycle is bounded: a
+change starts no worker (it asks nothing; the relay that the hello reaches is
+already connected), an idle stop removes the target and is not a change
+(`WorkerTarget::Absent`, the recorded target is kept), and each change produces
+at most one relay close, after the grace. Not measured: a stop and restart
+repeated in a loop; the runs had one restart.
 
 **The delivery guarantee across a change.** A kept relay interrupts nothing:
 its calls and deliveries in flight on its port complete as before (the spike run 2's
@@ -256,8 +277,9 @@ belong to a worker that is gone. The pure parts are tested
 An earlier build of this code lost a `tabs.query` in flight on the relay that
 the restart closed (a spike run's "the browser stopped listening"; its output
 was overwritten by the rerun, so the failure is claimed in the session and not
-kept). The grace above is the fix: the relay is no longer closed by a change
-the restarted worker reaches.
+kept). The grace above is the fix: a relay is closed by a change only after
+the grace, so a call in flight at the change completes, and the reopen after a
+restart (when its hello came first) is the one the grace allows.
 
 ## Calls (bridge to engine)
 
@@ -347,9 +369,9 @@ Nothing opens the page again until a sync sees its extension change (it
 came on, went off, or was reloaded: off and on in two lists). Measured:
 `run.sh broken` replaces the relay page in the throwaway profile and closes
 it; the engine opens it five times, logs the give-up once, opens nothing for
-12 s after it, and refuses a click (`review3-final-broken`, the cycle 3
+12 s after it, and refuses a click (`review3-final-broken.out`, the cycle 3
 build). Before that change the same provocation opened the page 229 times in
-60 s with no give-up (`review3-broken-before`). Cycle 4 adds a debugged tab:
+60 s with no give-up (`review3-broken-before.out`). Cycle 4 adds a debugged tab:
 the worker attaches its debugger first, the give-up is logged with "its
 debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
 
@@ -385,10 +407,10 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   worker target (a changed DevTools target, within about 2 s, by the periodic
   refresh), and the relay's port event (`gone`, which asks nothing). In the
   cycle 3 runs the list showed the extension off during the reload and `sync`
-  forgot its debuggers (`review3-final-reload-*`, `review3-reload-after-attempt3`
+  forgot its debuggers (`review3-final-reload-*`, `review3-reload-after-attempt3.out`
   to `-attempt7`). The case the list does not show (the relay page survives
   with no port event and the list is not off) was the zombie of cycle 3
-  (`review3-reload-before-attempt1`, `review3-reload-after-attempt2`). Cycle 4
+  (`review3-reload-before-attempt1.out`, `review3-reload-after-attempt2.out`). Cycle 4
   reaches it on purpose with the list held (`run.sh zombie`): the worker target
   changes, the relay is opened again, and the new hello forgets the tab
   (`review4-zombie-run1.out` to `-run3.out`; the path line "forgotten by
@@ -396,10 +418,13 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   (every reload and restart in the kept runs changed it; no run had one that
   did not, so the case is not exercised).
 - A copy written by an earlier build is not handled: its `bridge.js` sends
-  no hello or instance (cycle 3 and before) or its hello has the old shape
-  (`attached` instead of `sessions`, cycle 4), which the engine reads as no
-  hello. A copy is rewritten on every load by this build, and the copies of a
-  previous engine are replaced the next time the extension is loaded.
+  no hello or instance (cycle 3 and before), which the engine reads as no
+  hello. Its hello with the old shape (`attached` instead of `sessions`, cycle
+  4) is read by `table::hello_of` as a hello of its instance with no sessions:
+  the identity is recorded (so a restart is noticed, and counts as a hello for
+  the change rule), and nothing is forgotten, since no tab is named. A copy is
+  rewritten on every load by this build, and the copies of a previous engine are
+  replaced the next time the extension is loaded.
 - A queued debugger report whose tab the table does not know yet is kept and
   applied when the table names the tab (M18), and its answer is not sent if its
   worker instance is gone. Tested (`policy::job_kept`, `policy::reply_due`),

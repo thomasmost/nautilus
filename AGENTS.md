@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-18 (review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-18 (review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -450,6 +450,134 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
+## Status and handoff (2026-11-18, review cycle 5 of Phase 1)
+
+The fifth review left I16 (Important) and M16, M20, M21, M22 (Minor). The kept
+logs are `evidence/phase-1/review5-*` (not committed); names below are relative
+to it, and each run's exit status is in its `.status` file.
+
+What changed:
+
+- **A worker-target change waits for a hello received after it (I16).**
+  `policy::WorkerWatch` (one per extension) replaces the three maps
+  `worker_targets`, `changed_waiting` and `new_instance_heard` in `relay.rs`. A
+  hello counts only while a change waits for it, and a change clears any hello
+  that came before it was observed. The defect: a restart (A absent, B's hello
+  through R), then B's `chrome.runtime.reload()` in the same window (C), kept
+  the zombie R, because B's hello was consumed by the A-to-C change. The
+  sequence is a test, `policy::tests::a_restart_then_a_reload_in_one_window_closes_the_zombie_relay`,
+  with its neighbours (two reloads in a row, a hello on a freshly reopened
+  relay, a same-instance hello, a restart whose hello comes after the change).
+  Red first: with the cycle 4 semantics, `a_restart_whose_hello_came_before_the_change_is_observed_is_not_kept_by_that_hello`,
+  `a_restart_then_a_reload_in_one_window_closes_the_zombie_relay` and
+  `two_reloads_in_a_row_keep_nothing_and_each_change_waits_for_its_own_hello`
+  failed with `Keep` where `Wait` is required. Green after the change (149
+  engine tests).
+- **The cost, stated plainly.** A restart whose hello came before the refresh
+  that sees the new target is closed after the two-refresh grace and opened
+  again: one reopen per such restart. A wrongly closed live relay costs one
+  reopen; a wrongly kept zombie is the defect. The alternative (ask the relay at
+  the change which instance it reaches) was not built: it is a new mechanism.
+- **"Hidden again" on every forget (M20, `relay.rs` `hide_again`).** `undebug`
+  and `forget_debuggers` log `bridge: TabId(n) (Chromium tab m) hidden again: no
+  debugger is left on it` when `set_tab_debugged` hid the tab, as the detach path
+  does. The driver's zombie check requires that line (it was `hidden or
+  forgot`, which was always true); the reload and stop checks judge "hidden
+  again" by that line too, not by "has no debugger left".
+- **The close's log line (wording only).** The line logged when a relay is closed
+  for want of a hello after a change now says that the relay is closed and opened
+  again, and names the zombie and the live-but-early case. The first version said
+  "is a zombie", which the spike's live close contradicted; it is replaced, and
+  the final runs use the new wording.
+- **The hello's whole chain is bounded (M22, `bridge.js` `sessionStates`).**
+  `getTargets` is inside the 2 s race, so `ready` settles within 2 s; on timeout
+  the hello names no session. Checked in node with a fake `chrome`
+  (`review5-m22-hello-check.js` against `review5-m22-hello-committed.txt` and
+  `review5-m22-hello-fixed.txt`): the committed file never sent the hello when
+  the list did not settle (no hello in 6 s), and sent it at 3.0 s when the list
+  was slow; the fix sends it within 2.0 s in both cases, and every other case
+  gets the same answer as before.
+- **The old-shape hello (M21).** `table::hello_of` reads `attached` instead of
+  `sessions` as a hello of its instance with no sessions. The doc said "no
+  hello"; it now says what the code does, and the table test pins it.
+- **M16.** `early-zombie` is `review4-zombie-early.out` (the run's output file) in CLAUDE.md and AGENTS.md.
+  The evidence names in the docs were checked mechanically
+  (`check_evidence_names.py`, output in the acceptance record): 30 bare stems
+  that name a run's group were rewritten to the run's `.out` file, two `/`
+  shorthands in the acceptance record were corrected (the "pump x2" of cycle 3
+  is one kept run), and `review5-*` names are kept by this cycle.
+
+Tests and checks on the final tree (exit status in brackets; `review5-*` logs
+where kept):
+
+- `cargo fmt --all --check` [0]; `cargo clippy --workspace --all-targets -- -D warnings` [0];
+  `cargo test --workspace` [0]: 149 + 2 passed (the cycle 4 count was 140 + 2;
+  the nine new tests are the sequence tests); `cargo build --workspace` [0];
+  `cargo xtask bundle-mac` [0]; `sh -n ci/side-panel/run.sh` [0]; the driver's
+  AST and compile check [ok, no `__pycache__`]; `node --check` on `bridge.js`
+  and `relay.js` [0].
+
+Runs (final build; each launch's exit status is in its `.status` file):
+
+| Run (`run.sh`) | Status (kept `.status`) | Checks | Kept files (`evidence/phase-1/`) |
+|---|---|---|---|
+| `spike`, 1 | 0 (`review5-spike-run1.out.status`) | 50 PASS, 0 FAIL | `review5-spike-run1.out`, `review5-spike-run1-logs/` |
+| `spike`, 2 | 0 (`review5-spike-run2.out.status`) | 50 PASS, 0 FAIL | `review5-spike-run2.out`, `review5-spike-run2-logs/` |
+| `pump`, 1 | 0 (`review5-pump-run1.out.status`) | 7 PASS, 0 FAIL | `review5-pump-run1.out`, `review5-pump-run1-logs/` |
+| `zombie`, 1 | 0 (`review5-zombie-run1.out.status`) | 18 PASS, 0 FAIL | `review5-zombie-run1.out`, `review5-zombie-run1-logs/` |
+| `zombie`, 2 | 0 (`review5-zombie-run2.out.status`) | 18 PASS, 0 FAIL | `review5-zombie-run2.out`, `review5-zombie-run2-logs/` |
+| `reload`, 1 | 0 (`review5-reload-run1.out.status`) | 7 PASS, 0 FAIL | `review5-reload-run1.out`, `review5-reload-run1-logs/` |
+| `stop`, 1 | 0 (`review5-stop-run1.out.status`) | 10 PASS, 0 FAIL | `review5-stop-run1.out`, `review5-stop-run1-logs/` |
+| `broken`, 1 | 0 (`review5-broken-run1.out.status`) | 14 PASS, 0 FAIL | `review5-broken-run1.out`, `review5-broken-run1-logs/` |
+
+What the runs show:
+
+- Pump (I7): the debugged tab was logged hidden before the attach, shown at it
+  ("was hidden; shown for the debugger of"), and "hidden again" after the detach
+  (`review5-pump-run1.out`, the I7 checks). `Input.dispatchMouseEvent`, from the
+  pump's results file (`review5-pump-run1-logs/results.jsonl`, the `ms` field of
+  each `call` record, 40 calls, all `ok`): maximum 9 ms. `Page.captureScreenshot`
+  maximum 86 ms in the same file. No call took a second or more.
+- Zombie, both runs: the detector saw the reload ("worker target changed"), no
+  new instance said hello through the relay within two refreshes, and the relay
+  was closed four seconds after the change (run 1: 06:35:24 to 06:35:28; run 2:
+  06:37:09 to 06:37:13), reopened, its hello forgot the tab, and "hidden again"
+  was logged. The driver's path line is `forgotten by hello` in both. In the
+  zombie page `chrome.runtime.id` is `undefined` and `getManifest()` throws
+  `Extension context invalidated.` (the INFO `relay_eval` line).
+- Restart, in spike 1 and 2 and stop 1: each restart whose hello came before the
+  refresh that saw the new target was closed after the grace and reopened, once
+  (one "worker target changed" and one "is closed and opened again" line per
+  run, four seconds apart; the spike's restart and its checks still passed, 50
+  of 50). This is the cost stated above, measured.
+- Reload 1: the list showed the extension off during the reload, so the path is
+  `sync` ("forgotten by sync" in the driver's INFO line), and the tab was hidden
+  again (`reload (I10): the session ended`).
+- Stop 1: the stopped worker was not identified or restarted for 90 s; the click
+  restarted it, the change was closed after the grace, and the restarted
+  worker's session survived, so the tab stayed painted.
+- Broken 1: five openings, the give-up logged once, "debuggers are kept", a click
+  refused, no opening for 12 s, the debugged tab not hidden.
+
+Not verified in this cycle:
+
+- I16 was not provoked in the harness. The test extension has no control that
+  reloads on a click (its only reloads are `provokeReload`, after an attach,
+  and the stop mode restarts without one). The I16 case rests on the sequence
+  tests, not on a run.
+- Windows (nothing ran). Whether `Runtime.evaluate` answers on a paused or a
+  hidden page. A stop and restart repeated in a loop.
+- A restart whose hello comes after the change was observed (the case that keeps
+  the relay with no reopen): no final run had one, so it rests on the sequence
+  tests (`policy::tests::a_restart_whose_hello_comes_after_the_change_is_observed_is_kept`).
+- The pump's `Input.dispatchMouseEvent` figure is measured per method this cycle
+  (9 ms maximum over 40 calls). Cycle 4's 72 ms was the maximum over all methods.
+
+For the next cycle: the grace stays two refreshes. If the restart reopen is
+judged too costly, the next step is to ask the relay which instance it reaches
+at the change (a new mechanism; the sequence tests already describe the cases it
+must separate).
+
 ## Status and handoff (2026-11-18, review cycle 4 of Phase 1)
 
 The fourth review left I10 (the zombie reload), I12 to I15 and M16 to M19. The
@@ -485,7 +613,7 @@ What changed:
 - **The worker target (I10 a).** Each refresh (every 2 s while a relay is open,
   `REFRESH_INTERVAL`) reads the helper's target list. The worker is listed as
   type `worker` (the probe's shape; the brief's `service_worker` was wrong for
-  this list, and the first version of the match missed it: `early-zombie`).
+  this list, and the first version of the match missed it: `review4-zombie-early.out`).
   `policy::worker_target`: a different target is a change. A change keeps the
   relay if a new worker instance says hello through it (`policy::after_change`,
   `Keep`); otherwise, after `CHANGE_GRACE_REFRESHES` (2) refreshes, the relay is
@@ -525,32 +653,32 @@ What changed:
 
 What the runs show (final build = the grace tree; all exit 0):
 
-- `spike`, twice (`review4-spike-run1`, `-run2`): 50 PASS each; unfocused
+- `spike`, twice (`review4-spike-run1.out`, `-run2`): 50 PASS each; unfocused
   202 calls, max 67 ms, p95 64 ms in run 2.
-- `pump`, twice (`review4-pump-run1`, `-run2`): 7 PASS each; 202 calls, max 72 ms
+- `pump`, twice (`review4-pump-run1.out`, `-run2`): 7 PASS each; 202 calls, max 72 ms
   in both, p95 63 ms; the debugged tab logged hidden before the attach, shown at
   it, and hidden again after the detach. Max is the slowest call of all kinds,
   so `Input.dispatchMouseEvent` is at most 72 ms.
-- `reload` (`review4-reload-run1`): path = sync.
-- `zombie`, three times (`review4-zombie-run1`, `-run2`, `-run3`): the detector
+- `reload` (`review4-reload-run1.out`): path = sync.
+- `zombie`, three times (`review4-zombie-run1.out`, `-run2`, `-run3`): the detector
   saw the reload, the relay reopened, the hello forgot the tab, the tab is hidden
   again; path = hello. `relay_eval`: `chrome.runtime.id` is `undefined` in the
   zombie page; `getManifest()` throws `Extension context invalidated.`.
-- `stop` (`review4-stop-run1`): no identify and no restart for 90 s after
+- `stop` (`review4-stop-run1.out`): no identify and no restart for 90 s after
   `stopAllWorkers`; the click restart's check ran; the session survived; the tab
   stayed painted.
-- `idle` (`review4-idle-run1`): Chromium did not idle-stop the worker in 120 s
+- `idle` (`review4-idle-run1.out`): Chromium did not idle-stop the worker in 120 s
   with the debugger held; the mode then stopped it through DevTools (the INFO line
   says so); no identify and no restart in the 90 s after; the tab stayed shown.
-- `broken` (`review4-broken-run1`): five openings, one give-up, "debuggers are
+- `broken` (`review4-broken-run1.out`): five openings, one give-up, "debuggers are
   kept", the debugged tab not hidden.
-- Before-fix (pre-grace tree, `review4-zombie-before`, `review4-idle-before`): the
+- Before-fix (pre-grace tree, `review4-zombie-before.out`, `review4-idle-before.out`): the
   detector's close disabled, and identify on `gone` restored. The zombie is not
   reached: the tab stays painted (the reload check FAILs, the zombie checks fail
   at the relay reopen). The idle run shows the 30 s loop above.
-- Earlier builds, kept: `review4-zombie-early` (before the worker-type fix: the
-  detector never matched), `review4-zombie-pre-grace-run1` (passed on the tree
-  before the grace), `review4-idle-pre-grace-run1` and `review4-idle-early`
+- Earlier builds, kept: `review4-zombie-early.out` (before the worker-type fix: the
+  detector never matched), `review4-zombie-pre-grace-run1.out` (passed on the tree
+  before the grace), `review4-idle-pre-grace-run1.out` and `review4-idle-early.out`
   (the idle mode before its DevTools fallback, the list hold not yet fixed).
 
 Not verified in this cycle:
@@ -612,40 +740,40 @@ What the runs show (final build, `review3-final-*` and the sweeps below):
 
 - `reload` (I10): the new worker's `sendCommand` failed (session ended) and
   the engine forgot the tab (`has no debugger left`); `final-reload` exited
-  0. Seven reload runs with the `alive` check (`review3-reload-after-attempt3`
-  to `-7`, `review3-final-reload`, and `review3-reload-final-extra-try`) all
+  0. Seven reload runs with the `alive` check (`review3-reload-after-attempt3.out`
+  to `-7`, `review3-final-reload.out`, and `review3-reload-final-extra-try.out`) all
   took the `sync` path: the list showed the extension off during the reload.
 - **Not shown fixed: the zombie path.** On the build before `alive`, a
   reload that left the relay page open with no port event left the tab
-  painted with its session gone (`review3-reload-after-attempt2`, status 1,
+  painted with its session gone (`review3-reload-after-attempt2.out`, status 1,
   no `has no debugger left` line; the same shape as the first attempt
-  before any fix, `review3-reload-before-attempt1`). `alive` was added for
+  before any fix, `review3-reload-before-attempt1.out`). `alive` was added for
   it; the failure path it takes was run under a forced failure
-  (`review3-control-alive-forced-fail`, status 1 by design: the stop check
+  (`review3-control-alive-forced-fail.out`, status 1 by design: the stop check
   expects the session, which the forced forget does not keep). No run on
   the final build reached the zombie path, so whether `alive` fails on a
   real reload is not shown. Treat I10's reload case as open until a run
   shows it.
 - `stop` (I10, identity): the session survived a `ServiceWorker.stopAllWorkers`
   stop; the restarted worker's `sendCommand` answered and the hello listed
-  the tab (`review3-final-stop`, status 0; `review3-reload-stop-probe`).
+  the tab (`review3-final-stop.out`, status 0; `review3-reload-stop-probe.out`).
   The engine kept the tab painted.
 - `broken` (I11): five openings of the damaged relay, one give-up line,
-  nothing for 12 s, a click refused (`review3-final-broken`, status 0). Before
+  nothing for 12 s, a click refused (`review3-final-broken.out`, status 0). Before
   the change the same provocation opened it 229 times in 60 s, no give-up
-  (`review3-broken-before`, status 1 as expected).
-- `spike`, twice (`review3-final-spike1`, `-spike2`, status 0 each): 50 PASS,
+  (`review3-broken-before.out`, status 1 as expected).
+- `spike`, twice (`review3-final-spike1.out`, `-spike2`, status 0 each): 50 PASS,
   0 FAIL each; unfocused 202 calls, max 72 and 69 ms, p95 63 ms, no timeout.
-- `pump`, twice (`review3-final-pump1`, `-pump2`, status 0 each): 7 PASS,
+- `pump`, twice (`review3-final-pump1.out`, `-pump2`, status 0 each): 7 PASS,
   0 FAIL each; 202 calls, max 78 and 86 ms, p95 63 to 64 ms, no timeout.
 - Stub runs (`review3-stub-*`): a crash (status 3 → FAIL exit), a log with
   `already mutably borrowed` (FAIL on the marker), a healthy exit (PASS).
   The hang: the new script's FAIL reads "still up 120 s"
-  (`review3-stub-hang-new`), the HEAD script's reads "still up 125 s"
-  (`review3-stub-hang-old`); both killed the stub. A browser that exits half a
-  second before the grace is not reported hung (`review3-stub-early`,
+  (`review3-stub-hang-new.out`), the HEAD script's reads "still up 125 s"
+  (`review3-stub-hang-old.out`); both killed the stub. A browser that exits half a
+  second before the grace is not reported hung (`review3-stub-early.out`,
   status 0, no marker). A browser still up at the exact grace is killed and
-  reported (`review3-stub-boundary-1`, status 1; it was up at the check).
+  reported (`review3-stub-boundary-1.out`, status 1; it was up at the check).
   The window in which the HEAD script misreported a browser that exits
   within milliseconds of the grace was not reproduced.
 - Checks on the final tree: `cargo fmt --all --check`, `cargo clippy
