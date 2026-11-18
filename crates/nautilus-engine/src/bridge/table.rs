@@ -303,6 +303,16 @@ mod tests {
             }),
             "no sessions at all names no tab"
         );
+        // An earlier build's hello (`attached` instead of `sessions`) is a hello
+        // of its instance with no sessions: the identity counts, nothing is forgotten.
+        assert_eq!(
+            hello_of(&json!({"instance": "old", "attached": [5]})),
+            Some(Hello {
+                instance: "old".to_string(),
+                sessions: Vec::new(),
+            }),
+            "the old shape is read as its instance and no sessions (M21)"
+        );
     }
 
     #[test]
