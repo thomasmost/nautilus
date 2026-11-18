@@ -1,3 +1,4 @@
+importScripts('/phase5.js');
 importScripts('lib.js'); // relative: resolves beside the worker's own script
 
 const RUN = Math.random().toString(36).slice(2, 8); // one per worker start
@@ -37,12 +38,25 @@ config().then((cfg) => {
   if (cfg.provokeStopCheck) { afterStop(cfg.stopTab); }
 });
 
+// The strip reaches the engine after the worker's start: a query in the first
+// moments answers from a strip that is not published yet (an empty list; the
+// engine's held strip, see docs/bridge-protocol.md). The provocations look for
+// a background tab only once both tabs are listed (at most 20 s).
+async function listedTabs() {
+  const end = Date.now() + 20000;
+  for (;;) {
+    const list = await chrome.tabs.query({});
+    if (list.length >= 2 || Date.now() > end) { return list; }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
 // I10 (identity, by a stop): this worker attaches a debugger to the background
 // tab and reports it. The driver then stops the worker over DevTools; the
 // engine restarts it through the relay to ask who it is, and the restarted
 // worker checks whether its own debugger session survived the stop.
 async function provokeStop() {
-  const tabs = await timed(RUN, 'provoke.tabs.query', () => chrome.tabs.query({}).then((list) => list.map(slim)));
+  const tabs = await timed(RUN, 'provoke.tabs.query', () => listedTabs().then((list) => list.map(slim)));
   const background = (tabs.result || []).find((t) => !t.active);
   if (!background) { await post('stop-ready', { run: RUN, error: 'no background tab' }); return; }
   const attach = await timed(RUN, 'provoke.debugger.attach', () => chrome.debugger.attach({ tabId: background.id }, '1.3').then(() => 'attached'), { tabId: background.id });
@@ -72,7 +86,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 // the extension. The driver clears provokeReload when 'reloading' arrives,
 // so the worker that the reload starts does not reload again.
 async function provokeReload() {
-  const tabs = await timed(RUN, 'provoke.tabs.query', () => chrome.tabs.query({}).then((list) => list.map(slim)));
+  const tabs = await timed(RUN, 'provoke.tabs.query', () => listedTabs().then((list) => list.map(slim)));
   const background = (tabs.result || []).find((t) => !t.active);
   if (!background) { await post('provoke', { run: RUN, error: 'no background tab: ' + (tabs.error || 'none is inactive') }); return; }
   const target = { tabId: background.id };
@@ -117,7 +131,7 @@ async function checks() {
 // calls go to a tab the renderer is hidden for: the case that stalled.
 // Uses no bridge for the target: it comes from chrome.debugger.getTargets().
 async function latency() {
-  const tabs = await timed(RUN, 'tabs.query({}) for the latency run', () => chrome.tabs.query({}).then((list) => list.map(slim)));
+  const tabs = await timed(RUN, 'tabs.query({}) for the latency run', () => listedTabs().then((list) => list.map(slim)));
   const background = (tabs.result || []).find((t) => !t.active);
   if (!background) { await post('latency-done', { run: RUN, error: 'no background tab: ' + (tabs.error || 'none is inactive') }); return; }
   const targets = await chrome.debugger.getTargets();
