@@ -12,6 +12,22 @@ use std::collections::HashMap;
 use osmena_core::TabId;
 use serde_json::{Value, json};
 
+/// A worker's `hello` (`bridge.js`): the worker instance it is, and the
+/// Chromium tab ids on which its own debugger session still answers (`None`
+/// when it did not say).
+/// Either is `None` when the hello lacks it.
+pub(crate) fn hello_of(hello: &Value) -> (Option<String>, Option<Vec<i64>>) {
+    let instance = hello
+        .get("instance")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let attached = hello
+        .get("attached")
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(Value::as_i64).collect());
+    (instance, attached)
+}
+
 /// One DevTools target as the helper reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Target {
@@ -211,6 +227,22 @@ pub(crate) fn query_rows(rows: &[Row], active: Option<TabId>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hello_names_the_instance_and_the_attached_tabs() {
+        let hello = json!({"instance": "abc", "attached": [5, 9]});
+        assert_eq!(
+            hello_of(&hello),
+            (Some("abc".to_string()), Some(vec![5, 9]))
+        );
+    }
+
+    #[test]
+    fn a_hello_whose_tabs_are_unknown_says_so_with_null() {
+        let hello = json!({"instance": "abc", "attached": null});
+        assert_eq!(hello_of(&hello), (Some("abc".to_string()), None));
+        assert_eq!(hello_of(&json!({})), (None, None), "no instance, no tabs");
+    }
 
     fn page(id: &str, tab_id: i64, url: &str) -> Target {
         Target {

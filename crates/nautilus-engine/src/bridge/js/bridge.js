@@ -54,10 +54,40 @@
     });
 
   // ---- the port to the relay page
+  // One id per worker start: the engine tells a restarted worker from this one
+  // by it, and an answer carries the id of the call it answers.
+  var INSTANCE = Math.random().toString(36).slice(2) + Date.now().toString(36);
   var port = null;
   var calls = new Map(); // id -> {resolve, reject, timer}
   var nextCall = 1;
   var taken = new Set(); // delivery ids this worker instance has run
+  // Resolves once the hello of the port in use has been sent: a call waits
+  // for it, so the engine has this instance's identity before any call.
+  var ready = Promise.resolve();
+
+  // The Chromium tab ids on which this extension's own debugger session is
+  // still open (null when Chromium did not say). `getTargets` marks a tab
+  // attached when any client is attached (the engine's own DevTools probe
+  // too), so each candidate is asked with `sendCommand`: only a session this
+  // extension opened answers it. The engine keeps a debugger's tab painted
+  // only while that session is there.
+  function attachedTabs() {
+    var debuggerApi = chrome.debugger;
+    if (!debuggerApi || typeof debuggerApi.getTargets !== 'function') { return Promise.resolve(null); }
+    var listed;
+    try { listed = debuggerApi.getTargets(); } catch (e) { return Promise.resolve(null); }
+    return listed.then(function (targets) {
+      var candidates = targets
+        .filter(function (t) { return t.attached && typeof t.tabId === 'number'; })
+        .map(function (t) { return t.tabId; });
+      return Promise.all(candidates.map(function (tabId) {
+        return debuggerApi.sendCommand({ tabId: tabId }, 'Runtime.evaluate', { expression: '1', returnByValue: true })
+          .then(function () { return tabId; }, function () { return null; });
+      })).then(function (answers) {
+        return answers.filter(function (tabId) { return tabId !== null; });
+      });
+    }, function () { return null; });
+  }
 
   function adopt(newPort) {
     port = newPort;
@@ -71,6 +101,11 @@
         call.reject(new Error('Nautilus: the browser stopped listening.'));
         calls.delete(id);
       });
+    });
+    ready = attachedTabs().then(function (attached) {
+      if (port !== newPort) { return; }
+      try { newPort.postMessage({ hello: { instance: INSTANCE, attached: attached } }); }
+      catch (ignored) { /* the port went before the hello */ }
     });
   }
 
@@ -95,19 +130,33 @@
         reject(new Error('Nautilus: ' + method + ' was not answered.'));
       }, CALL_TIMEOUT_MS);
       calls.set(id, { resolve: resolve, reject: reject, timer: timer });
+      var sent;
       try {
-        ensurePort().postMessage({ call: { id: id, method: method, args: args } });
+        sent = ensurePort();
       } catch (e) {
         clearTimeout(timer);
         calls.delete(id);
         reject(e);
+        return;
       }
+      ready.then(function () {
+        try {
+          sent.postMessage({ call: { id: id, method: method, args: args, instance: INSTANCE } });
+        } catch (e) {
+          clearTimeout(timer);
+          calls.delete(id);
+          reject(e);
+        }
+      });
     });
   }
 
   function onMessage(from, message) {
     if (!message) { return; }
     if (message.reply) {
+      // An answer to another instance's call is not ours to take: that
+      // instance may have used the same call id.
+      if (message.reply.instance !== INSTANCE) { return; }
       var pending = calls.get(message.reply.id);
       if (!pending) { return; }
       calls.delete(message.reply.id);

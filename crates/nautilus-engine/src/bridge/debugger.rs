@@ -77,6 +77,15 @@ impl Debuggers {
         self.by_tab.remove(&tab);
     }
 
+    /// The tabs `extension` debugs, in tab order.
+    pub(crate) fn tabs_of(&self, extension: &str) -> Vec<TabId> {
+        self.by_tab
+            .iter()
+            .filter(|(_, debuggers)| debuggers.contains(extension))
+            .map(|(tab, _)| *tab)
+            .collect()
+    }
+
     #[cfg(test)]
     pub(crate) fn is_debugged(&self, tab: TabId) -> bool {
         self.by_tab.contains_key(&tab)
@@ -144,6 +153,17 @@ mod tests {
             Vec::new(),
             "nothing is left to forget"
         );
+    }
+
+    #[test]
+    fn an_extension_lists_only_the_tabs_it_debugs_in_tab_order() {
+        let mut set = Debuggers::default();
+        set.attach(A, TabId(2));
+        set.attach(B, TabId(1));
+        set.attach(A, TabId(1));
+        assert_eq!(set.tabs_of(A), vec![TabId(1), TabId(2)]);
+        assert_eq!(set.tabs_of(B), vec![TabId(1)]);
+        assert!(set.tabs_of("nobody").is_empty());
     }
 
     #[test]

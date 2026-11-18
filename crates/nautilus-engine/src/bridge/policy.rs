@@ -3,6 +3,7 @@
 //! a delivery's outcome means for another attempt. `Bridge` in `relay.rs`
 //! carries them out, and the tests here pin them down.
 
+use osmena_core::TabId;
 use serde_json::Value;
 
 /// What a delivery's outcome means.
@@ -112,6 +113,123 @@ pub(crate) fn overflow(kinds: &[JobKind], max: usize) -> Overflow {
 /// successor under a new generation, does not match.
 pub(crate) fn is_generation(current: Option<u64>, generation: u64) -> bool {
     current == Some(generation)
+}
+
+/// What a worker's own report of its identity means, against the identity
+/// the engine last saw for its extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Identity {
+    /// The worker is the one the engine last saw, or the first it has seen.
+    Same,
+    /// Another worker instance: the worker was started again since.
+    Restarted,
+    /// The worker could not say who it is (its relay could not reach it).
+    Unreached,
+}
+
+/// Compare the worker instance `reported` with the instance `seen` last.
+/// `None` for `reported` means the worker could not be reached.
+pub(crate) fn identity(seen: Option<&str>, reported: Option<&str>) -> Identity {
+    match (seen, reported) {
+        (_, None) => Identity::Unreached,
+        (None, Some(_)) => Identity::Same,
+        (Some(seen), Some(reported)) if seen == reported => Identity::Same,
+        (Some(_), Some(_)) => Identity::Restarted,
+    }
+}
+
+/// The tabs that an extension's debuggers no longer cover, given its
+/// worker's identity and the tabs on which the worker's own debugger session
+/// still answers (`attached`, from the worker's hello; `None` when it did
+/// not say). `tracked` are the tabs the engine shows for the extension's
+/// debuggers.
+///
+/// A new worker instance is not, by itself, the end of its debugger
+/// sessions: a worker that stops and starts again keeps the sessions its
+/// extension opened (measured: `run.sh stop`). So the tracked tabs are kept
+/// where the session still answers. Without that answer, a restarted or
+/// unreached worker's tabs are forgotten (they are shown again), and a worker
+/// that is the same is trusted as it was.
+pub(crate) fn tabs_to_forget(
+    identity: Identity,
+    tracked: &[TabId],
+    attached: Option<&[TabId]>,
+) -> Vec<TabId> {
+    match (identity, attached) {
+        (Identity::Unreached, _) => tracked.to_vec(),
+        (Identity::Restarted, None) => tracked.to_vec(),
+        (_, None) => Vec::new(),
+        (_, Some(attached)) => tracked
+            .iter()
+            .filter(|tab| !attached.contains(tab))
+            .copied()
+            .collect(),
+    }
+}
+
+/// Whether a queued job made by the worker instance `instance` may still be
+/// carried out once the extension's worker is `current`. A click is a
+/// delivery and always may be (the new instance has no record of its id, so
+/// it runs once there). A tab list or debugger report holds the call id of
+/// one instance: answering it in another would resolve that instance's own
+/// call with the same id, so it is dropped.
+pub(crate) fn job_belongs(kind: JobKind, instance: &str, current: &str) -> bool {
+    match kind {
+        JobKind::Click => true,
+        JobKind::Query | JobKind::Debugger => instance == current,
+    }
+}
+
+/// How often the engine checks that a relay which holds debuggers still has
+/// its extension context. A reload leaves the relay page alive, with no port
+/// event to say so (measured: `run.sh reload`), so only a check finds it.
+pub(crate) const ALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether a check that was last made `since_last` ago (`None`: never) is due,
+/// given the interval between two checks.
+pub(crate) fn check_due(
+    since_last: Option<std::time::Duration>,
+    interval: std::time::Duration,
+) -> bool {
+    since_last.is_none_or(|elapsed| elapsed >= interval)
+}
+
+/// How many openings of one hidden page may pass without its first poll
+/// succeeding (`failed`) before the engine stops opening it.
+pub(crate) const MAX_OPENINGS: u32 = 5;
+/// The gap before the second opening; each later gap doubles, up to
+/// `MAX_GAP`.
+pub(crate) const BASE_GAP: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const MAX_GAP: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// What the engine does about a hidden page that is wanted and not open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Opening {
+    /// Open it now.
+    Now,
+    /// Wait this long more before opening it.
+    Wait(std::time::Duration),
+    /// Stop: it has failed `MAX_OPENINGS` times in a row. Nothing opens it
+    /// again until its extension changes.
+    GiveUp,
+}
+
+/// The next opening, given how many openings of the page have failed in a
+/// row (`failed`: openings since its last successful poll) and the time since
+/// the last opening (`None` when it was never opened). The time is an
+/// argument, so the schedule is tested without a clock.
+pub(crate) fn next_opening(failed: u32, since_last: Option<std::time::Duration>) -> Opening {
+    if failed >= MAX_OPENINGS {
+        return Opening::GiveUp;
+    }
+    if failed == 0 {
+        return Opening::Now;
+    }
+    let gap = (BASE_GAP * 2u32.pow(failed - 1)).min(MAX_GAP);
+    match since_last {
+        Some(elapsed) if elapsed < gap => Opening::Wait(gap - elapsed),
+        _ => Opening::Now,
+    }
 }
 
 /// The outcome of one delivery attempt: `Ok` is the relay's answer
@@ -276,5 +394,150 @@ mod tests {
         assert!(is_generation(Some(7), 7));
         assert!(!is_generation(Some(8), 7), "a successor under the same key");
         assert!(!is_generation(None, 7), "a page that is gone");
+    }
+
+    #[test]
+    fn the_worker_is_the_same_while_its_instance_is_reported_unchanged() {
+        assert_eq!(identity(Some("a"), Some("a")), Identity::Same);
+        assert_eq!(
+            identity(None, Some("a")),
+            Identity::Same,
+            "the first contact"
+        );
+        assert_eq!(identity(Some("a"), Some("b")), Identity::Restarted);
+        assert_eq!(identity(Some("a"), None), Identity::Unreached);
+        assert_eq!(identity(None, None), Identity::Unreached);
+    }
+
+    #[test]
+    fn a_restarted_worker_keeps_the_tabs_where_its_session_still_answers() {
+        // A worker that stopped and started again keeps its sessions: only an
+        // unload ends them, so the list decides.
+        let tracked = [TabId(1), TabId(2)];
+        assert_eq!(
+            tabs_to_forget(Identity::Restarted, &tracked, Some(&[TabId(1)])),
+            vec![TabId(2)]
+        );
+        assert_eq!(
+            tabs_to_forget(Identity::Restarted, &tracked, Some(&[])),
+            vec![TabId(1), TabId(2)],
+            "an unload (the reload of run I10) ended every session"
+        );
+    }
+
+    #[test]
+    fn a_restarted_worker_that_did_not_say_forgets_its_tabs() {
+        // Without the list the sessions are unknown; the tabs are shown again
+        // rather than left painted for a debugger that may be gone.
+        assert_eq!(
+            tabs_to_forget(Identity::Restarted, &[TabId(1)], None),
+            vec![TabId(1)]
+        );
+    }
+
+    #[test]
+    fn the_same_worker_is_trusted_and_an_unreached_one_is_not() {
+        let tracked = [TabId(1), TabId(2)];
+        assert_eq!(
+            tabs_to_forget(Identity::Same, &tracked, None),
+            Vec::<TabId>::new(),
+            "a worker that did not say whether its sessions are gone keeps them"
+        );
+        assert_eq!(
+            tabs_to_forget(Identity::Same, &tracked, Some(&[TabId(2)])),
+            vec![TabId(1)]
+        );
+        assert_eq!(
+            tabs_to_forget(Identity::Unreached, &tracked, Some(&[TabId(1)])),
+            vec![TabId(1), TabId(2)],
+            "a worker that cannot be reached has no sessions the engine can see"
+        );
+    }
+
+    #[test]
+    fn a_click_is_carried_out_by_whichever_instance_is_current() {
+        assert!(job_belongs(JobKind::Click, "old", "new"));
+    }
+
+    #[test]
+    fn a_call_is_answered_only_by_the_instance_that_made_it() {
+        assert!(job_belongs(JobKind::Query, "a", "a"));
+        assert!(!job_belongs(JobKind::Query, "a", "b"));
+        assert!(job_belongs(JobKind::Debugger, "a", "a"));
+        assert!(
+            !job_belongs(JobKind::Debugger, "a", "b"),
+            "an attach from a worker that is gone is not applied to its successor"
+        );
+    }
+
+    #[test]
+    fn the_first_opening_is_immediate_and_the_gaps_double_then_stop() {
+        use std::time::Duration;
+        assert_eq!(next_opening(0, None), Opening::Now);
+        assert_eq!(
+            next_opening(0, Some(Duration::ZERO)),
+            Opening::Now,
+            "after a success"
+        );
+        assert_eq!(
+            next_opening(1, Some(Duration::ZERO)),
+            Opening::Wait(Duration::from_millis(250))
+        );
+        assert_eq!(
+            next_opening(1, Some(Duration::from_millis(250))),
+            Opening::Now
+        );
+        assert_eq!(
+            next_opening(2, Some(Duration::ZERO)),
+            Opening::Wait(Duration::from_millis(500))
+        );
+        assert_eq!(
+            next_opening(3, Some(Duration::ZERO)),
+            Opening::Wait(Duration::from_secs(1))
+        );
+        assert_eq!(
+            next_opening(4, Some(Duration::ZERO)),
+            Opening::Wait(Duration::from_secs(2))
+        );
+        assert_eq!(
+            next_opening(MAX_OPENINGS, Some(Duration::from_secs(60))),
+            Opening::GiveUp
+        );
+        assert_eq!(next_opening(MAX_OPENINGS + 3, None), Opening::GiveUp);
+    }
+
+    #[test]
+    fn a_check_is_due_when_it_was_never_made_or_its_interval_has_passed() {
+        use std::time::Duration;
+        assert!(check_due(None, ALIVE_INTERVAL), "never checked");
+        assert!(!check_due(
+            Some(Duration::from_millis(1999)),
+            ALIVE_INTERVAL
+        ));
+        assert!(check_due(Some(ALIVE_INTERVAL), ALIVE_INTERVAL));
+    }
+
+    #[test]
+    fn a_page_that_never_polls_is_opened_a_bounded_number_of_times_on_a_schedule() {
+        // Simulate the engine's turns: a page that opens, fails and is closed
+        // each time, never polling successfully.
+        use std::time::Duration;
+        let mut now = Duration::ZERO;
+        let mut last: Option<Duration> = None;
+        let mut failed = 0;
+        let mut openings = Vec::new();
+        loop {
+            match next_opening(failed, last.map(|at| now - at)) {
+                Opening::Now => {
+                    openings.push(now.as_millis());
+                    last = Some(now);
+                    failed += 1;
+                }
+                Opening::Wait(more) => now += more,
+                Opening::GiveUp => break,
+            }
+        }
+        assert_eq!(openings, vec![0, 250, 750, 1750, 3750]);
+        assert_eq!(openings.len() as u32, MAX_OPENINGS);
     }
 }
