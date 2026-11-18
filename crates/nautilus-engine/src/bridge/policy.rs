@@ -79,6 +79,10 @@ pub(crate) enum JobKind {
     /// A debugger report: the table decides it, and the relay only carries
     /// the answer. It is never failed by a page's loss.
     Debugger,
+    /// An event for a worker's listeners (`bridge.wake` included): logged as
+    /// dropped when it cannot be delivered, and never retried after that. It
+    /// is not a debugger report, so a full queue sheds it like a click.
+    Emit,
 }
 
 /// Which queued jobs fail when the page under `key` is gone. `is_helper`
@@ -205,10 +209,13 @@ pub(crate) fn identity(seen: Option<&str>, reported: &str) -> Identity {
 /// with the same id, so it is dropped. A click is a delivery and is kept (a
 /// new instance has no record of its id, so it runs once there). A debugger
 /// report is kept whichever instance made it: the session it reports
-/// survives a worker stop (measured), so the table still applies it.
+/// survives a worker stop (measured), so the table still applies it. An
+/// event is kept only by the instance it was queued for: a new instance has
+/// not been asked to run it, and the listeners it reaches are gone with the
+/// old one.
 pub(crate) fn job_kept(kind: JobKind, instance: &str, current: &str) -> bool {
     match kind {
-        JobKind::Query => instance == current,
+        JobKind::Query | JobKind::Emit => instance == current,
         JobKind::Click | JobKind::Debugger => true,
     }
 }
@@ -636,6 +643,46 @@ mod tests {
     #[test]
     fn a_click_is_carried_out_by_whichever_instance_is_current() {
         assert!(job_kept(JobKind::Click, "old", "new"));
+    }
+
+    #[test]
+    fn an_event_is_failed_by_its_relays_loss_as_a_click_is() {
+        let jobs = [
+            (JobKind::Emit, "a"),
+            (JobKind::Click, "a"),
+            (JobKind::Emit, "b"),
+        ];
+        assert_eq!(
+            failed_by_loss("a", false, &jobs),
+            vec![true, true, false],
+            "an event waiting on a relay that is gone is failed (and logged), as a click is"
+        );
+        assert_eq!(
+            failed_by_loss("helper", true, &[(JobKind::Emit, "a")]),
+            vec![true],
+            "the helper's loss fails events as it fails clicks"
+        );
+    }
+
+    #[test]
+    fn a_full_queue_sheds_an_event_as_it_sheds_a_click_and_never_a_debugger_report() {
+        use JobKind::{Click, Debugger, Emit};
+        assert_eq!(
+            overflow(&[Debugger, Emit, Click], 2),
+            Overflow::Fail(1),
+            "the oldest event is the first to go, after the debugger report that is kept"
+        );
+        assert_eq!(overflow(&[Emit, Debugger, Debugger], 2), Overflow::Fail(0));
+        assert_eq!(overflow(&[Debugger, Debugger, Emit], 2), Overflow::Fail(2));
+    }
+
+    #[test]
+    fn an_event_made_for_an_old_instance_is_not_kept_by_the_new_one() {
+        // A delivery of an old instance's listeners has no worker to run in
+        // once that instance is gone; a new instance runs only what it is sent
+        // after it says hello. The same instance keeps its queued events.
+        assert!(!job_kept(JobKind::Emit, "old", "new"));
+        assert!(job_kept(JobKind::Emit, "a", "a"));
     }
 
     #[test]
