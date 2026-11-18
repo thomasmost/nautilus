@@ -667,11 +667,11 @@ message `nautilus-bridge-call` with one string argument
 `self.__nautilusBridgeDeliver("<json>")` in the frame with `{"id", "ok"}`,
 `{"id", "error"}` or `{"event", "args"}`. The browser process takes the
 extension from the calling frame's own address, never from the message,
-and drops a call from a frame that is not a bridged extension's page. A call
-from a bridged extension's page that the engine has not yet published its tab
-for is answered from the published strip, as a worker's call is; and a call
-dropped this way gets no reply, so the page's promise does not settle (the
-restore launch of the scripted run showed it).
+and drops a call from a frame that is not an extension's page. A page's call
+for a tab that the published strip does not hold yet is held until the strip
+publishes, or for `PUBLISH_WAIT` (2 s); a call of an extension the hub does not
+serve yet is held until it is served, or for the same bound, and then refused
+with `the extension is not bridged.`. A page's call always gets a reply.
 
 
 ## The scripted run (phase5.py)
@@ -768,40 +768,52 @@ the page was not bridged, and the browser process trapped. What was measured
   caused by the bridge's code. A bridged page cannot make the call: the engine
   refuses `tabs.group` and `ungroup` for a bridged caller (`bridge/router.rs`).
   Upstream entry C11 in `docs/upstream-issues.md` records it.
-- **The run after the deferred install.** Two passes on the commit that makes
-  the change, both the same: exit status 1, 63 checks passed, 6 failed
-  (`task13c-final-p5-run1.out`, `task13c-final-p5-run2.out`; logs in
-  `task13c-final-p5-run1-logs/`, `task13c-final-p5-run2-logs/`). The browser does
-  not trap and exits cleanly in both; the page is bridged
-  (`installed: tabs, windows, runtime.onMessage`). The six failures:
-  - `the page is bridged before its scripts run`, `AC3.1 a page's current window
-    is the one showing it`, and `AC3.5 a page's tabs.group rejects too` (the
-    last reads `None`, since its step never ran). The page's `tabs.getCurrent()`
-    returned no tab (`Cannot read properties of undefined (reading 'id')`), so
-    its `tabs.group` was not called. The page's first calls are asked as
-    `(Page, View(TabId(5)))` (`task13c-final-p5-run1-logs/main.log` line 295),
-    and the engine answers from the published strip. That strip holds the
-    page's own tab only once the table names its Chromium id, or after the
-    2 s publish wait (`PUBLISH_WAIT`, `bridge/state.rs`); the page's calls come
-    during its load, before that. This is the race the worker's queries already
-    have (below), and it now reaches a page's own answers. Open: a call before
-    its tab is published, and whether it should wait, is the owner's decision.
-  - `sender.tab carries the strip's fields`: the page's `runtime.sendMessage`
-    reaches the worker in the same window, so `sender.tab` has the page's id but
-    `windowId: -1` and `index: -1`. Same cause.
-  - `restore-list` and `restore-show` never report. The restore launch restored
-    three live tabs and none was discarded, so the worker's wait for a discarded
-    tab ran its 40 s, and the launch ended at its 45 s limit
-    (`task13c-final-p5-run1-logs/restore.log` line 100). Whether the restore
-    produces a discarded tab here is not established. The restored extension
-    page loaded before its extension was served, and its first calls were
-    dropped without a reply (`restore.log` line 18). A dropped call never
-    settles, so the page's promise waits forever. Chromium also logged
-    `Failed to create API on Chrome object` twice (`restore.log` lines 23 and 26);
-    the main launch logged none. Both are open.
-- **The regression modes** on the same commit, each judged by its exit status
-  (`task13c-mode-*.out.status`): `spike` 0 (54 PASS), `pump` 0 (7 PASS), `reload`
-  0 (7 PASS), `zombie` 0 (21 PASS), `stop` 0 (17 PASS), `idle` 0 (9 PASS), and
+- **The page-call holds (commit `ef21a61`).** A page's call for a tab that the
+  published strip does not hold yet is held until the strip publishes, or for
+  `PUBLISH_WAIT` (2 s, `bridge/state.rs`); a call of an extension the hub does not
+  serve yet is held until it is served, or for the same bound, and then refused
+  with `the extension is not bridged.`. Held calls are answered in arrival order
+  (`BridgeState::page_call`, `Hold`, `settle`). The page lane no longer drops
+  such a call (`pages.rs` `receive`), so a page always gets a reply. A worker's
+  calls are unchanged.
+- **The run after the page-call holds.** Two passes on that commit's tree (the
+  docs commit changes no code): pass 1 exit 1, 64 PASS, 5 FAIL
+  (`task13d-p5-run1.out`); pass 2 exit 1, 66 PASS, 3 FAIL (`task13d-p5-run2.out`).
+  The browser does not trap and exits cleanly in both, and the page is bridged.
+  The failures that remain:
+  - `sender.tab carries the strip's fields` (both passes). The page's own tab
+    never gets a Chromium id in the table: the log has `TabId(5) is DevTools
+    target …` for it and no `is Chromium tab` line (`task13c-final-p5-run1-logs/main.log`).
+    So the sender's id does not map to a strip entry and `windowId` is `-1`. The
+    page's calls are held now, so this is the table's join for an extension
+    page's tab, not the publish hold. Not fixed.
+  - `restore-list` and `restore-show` (both passes). The restored worker's
+    first `tabs.query({})` never reaches the engine; see "The restore suite"
+    below. Not fixed.
+  - `AC3.3` (a created tab still `loading`) and `AC3.4` (two ids above
+    `SYNTHETIC_BASE`, 2 000 000 000, so the strip published them without
+    Chromium's ids) failed once, in pass 1, and passed in pass 2. The strip's
+    publish wait ended before the table named those tabs. Not explained.
+- **The restore suite (measured).** The restore launch restores three tabs, and
+  the worker's wait for a discarded tab never sees one. The harness's `done`
+  record for `restore` is `failed: Nautilus: the browser stopped listening.`
+  (`task13d-diag-p5.out`, the `DIAG` line); the check "the suite finished" passes
+  on a `failed:` record, so it does not show this. The worker starts, says hello
+  (`task13d-e9-logs/restore.log` line 51), and reads the `restore` suite. Its
+  first `tabs.query({})` finds the worker's `port` null (`call tabs.query port=0`
+  in the worker's own markers), so it opens a new port. No call from the worker
+  reaches the relay after the hello (the relay's page-side log has the hello and no
+  call; the engine's `nautilusRelay.next()` returns nothing when asked). The idle
+  worker stops about 30 s later, and the call fails. The worker sees its earlier
+  port close while the relay sees no close until then. A worker that reconnects
+  after its port closes silently is the bridge's fault to fix; that needs a
+  decision on how the worker's port is re-established, so it is not fixed here.
+- **`Failed to create API on Chrome object`** appears twice in the restore
+  launch's log (`restore.log` lines 23 and 26) and never in the main launch. Its
+  API is not identified.
+- **The regression modes** on the same tree, each judged by its exit status
+  (`task13d-mode-*.out.status`): `spike` 0 (54 PASS), `pump` 0 (7 PASS), `reload` 0
+  (7 PASS), `zombie` 0 (21 PASS), `stop` 0 (14 PASS), `idle` 0 (9 PASS), and
   `broken` 0 (14 PASS), none with a FAIL line.
 
 Passing checks (before the deferred install and after it): every tab listed in strip order

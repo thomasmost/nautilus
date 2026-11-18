@@ -237,9 +237,11 @@ belongs to one running Nautilus at a time.
   (a deferred tab's first show). The owner's own Nautilus may run beside it:
   its windows are not counted. **Status:** on 2026-11-18, after the page's
   namespaces were installed at its first document change, the browser no longer
-  traps and the extension page is bridged. Both passes exit 1 with 63 checks
-  passing and 6 failing: the page's own tab is not yet in the strip for its
-  first calls, and the restore suite finds no deferred tab. Not a pass; the
+  traps, the extension page is bridged, and its calls are held for their tab and
+  extension. The two passes exit 1, with 64 and 66 checks passing and 5 and 3
+  failing: the page's own tab has no Chromium id in the table (`sender.tab`), and
+  the restored worker's first call never reaches the engine (the restore suite).
+  Not a pass; the
   failures are described in `docs/bridge-protocol.md`, "The scripted run (phase5.py)".
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
   browser read commands from the named directory: `load` an unpacked
