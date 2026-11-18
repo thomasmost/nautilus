@@ -33,10 +33,10 @@ use super::debugger::{Change, Debuggers};
 use super::evaluation;
 use super::install::HELPER_ID;
 use super::policy::{
-    AfterChange, CHANGE_GRACE_REFRESHES, Evidence, Identity, JobKind, JobTurn, MAX_OPENINGS, Next,
-    Opening, Overflow, REFRESH_INTERVAL, Session, WorkerTarget, WorkerWatch, after_delivery,
-    check_due, failed_by_loss, forgets, identity, is_generation, job_kept, job_turn, next_opening,
-    overflow, relay_changes, reply_due, session_evidence, tabs_to_forget,
+    AfterAsk, Answered, Evidence, Identity, JobKind, JobTurn, MAX_OPENINGS, Next, Opening,
+    Overflow, REFRESH_INTERVAL, Session, WorkerTarget, WorkerWatch, after_ask, after_delivery,
+    asks_on, check_due, failed_by_loss, forgets, identity, is_generation, job_kept, job_turn,
+    next_opening, overflow, relay_changes, reply_due, session_evidence, tabs_to_forget,
 };
 use super::rewrite::BRIDGE_DIR;
 use super::table::{
@@ -330,6 +330,9 @@ enum Pending {
     Probe,
     /// A relay's `identify()`: which worker instance it reaches.
     Identify { extension: String },
+    /// The ask of a changed worker target (`check_worker_targets`): the relay's
+    /// `identify()`, whose answer decides its relay for change number `change`.
+    Ask { extension: String, change: u32 },
     /// A test control's expression in a relay page, whose value is logged
     /// as `label` (`inspect_relay`).
     Inspect { label: String },
@@ -712,53 +715,98 @@ impl Bridge {
     }
 
     /// Compare each wanted extension's worker target with the one recorded for
-    /// it (`policy::worker_target`). A target that changed means the worker was
-    /// reloaded or started anew. Whether its relay is closed is `policy::after_change`:
-    /// a relay that a new worker instance has said hello through is connected to
-    /// the live worker and kept (a restart after a stop is this case: closing it
-    /// would fail the calls in flight on its port); a relay no new instance
-    /// reaches within `CHANGE_GRACE_REFRESHES` refreshes is a zombie, closed, and
-    /// the next turn opens a fresh one. Only a hello received after the change
-    /// was observed counts (`policy::WorkerWatch`): a restart whose hello came
-    /// first costs one reopen after the grace, and a reload after a restart
-    /// cannot be kept by the restart's hello (I16). Debuggers are kept in both
-    /// cases; the fresh relay's hello decides them (`worker_hello`).
+    /// it (`WorkerWatch::observe`). A change means the worker was reloaded or
+    /// started anew, and the relay that reaches the old one is asked which worker
+    /// instance it reaches now (`ask`): a live relay answers with that instance's
+    /// hello and is kept, and a zombie cannot answer and is closed
+    /// (`decide_ask`). The decision waits for the answer itself; no hello that
+    /// came before the change decides anything, and no refresh count is waited on.
+    /// Debuggers are kept in both cases; the relay's hello decides them
+    /// (`worker_hello`).
     fn check_worker_targets(&self, targets: &[Target]) {
-        let mut closes = Vec::new();
+        let mut asks = Vec::new();
         {
             let mut inner = self.inner.borrow_mut();
             for extension in inner.wanted.clone() {
                 let listed = worker_target_of(targets, &extension);
+                let relay_open = inner.relays.contains_key(&extension);
                 let watch = inner.watches.entry(extension.clone()).or_default();
                 let recorded = watch.recorded().map(str::to_string);
-                let (target, verdict) = watch.refresh(listed.as_deref());
+                let (target, change) = watch.observe(listed.as_deref());
                 match target {
                     WorkerTarget::First => {
                         if let Some(listed) = &listed {
                             log::info!("bridge: {extension}'s worker is target {listed}");
                         }
                     }
-                    WorkerTarget::Changed => log::info!(
-                        "bridge: {extension}'s worker target changed from {} to {}: the worker was reloaded or started anew",
-                        recorded.unwrap_or_default(),
-                        listed.unwrap_or_default()
-                    ),
+                    WorkerTarget::Changed => {
+                        log::info!(
+                            "bridge: {extension}'s worker target changed from {} to {}: the worker was reloaded or started anew",
+                            recorded.unwrap_or_default(),
+                            listed.unwrap_or_default()
+                        );
+                        match change {
+                            Some(change) if asks_on(target, relay_open) => {
+                                asks.push((extension.clone(), change));
+                            }
+                            _ => log::info!(
+                                "bridge: {extension} has no relay open to ask about its new worker; a relay opened later says who its worker is when a debugger needs it"
+                            ),
+                        }
+                    }
                     WorkerTarget::Same | WorkerTarget::Absent => {}
-                }
-                match verdict {
-                    Some(AfterChange::Keep) => log::info!(
-                        "bridge: {extension}'s new worker instance said hello through its relay: the relay is kept"
-                    ),
-                    Some(AfterChange::Close) => closes.push(extension),
-                    Some(AfterChange::Wait) | None => {}
                 }
             }
         }
-        for extension in closes {
-            log::info!(
-                "bridge: no new worker instance said hello through {extension}'s relay after its worker target changed, within {CHANGE_GRACE_REFRESHES} refreshes: the relay is closed and opened again (a zombie cannot reach the new worker; a live relay whose hello came before the change is closed the same way; its debuggers are kept)"
-            );
-            self.close_relay(&extension);
+        for (extension, change) in asks {
+            self.ask(&extension, change);
+        }
+    }
+
+    /// Ask `extension`'s relay which worker instance it reaches, for the change
+    /// numbered `change` (`WorkerWatch::observe`). Only a change asks, so the
+    /// ask wakes nothing that an idle stop had put to sleep (I15). The answer
+    /// comes to `Pending::Ask`.
+    fn ask(&self, extension: &str, change: u32) {
+        log::info!(
+            "bridge: {extension}: its worker target changed (change {change}): asks its relay which worker it reaches"
+        );
+        if !self.evaluate(
+            extension,
+            "nautilusRelay.identify()",
+            Pending::Ask {
+                extension: extension.to_string(),
+                change,
+            },
+        ) {
+            self.decide_ask(extension, change, Answered::Unanswered);
+        }
+    }
+
+    /// What the answer to change `change`'s ask does to `extension`'s relay
+    /// (`policy::after_ask`). A failed answer closes the relay only for the
+    /// latest change; its debuggers are kept, and a fresh relay's hello decides
+    /// them. Nothing in flight on a kept relay is touched.
+    fn decide_ask(&self, extension: &str, change: u32, answer: Answered) {
+        let latest = self
+            .inner
+            .borrow()
+            .watches
+            .get(extension)
+            .is_some_and(|watch| watch.is_latest(change));
+        match after_ask(answer, latest) {
+            AfterAsk::Keep => log::info!(
+                "bridge: {extension}'s relay reaches a live worker (its answer to change {change}): the relay is kept"
+            ),
+            AfterAsk::Ignore => log::info!(
+                "bridge: {extension}: the answer to change {change} is older than its worker's latest change; the latest change decides"
+            ),
+            AfterAsk::Close => {
+                log::warn!(
+                    "bridge: {extension}'s relay could not say which worker it reaches (change {change}): it is a zombie, so the relay is closed and opened again; its debuggers are kept"
+                );
+                self.close_relay(extension);
+            }
         }
     }
 
@@ -1359,14 +1407,6 @@ impl Bridge {
             let mut inner = self.inner.borrow_mut();
             let seen = inner.identities.get(extension).cloned();
             let identity = identity(seen.as_deref(), &hello.instance);
-            // A new instance reached the engine through this relay: the relay is
-            // connected to the live worker, if a change is waiting for it
-            // (`check_worker_targets`; a hello before the change does not count).
-            inner
-                .watches
-                .entry(extension.to_string())
-                .or_default()
-                .hello(identity == Identity::Restarted);
             inner
                 .identities
                 .insert(extension.to_string(), hello.instance.clone());
@@ -1770,6 +1810,21 @@ impl Bridge {
                     );
                     self.unreached(&extension);
                     self.close_relay(&extension);
+                }
+            },
+            Pending::Ask { extension, change } => match value.map(|hello| hello_of(&hello)) {
+                Ok(Some(hello)) => {
+                    self.hello_reached(&extension);
+                    self.worker_hello(&extension, &hello);
+                    self.decide_ask(&extension, change, Answered::Live);
+                }
+                Ok(None) => {
+                    log::warn!("bridge: {extension}'s answer to change {change} has no instance");
+                    self.decide_ask(&extension, change, Answered::Unanswered);
+                }
+                Err(e) => {
+                    log::info!("bridge: {extension}'s relay did not answer change {change} ({e})");
+                    self.decide_ask(&extension, change, Answered::Unanswered);
                 }
             },
             Pending::Inspect { label } => match value {

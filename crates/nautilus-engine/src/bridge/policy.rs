@@ -229,8 +229,8 @@ pub(crate) enum WorkerTarget {
     First,
     /// The same target as recorded.
     Same,
-    /// A different target: the worker was reloaded or started anew. The
-    /// relay that reaches the old one is closed.
+    /// A different target: the worker was reloaded or started anew. Its relay
+    /// is asked which worker it reaches (`asks_on`); the answer decides it.
     Changed,
     /// No worker target is listed (the worker is stopped when idle). The
     /// recorded target is kept, so that its return is compared with it.
@@ -249,52 +249,60 @@ pub(crate) fn worker_target(recorded: Option<&str>, listed: Option<&str>) -> Wor
     }
 }
 
-/// How many table refreshes a changed worker target waits for a new worker
-/// instance to say hello through the relay (`after_change`) before the relay
-/// is closed as a zombie.
-pub(crate) const CHANGE_GRACE_REFRESHES: u32 = 2;
-
-/// What a changed worker target does to its relay.
+/// How a relay answered the ask of a changed worker target (`identify`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AfterChange {
-    /// Keep the relay and wait for the next refresh.
-    Wait,
-    /// A new worker instance reached the engine through this relay: the relay
-    /// is connected to the live worker, so it is kept and its calls in flight
-    /// on its port are not failed.
-    Keep,
-    /// No new instance reached the engine through the relay within the grace:
-    /// the relay's page cannot reach the new worker (a reloaded extension's
-    /// relay is a zombie), so it is closed and opened again.
-    Close,
+pub(crate) enum Answered {
+    /// A hello came back: the relay reaches a live worker.
+    Live,
+    /// No hello: an error, a throw, a timeout or a malformed answer.
+    Unanswered,
 }
 
-/// What a changed worker target does to its relay. `heard`: a new worker
-/// instance said hello through the relay since the last refresh. `waited`:
-/// refreshes since the change, the change's own refresh counting as 0.
-pub(crate) fn after_change(heard: bool, waited: u32) -> AfterChange {
-    if heard {
-        AfterChange::Keep
-    } else if waited >= CHANGE_GRACE_REFRESHES {
-        AfterChange::Close
-    } else {
-        AfterChange::Wait
+/// What the answer to a change's ask does to its relay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AfterAsk {
+    /// The relay reaches a live worker: it is kept, and nothing in flight on
+    /// its port is failed.
+    Keep,
+    /// The relay cannot reach a worker for the latest change: a zombie. It is
+    /// closed, and the next turn opens a fresh one.
+    Close,
+    /// The answer belongs to an earlier change: the latest change's own ask
+    /// decides, so this one changes nothing.
+    Ignore,
+}
+
+/// Whether a worker target asks its relay which worker it reaches. Only a
+/// change asks, and only through an open relay: a change means a worker has just
+/// started, so the ask wakes nothing, while an absence (an idle stop) and a
+/// first target never ask (I15). With no relay open, the reopened relay's own
+/// identify covers the change.
+pub(crate) fn asks_on(target: WorkerTarget, relay_open: bool) -> bool {
+    relay_open && target == WorkerTarget::Changed
+}
+
+/// What the answer to a change's ask does (review cycle 6, I17). A live answer
+/// keeps the relay whatever else happened. A failed answer closes it only when
+/// its ask is the latest change's (`latest`): an earlier change's failure is
+/// no verdict on the newest one, whose own ask decides. Nothing else decides a
+/// relay: a hello that arrives outside an ask is applied, never a verdict.
+pub(crate) fn after_ask(answer: Answered, latest: bool) -> AfterAsk {
+    match (answer, latest) {
+        (Answered::Live, _) => AfterAsk::Keep,
+        (Answered::Unanswered, true) => AfterAsk::Close,
+        (Answered::Unanswered, false) => AfterAsk::Ignore,
     }
 }
 
-/// What the engine remembers of one extension's worker target, and the change
-/// that waits for its relay's hello (`after_change`). Pure: relay.rs keeps one
-/// per extension and calls `hello` and `refresh` in the order the events came.
+/// What the engine remembers of one extension's worker target: the target
+/// recorded, and how many changes were observed. Pure: relay.rs keeps one per
+/// extension and calls `observe` on each table refresh.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct WorkerWatch {
     /// The worker target last recorded. An absence (an idle stop) keeps it.
     recorded: Option<String>,
-    /// Refreshes since the change that is waiting for a hello, the change's
-    /// own refresh counting as 0; `None` when no change waits.
-    waiting: Option<u32>,
-    /// A new worker instance said hello through the relay since the last
-    /// refresh, while a change waited.
-    heard: bool,
+    /// The changes observed so far: a change's number identifies its ask.
+    changes: u32,
 }
 
 impl WorkerWatch {
@@ -303,47 +311,28 @@ impl WorkerWatch {
         self.recorded.as_deref()
     }
 
-    /// A worker's hello came through the relay. `restarted` is `Identity::Restarted`.
-    /// It counts only while a change waits for its hello: a hello that came
-    /// before the change was observed is about the worker before it, so it
-    /// cannot keep the relay (I16: the zombie relay of a restart and a reload).
-    pub(crate) fn hello(&mut self, restarted: bool) {
-        if restarted && self.waiting.is_some() {
-            self.heard = true;
+    /// A table refresh listed `listed` as the extension's worker target. Returns
+    /// how the target compares with the recorded one and, for a change, its
+    /// number (`is_latest`). The new target is recorded either way.
+    pub(crate) fn observe(&mut self, listed: Option<&str>) -> (WorkerTarget, Option<u32>) {
+        let target = worker_target(self.recorded.as_deref(), listed);
+        match target {
+            WorkerTarget::First | WorkerTarget::Changed => {
+                self.recorded = listed.map(str::to_string);
+            }
+            WorkerTarget::Same | WorkerTarget::Absent => {}
+        }
+        if target == WorkerTarget::Changed {
+            self.changes += 1;
+            (target, Some(self.changes))
+        } else {
+            (target, None)
         }
     }
 
-    /// A table refresh listed `listed` as the extension's worker target. Returns
-    /// how the target compares with the recorded one, and the verdict on the
-    /// relay when a change is waiting for its hello. A change starts its wait
-    /// with no hello counted: the hellos before it were taken before it was seen.
-    pub(crate) fn refresh(&mut self, listed: Option<&str>) -> (WorkerTarget, Option<AfterChange>) {
-        let target = worker_target(self.recorded.as_deref(), listed);
-        let verdict = match target {
-            WorkerTarget::First => {
-                self.recorded = listed.map(str::to_string);
-                None
-            }
-            WorkerTarget::Changed => {
-                self.recorded = listed.map(str::to_string);
-                self.waiting = Some(0);
-                self.heard = false;
-                Some(after_change(false, 0))
-            }
-            WorkerTarget::Same | WorkerTarget::Absent => match (self.waiting, listed.is_some()) {
-                (Some(waited), true) => {
-                    let waited = waited + 1;
-                    let verdict = after_change(std::mem::take(&mut self.heard), waited);
-                    self.waiting = match verdict {
-                        AfterChange::Wait => Some(waited),
-                        AfterChange::Keep | AfterChange::Close => None,
-                    };
-                    Some(verdict)
-                }
-                _ => None,
-            },
-        };
-        (target, verdict)
+    /// Whether `change` is the latest one observed (`after_ask`).
+    pub(crate) fn is_latest(&self, change: u32) -> bool {
+        self.changes == change
     }
 }
 
@@ -669,32 +658,6 @@ mod tests {
     }
 
     #[test]
-    fn a_relay_that_a_new_worker_instance_reached_is_kept_across_a_worker_target_change() {
-        // A stopped worker restarted by a delivery: its new instance says hello
-        // through the relay, so the relay is connected to it. Closing it would
-        // fail the calls in flight on its port.
-        assert_eq!(after_change(true, 0), AfterChange::Keep);
-        assert_eq!(
-            after_change(true, CHANGE_GRACE_REFRESHES + 5),
-            AfterChange::Keep
-        );
-    }
-
-    #[test]
-    fn a_relay_no_new_instance_reaches_is_closed_only_after_the_grace() {
-        // A reloaded extension's relay page: the new worker cannot reach it.
-        assert_eq!(after_change(false, 0), AfterChange::Wait);
-        assert_eq!(
-            after_change(false, CHANGE_GRACE_REFRESHES - 1),
-            AfterChange::Wait
-        );
-        assert_eq!(
-            after_change(false, CHANGE_GRACE_REFRESHES),
-            AfterChange::Close
-        );
-    }
-
-    #[test]
     fn the_worker_target_changes_only_when_a_different_one_is_listed() {
         assert_eq!(worker_target(None, Some("w1")), WorkerTarget::First);
         assert_eq!(worker_target(Some("w1"), Some("w1")), WorkerTarget::Same);
@@ -788,125 +751,168 @@ mod tests {
         assert_eq!(openings.len() as u32, MAX_OPENINGS);
     }
 
-    // The worker-target watch, as the table refreshes and the relay's hellos
-    // arrive. `W` is a listed target, `None` a stopped worker.
-    fn refresh(watch: &mut WorkerWatch, listed: Option<&str>) -> Option<AfterChange> {
-        watch.refresh(listed).1
+    // The ask (review cycle 6, I17). A changed worker target asks its relay which
+    // worker it reaches; the answer decides, and no hello does. `ask_of` is the
+    // engine's step for one table refresh: the change's number when it asks.
+    fn ask_of(watch: &mut WorkerWatch, listed: Option<&str>) -> Option<u32> {
+        let (target, change) = watch.observe(listed);
+        change.filter(|_| asks_on(target, true))
     }
 
     #[test]
-    fn a_restart_whose_hello_came_before_the_change_is_observed_is_not_kept_by_that_hello() {
-        // Idle stop (A absent), then a click restarts it as B. B's hello reaches
-        // the engine before the refresh that lists B: that hello is about the
-        // worker before the change, so the change waits for a hello of its own.
+    fn a_restart_is_kept_by_the_answer_to_its_ask_with_no_close() {
+        // I17: an idle stop (A absent), then a click restarts the worker as B.
+        // The relay reaches B; B's hello may have reached the engine before the
+        // table showed B. That hello decides nothing: the ask does, and a live
+        // answer keeps the relay, so nothing in flight on it is failed.
         let mut watch = WorkerWatch::default();
-        refresh(&mut watch, Some("a"));
-        refresh(&mut watch, None);
-        watch.hello(true);
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
         assert_eq!(
-            refresh(&mut watch, Some("b")),
-            Some(AfterChange::Wait),
-            "no hello after the change: one reopen after the grace is the cost"
-        );
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Close));
-    }
-
-    #[test]
-    fn a_restart_whose_hello_comes_after_the_change_is_observed_is_kept() {
-        let mut watch = WorkerWatch::default();
-        refresh(&mut watch, Some("a"));
-        refresh(&mut watch, None);
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
-        watch.hello(true);
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Keep));
-        assert_eq!(
-            refresh(&mut watch, Some("b")),
+            ask_of(&mut watch, Some("a")),
             None,
-            "a kept relay is watched no longer"
+            "the first target asks nothing"
         );
-    }
-
-    #[test]
-    fn a_restart_then_a_reload_in_one_window_closes_the_zombie_relay() {
-        // I16: A absent, a click restarts it as B through relay R, B's hello
-        // reaches the engine, and B reloads at once: C starts. R is a zombie
-        // (it cannot reach C), so no hello can come through it. B's hello was
-        // before the change that is now seen (A to C), so it must not keep R.
-        let mut watch = WorkerWatch::default();
-        refresh(&mut watch, Some("a"));
-        refresh(&mut watch, None);
-        watch.hello(true);
+        assert_eq!(ask_of(&mut watch, None), None, "an absence asks nothing");
+        let change = ask_of(&mut watch, Some("b")).expect("a changed target asks its relay");
         assert_eq!(
-            refresh(&mut watch, Some("c")),
-            Some(AfterChange::Wait),
-            "B's hello, before the change, does not keep the relay"
+            after_ask(Answered::Live, watch.is_latest(change)),
+            AfterAsk::Keep
         );
-        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Wait));
-        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Close));
+        assert_eq!(
+            ask_of(&mut watch, Some("b")),
+            None,
+            "the target stays: no further ask"
+        );
     }
 
     #[test]
-    fn a_reload_seen_by_the_detector_with_no_hello_is_closed_after_the_grace() {
+    fn a_reload_the_detector_sees_closes_the_relay_when_its_ask_is_unanswered() {
+        // The relay's context is gone after a reload (a zombie): identify throws.
         let mut watch = WorkerWatch::default();
-        refresh(&mut watch, Some("a"));
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Close));
+        ask_of(&mut watch, Some("a"));
+        let change = ask_of(&mut watch, Some("b")).expect("a changed target asks");
+        assert_eq!(
+            after_ask(Answered::Unanswered, watch.is_latest(change)),
+            AfterAsk::Close
+        );
     }
 
     #[test]
-    fn two_reloads_in_a_row_keep_nothing_and_each_change_waits_for_its_own_hello() {
-        // The hello between the two reloads is the first new worker's, and
-        // the second reload's change must not inherit it.
+    fn a_restart_then_a_reload_in_one_window_closes_the_zombie_relay_by_its_ask() {
+        // I16: A absent; B restarts through relay R and reloads to C before the
+        // table shows B. The detector sees A to C: its ask goes to R, a zombie,
+        // which cannot answer. B's hello through R, from before the change, is
+        // not an input, so it cannot keep R.
         let mut watch = WorkerWatch::default();
-        refresh(&mut watch, Some("a"));
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
-        watch.hello(true);
-        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Wait));
-        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Wait));
-        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Close));
+        ask_of(&mut watch, Some("a"));
+        ask_of(&mut watch, None);
+        let change = ask_of(&mut watch, Some("c")).expect("a changed target asks");
+        assert_eq!(
+            after_ask(Answered::Unanswered, watch.is_latest(change)),
+            AfterAsk::Close
+        );
     }
 
     #[test]
-    fn a_hello_on_a_freshly_reopened_relay_keeps_nothing_once_no_change_waits() {
+    fn a_restart_seen_then_a_reload_keeps_the_first_relay_and_closes_it_at_the_second() {
         let mut watch = WorkerWatch::default();
-        refresh(&mut watch, Some("a"));
-        refresh(&mut watch, Some("b"));
-        refresh(&mut watch, Some("b"));
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Close));
-        // The engine opens a fresh relay, which reaches the live worker.
-        watch.hello(true);
-        assert_eq!(refresh(&mut watch, Some("b")), None);
+        ask_of(&mut watch, Some("a"));
+        ask_of(&mut watch, None);
+        let first = ask_of(&mut watch, Some("b")).expect("a changed target asks");
+        assert_eq!(
+            after_ask(Answered::Live, watch.is_latest(first)),
+            AfterAsk::Keep
+        );
+        let second = ask_of(&mut watch, Some("c")).expect("a changed target asks");
+        assert_eq!(
+            after_ask(Answered::Unanswered, watch.is_latest(second)),
+            AfterAsk::Close
+        );
     }
 
     #[test]
-    fn a_hello_of_the_same_instance_does_not_keep_a_waiting_relay() {
+    fn a_second_change_while_an_ask_is_outstanding_is_decided_by_its_own_answer() {
+        // The first ask's failure is no verdict on the second change, and the
+        // second change's failure closes the relay.
         let mut watch = WorkerWatch::default();
-        refresh(&mut watch, Some("a"));
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
-        watch.hello(false);
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Close));
+        ask_of(&mut watch, Some("a"));
+        let first = ask_of(&mut watch, Some("b")).expect("a changed target asks");
+        let second = ask_of(&mut watch, Some("c")).expect("a changed target asks");
+        assert_ne!(first, second, "each change has its own number");
+        assert_eq!(
+            after_ask(Answered::Unanswered, watch.is_latest(first)),
+            AfterAsk::Ignore,
+            "an earlier change's failure does not decide"
+        );
+        assert_eq!(
+            after_ask(Answered::Unanswered, watch.is_latest(second)),
+            AfterAsk::Close
+        );
     }
 
     #[test]
-    fn an_idle_stop_is_no_change_and_its_return_under_the_same_id_is_none() {
+    fn a_change_with_no_open_relay_asks_nothing_and_the_reopened_relay_covers_it() {
         let mut watch = WorkerWatch::default();
-        refresh(&mut watch, Some("a"));
-        assert_eq!(refresh(&mut watch, None), None);
-        assert_eq!(refresh(&mut watch, Some("a")), None);
+        watch.observe(Some("a"));
+        let (target, change) = watch.observe(Some("b"));
+        assert_eq!(target, WorkerTarget::Changed);
+        assert!(change.is_some(), "the change is still recorded");
+        assert!(!asks_on(target, false), "no relay is open to ask");
+        assert_eq!(
+            watch.observe(Some("b")).0,
+            WorkerTarget::Same,
+            "the new target is recorded, so the reopened relay's own identify is the only one"
+        );
     }
 
     #[test]
-    fn a_hello_while_the_worker_is_absent_keeps_a_waiting_relay_when_it_is_listed_again() {
-        // A worker that said hello and is not listed yet (its listing is late)
-        // is still the live one; the listing that returns keeps the relay.
+    fn only_a_changed_target_with_an_open_relay_asks() {
+        assert!(asks_on(WorkerTarget::Changed, true));
+        assert!(!asks_on(WorkerTarget::Changed, false));
+        for target in [
+            WorkerTarget::First,
+            WorkerTarget::Same,
+            WorkerTarget::Absent,
+        ] {
+            assert!(
+                !asks_on(target, true),
+                "{target:?} never asks: an absence or a first target must not start a stopped worker (I15)"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ask_racing_an_idle_stop_is_decided_by_its_answer_and_an_absence_asks_nothing() {
         let mut watch = WorkerWatch::default();
-        refresh(&mut watch, Some("a"));
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
-        assert_eq!(refresh(&mut watch, None), None);
-        watch.hello(true);
-        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Keep));
+        ask_of(&mut watch, Some("a"));
+        let change = ask_of(&mut watch, Some("b")).expect("a changed target asks");
+        assert_eq!(
+            watch.observe(None),
+            (WorkerTarget::Absent, None),
+            "the worker stopped while its ask was out: an absence asks nothing"
+        );
+        assert_eq!(
+            after_ask(Answered::Unanswered, watch.is_latest(change)),
+            AfterAsk::Close,
+            "the ask is still the latest one, so its failure closes the zombie"
+        );
+        assert_eq!(
+            ask_of(&mut watch, Some("b")),
+            None,
+            "a return under the same id is no change"
+        );
+    }
+
+    #[test]
+    fn a_failed_ask_leads_to_one_close_and_no_repeat_while_the_target_stays() {
+        let mut watch = WorkerWatch::default();
+        ask_of(&mut watch, Some("a"));
+        let change = ask_of(&mut watch, Some("b")).expect("a changed target asks");
+        assert_eq!(
+            after_ask(Answered::Unanswered, watch.is_latest(change)),
+            AfterAsk::Close
+        );
+        for _ in 0..3 {
+            assert_eq!(ask_of(&mut watch, Some("b")), None, "no repeat ask");
+        }
     }
 }
