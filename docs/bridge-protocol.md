@@ -459,10 +459,13 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   page, the side panel) is not reported: the bridge is in the worker only.
   Such a debugger's tab is not kept painted until Phase 5 bridges the
   pages.
-- An unbridged extension's debugger is not reported. In this phase that
-  is every store-installed and every "Load unpacked…" extension; only the
-  test control's `load` is bridged, so only the test extension's debugger
-  keeps its tab painted.
+- An unbridged extension's debugger is not reported. From Phase 5 on every
+  installed extension is bridged when it is loaded: a store install
+  (`unpack_crx`), "Load unpacked…" and the test control's `load` all go
+  through `ExtensionManager::load_bridged`, and the first listing after a
+  start bridges every unpacked extension under the profile
+  (`bridge_into`). An extension that cannot take the bridge is switched
+  off, with a message.
 - A module worker (`"type": "module"`) gets a loader of two static
   imports, which is unit-tested as text only; no module-worker extension
   has run.

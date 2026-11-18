@@ -299,8 +299,9 @@ Ninja on `PATH`:
   the engine talks to a relay page with `Runtime.evaluate`, as the
   manager talks to `chrome://extensions`. Use the message id
   `execute_dev_tools_method(0, …)` returns. Names in an extension's
-  root must not start with `_`. Only what `NAUTILUS_TEST_CONTROL`
-  loads is bridged until Phase 5 of the side-panel plan.
+  root must not start with `_`. Every extension is bridged when it loads
+  (store install, "Load unpacked…", `NAUTILUS_TEST_CONTROL`'s `load`:
+  `ExtensionManager::load_bridged`), from Phase 5 of the side-panel plan on.
 - **A tab a debugger is on is painted.** The bridge reports each
   bridged extension's `chrome.debugger` attach and detach, by tab id or
   by `{targetId}` (`debugger.attached` and `debugger.detached`,

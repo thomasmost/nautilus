@@ -300,7 +300,7 @@ mod stub {
 #[cfg(any(windows, target_os = "macos"))]
 mod native {
     use std::cell::{Cell, RefCell};
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
@@ -327,6 +327,7 @@ mod native {
     use osmena_core::{EngineEvent, Extension, ExtensionSource, Favicon, TabId};
 
     use super::UnpackQueue;
+    use crate::bridge::pattern::Grants;
     use crate::bridge::{self, Bridge};
     use crate::crx;
     use crate::delegate::DelegateState;
@@ -432,6 +433,8 @@ mod native {
         /// Its worker is wrapped by the bridge's loader.
         bridged: bool,
         enabled: bool,
+        /// Where Chromium loads it from.
+        path: PathBuf,
     }
 
     struct Inner {
@@ -470,6 +473,9 @@ mod native {
         /// A listing's answer came during the hold; it is read again when the
         /// hold ends, so that the list the engine acts on is the one after it.
         list_held: bool,
+        /// Extensions whose directory was already looked at for the bridge
+        /// this run (`on_list`), so each is bridged once per run.
+        checked: HashSet<String>,
     }
 
     /// The management browser (never shown) and what it learnt. One per
@@ -531,6 +537,7 @@ mod native {
                     control: test_control(engine_dir),
                     list_hold: None,
                     list_held: false,
+                    checked: HashSet::new(),
                 }),
             });
             let mut client = ManagerClient::new(
@@ -619,7 +626,7 @@ mod native {
 
         pub(crate) fn install(self: &Rc<Self>, source: ExtensionSource) {
             match source {
-                ExtensionSource::Directory(path) => self.load_unpacked(path),
+                ExtensionSource::Directory(path) => self.load_bridged(path),
                 ExtensionSource::AskForDirectory => self.ask_for_directory(),
                 ExtensionSource::Store { id } => self.install_from_store(&id),
             }
@@ -649,27 +656,39 @@ mod native {
             self.run(LOAD_SCRIPT.to_string(), Request::Load);
         }
 
-        /// Copy the unpacked extension at `source` into the profile, put
-        /// the bridge into the copy, and load the copy. Phase 1 reaches
-        /// this only from the test control (`poll_control`); Phase 5
-        /// routes every install through it.
+        /// Load the extension the user keeps in `source`: copy it under
+        /// the profile, put the bridge into the copy, load the copy. The
+        /// user's folder is never written to; loading the same folder
+        /// again replaces the copy, so Chromium reloads it. A directory
+        /// already under the profile is bridged and loaded where it is
+        /// (`install::bridge_source`). The copying runs on a worker thread,
+        /// like unpacking, and `poll_unpacked` loads what it finished. "Load
+        /// unpacked…", `ExtensionSource::Directory` and the test control's
+        /// `load` command all come here.
         pub(crate) fn load_bridged(&self, source: PathBuf) {
-            // Copying is file work on the UI thread: fine for a small
-            // extension, and Phase 5 moves it to the unpacking thread.
-            let version = bridge::install::version_of(&crate::bridge::worker_script());
-            match bridge::install::bridge_source(&source, &self.store_dir, &version) {
-                Ok((copy, bridged)) => {
-                    log::info!(
-                        "extension at {} copied to {} (bridged: {bridged:?})",
-                        source.display(),
-                        copy.display()
-                    );
-                    self.load_unpacked(copy);
-                }
-                Err(e) => self.report_error(format!(
-                    "cannot load the extension in {}: {e}",
-                    source.display()
-                )),
+            let store_dir = self.store_dir.clone();
+            let queue = self.unpacked.clone();
+            let name = source.display().to_string();
+            let label = name.clone();
+            let spawned = std::thread::Builder::new()
+                .name("NautilusUnpack".to_string())
+                .spawn(move || {
+                    let version = bridge::install::version_of(&crate::bridge::worker_script());
+                    let outcome = bridge::install::bridge_source(&source, &store_dir, &version)
+                        .map(|(copy, bridged)| {
+                            log::info!(
+                                "extension at {} copied to {} (bridged: {bridged:?})",
+                                source.display(),
+                                copy.display()
+                            );
+                            copy
+                        });
+                    queue.push(name, outcome);
+                });
+            if let Err(e) = spawned {
+                self.report_error(format!(
+                    "cannot start copying the extension in {label}: {e}"
+                ));
             }
         }
 
@@ -1083,6 +1102,22 @@ mod native {
                             {
                                 log::warn!("cannot delete {}: {e}", dir.display());
                             }
+                            // So is the profile's copy of a folder the user loaded.
+                            let copy = self
+                                .inner
+                                .borrow()
+                                .known
+                                .iter()
+                                .find(|known| known.id == id)
+                                .map(|known| known.path.clone());
+                            if let Some(copy) = copy
+                                && copy != self.store_dir
+                                && copy.starts_with(&self.store_dir)
+                                && copy.is_dir()
+                                && let Err(e) = std::fs::remove_dir_all(&copy)
+                            {
+                                log::warn!("cannot delete {}: {e}", copy.display());
+                            }
                         }
                     }
                     self.list();
@@ -1109,6 +1144,7 @@ mod native {
             let mut known = Vec::new();
             let mut extensions = Vec::new();
             let mut helper_loaded = false;
+            let mut granted: Vec<(String, Grants)> = Vec::new();
             for item in items {
                 let text = |key: &str| {
                     item.get(key)
@@ -1135,17 +1171,66 @@ mod native {
                     read_manifest(Path::new(&path))
                 };
                 let name = text("name");
-                let action = manifest.facts.action.as_ref();
+                let dir = PathBuf::from(&path);
                 let enabled = text("state") == "ENABLED";
+                if text("location") == "UNPACKED" && !path.is_empty() {
+                    let first_look = self.inner.borrow_mut().checked.insert(id.clone());
+                    if !dir.starts_with(&self.store_dir) {
+                        // Loaded by an earlier build from the user's own folder,
+                        // which is never written to: run it from a copy instead.
+                        // Without a `key` its id follows its path, so the old one
+                        // is removed, and what it stored goes with it.
+                        if first_look {
+                            if !manifest.has_key {
+                                self.report_error(format!(
+                                    "{name} now runs from a copy inside the profile; its id changed and its stored data did not move"
+                                ));
+                                self.uninstall(&id);
+                            }
+                            self.load_bridged(dir);
+                        }
+                        continue;
+                    }
+                    if first_look {
+                        match bridge_into(&dir) {
+                            Ok(true) => {
+                                log::info!("put the bridge into extension {id}; reloading it");
+                                self.run(
+                                    RELOAD_SCRIPT.replace("__ID__", &js_string(&id)),
+                                    Request::Enable,
+                                );
+                            }
+                            Ok(false) => {}
+                            // An extension that cannot carry the bridge must not
+                            // run: two of Chromium's own tab functions crash the
+                            // browser.
+                            Err(e) => {
+                                self.report_error(format!(
+                                    "{name} was switched off: the bridge could not be put into it ({e})"
+                                ));
+                                if enabled {
+                                    self.set_enabled(&id, false);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+                let bridged = manifest
+                    .facts
+                    .worker
+                    .as_deref()
+                    .is_some_and(bridge::rewrite::is_loader);
+                if enabled && bridged {
+                    granted.push((id.clone(), manifest.grants.clone()));
+                }
+                let action = manifest.facts.action.as_ref();
                 known.push(Known {
                     id: id.clone(),
                     popup: action.and_then(|a| a.popup.clone()),
-                    bridged: manifest
-                        .facts
-                        .worker
-                        .as_deref()
-                        .is_some_and(bridge::rewrite::is_loader),
+                    bridged,
                     enabled,
+                    path: dir,
                 });
                 extensions.push(Extension {
                     id,
@@ -1194,6 +1279,9 @@ mod native {
                 self.load_unpacked(self.store_dir.join("nautilus-helper"));
             }
             self.bridge.sync(helper_loaded, &bridged);
+            if let Some(hub) = self.delegate.hub() {
+                hub.set_extensions(granted);
+            }
             self.delegate
                 .push(EngineEvent::ExtensionsChanged(extensions));
         }
@@ -1202,6 +1290,26 @@ mod native {
     /// A JavaScript string literal.
     fn js_string(text: &str) -> String {
         serde_json::Value::String(text.to_string()).to_string()
+    }
+
+    /// Reload an extension after its files changed on disk.
+    const RELOAD_SCRIPT: &str = r#"new Promise(function(done){
+  chrome.developerPrivate.reload(__ID__, {failQuietly:true}, function(){
+    var err = chrome.runtime.lastError;
+    done({error: err ? err.message : null});
+  });
+})"#;
+
+    /// Put the bridge into `dir` if it is not there at the current version
+    /// (`install::ensure_bridged`: the marker names the version of the bridge
+    /// script). Returns whether the directory changed. A directory without a
+    /// worker is marked too, so it is not looked at again until the script
+    /// changes.
+    fn bridge_into(dir: &Path) -> Result<bool, String> {
+        let script = crate::bridge::worker_script();
+        bridge::install::ensure_bridged(dir, &bridge::install::version_of(&script), |at| {
+            bridge::install::rewrite_in_place(at, &[]).map(|_| ())
+        })
     }
 
     /// Unpack a store CRX into `dir` (replacing what is there) and write
@@ -1235,6 +1343,8 @@ mod native {
         );
         let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
         std::fs::write(&manifest_path, text).map_err(|e| format!("writing the manifest: {e}"))?;
+        // The bridge goes in before Chromium ever loads the directory.
+        bridge_into(dir)?;
         Ok(())
     }
 
@@ -1243,6 +1353,10 @@ mod native {
     struct ManifestInfo {
         facts: super::ManifestFacts,
         icon: Option<Favicon>,
+        /// What the bridge lets the extension's contexts see.
+        grants: Grants,
+        /// The manifest pins its id with a `key`.
+        has_key: bool,
     }
 
     /// The manifest's facts and the decoded icon of the extension in
@@ -1259,7 +1373,12 @@ mod native {
             .icon_path
             .as_deref()
             .and_then(|p| decode_png(&dir.join(p.trim_start_matches('/'))));
-        ManifestInfo { facts, icon }
+        ManifestInfo {
+            facts,
+            icon,
+            grants: Grants::from_manifest(&manifest),
+            has_key: manifest.get("key").is_some(),
+        }
     }
 
     /// Decode a PNG file to straight RGBA8, whatever its colour type.
@@ -1499,7 +1618,7 @@ mod native {
                     .and_then(|paths| paths.clone().into_iter().next())
                     .filter(|path| !path.is_empty());
                 if let Some(path) = picked {
-                    self.manager.load_unpacked(PathBuf::from(path));
+                    self.manager.load_bridged(PathBuf::from(path));
                 }
             }
         }
