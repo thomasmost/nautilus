@@ -785,14 +785,14 @@ What changed:
 
 What the runs show (final build = the grace tree; all exit 0):
 
-- `spike`, twice (`review4-spike-run1.out`, `-run2`): 50 PASS each; unfocused
+- `spike`, twice (`review4-spike-run1.out`, `review4-spike-run2.out`): 50 PASS each; unfocused
   202 calls, max 67 ms, p95 64 ms in run 2.
-- `pump`, twice (`review4-pump-run1.out`, `-run2`): 7 PASS each; 202 calls, max 72 ms
+- `pump`, twice (`review4-pump-run1.out`, `review4-pump-run2.out`): 7 PASS each; 202 calls, max 72 ms
   in both, p95 63 ms; the debugged tab logged hidden before the attach, shown at
   it, and hidden again after the detach. Max is the slowest call of all kinds,
   so `Input.dispatchMouseEvent` is at most 72 ms.
 - `reload` (`review4-reload-run1.out`): path = sync.
-- `zombie`, three times (`review4-zombie-run1.out`, `-run2`, `-run3`): the detector
+- `zombie`, three times (`review4-zombie-run1.out`, `review4-zombie-run2.out`, `review4-zombie-run3.out`): the detector
   saw the reload, the relay reopened, the hello forgot the tab, the tab is hidden
   again; path = hello. `relay_eval`: `chrome.runtime.id` is `undefined` in the
   zombie page; `getManifest()` throws `Extension context invalidated.`.
@@ -894,9 +894,9 @@ What the runs show (final build, `review3-final-*` and the sweeps below):
   nothing for 12 s, a click refused (`review3-final-broken.out`, status 0). Before
   the change the same provocation opened it 229 times in 60 s, no give-up
   (`review3-broken-before.out`, status 1 as expected).
-- `spike`, twice (`review3-final-spike1.out`, `-spike2`, status 0 each): 50 PASS,
+- `spike`, twice (`review3-final-spike1.out`, `review3-final-spike2.out`, status 0 each): 50 PASS,
   0 FAIL each; unfocused 202 calls, max 72 and 69 ms, p95 63 ms, no timeout.
-- `pump`, twice (`review3-final-pump1.out`, `-pump2`, status 0 each): 7 PASS,
+- `pump`, twice (`review3-final-pump1.out`, `review3-final-pump2.out`, status 0 each): 7 PASS,
   0 FAIL each; 202 calls, max 78 and 86 ms, p95 63 to 64 ms, no timeout.
 - Stub runs (`review3-stub-*`): a crash (status 3 → FAIL exit), a log with
   `already mutably borrowed` (FAIL on the marker), a healthy exit (PASS).

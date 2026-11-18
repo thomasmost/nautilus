@@ -441,7 +441,7 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   refresh), and the relay's port event (`gone`, which asks nothing). In the
   cycle 3 runs the list showed the extension off during the reload and `sync`
   forgot its debuggers (`review3-final-reload-*`, `review3-reload-after-attempt3.out`
-  to `-attempt7`). The case the list does not show (the relay page survives
+  to `review3-reload-after-attempt7.out`). The case the list does not show (the relay page survives
   with no port event and the list is not off) was the zombie of cycle 3
   (`review3-reload-before-attempt1.out`, `review3-reload-after-attempt2.out`). Cycle 4
   reaches it on purpose with the list held (`run.sh zombie`): the worker target
