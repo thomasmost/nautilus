@@ -11,12 +11,12 @@
 # Each launch is judged by the browser, not only by the driver. A launch
 # fails when the browser exits with a non-zero status (a signal included:
 # 128 plus its number), when it is still up 120 s after its --exit-after
-# (the script then kills it, and the launch fails as "did not exit"), or
+# (the script then kills it, and the launch fails as "still up"), or
 # when its log names a crash or a leak: a Rust panic, a fatal runtime error,
-# a RefCell borrowed twice, or browsers still open at shutdown. The browser
-# is expected to end by itself at --exit-after; the script never kills a
-# browser that is in time. A failed launch ends the driver and skips the
-# launches after it.
+# a RefCell borrowed twice ("already borrowed" or "already mutably borrowed"),
+# or browsers still open at shutdown. The browser is expected to end by itself
+# at --exit-after; the script never kills a browser that is in time. A failed
+# launch ends the driver and skips the launches after it.
 #
 # Prints the driver's PASS and FAIL lines, then a RESULT line that names the
 # driver's and the launches' verdicts. Exits 0 only when the driver passed
@@ -35,8 +35,8 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 app="$root/target/release/Nautilus.app/Contents/MacOS/Nautilus"
 [ -x "$app" ] || { echo "no bundle: run cargo xtask bundle-mac first" >&2; exit 2; }
 case "$mode" in
-  spike|pump) ;;
-  *) echo "usage: $0 [spike|pump]" >&2; exit 2 ;;
+  spike|pump|reload|broken|stop) ;;
+  *) echo "usage: $0 [spike|pump|reload|broken|stop]" >&2; exit 2 ;;
 esac
 
 # Set before the trap so that cleanup can read them whatever happened.
@@ -78,14 +78,30 @@ rm -rf "$profile_dir"
 # owns or that group or others can write (NAUTILUS_TEST_CONTROL).
 mkdir -p -m 700 "$work/ctl-1" "$work/ctl-2"
 
-python3 "$root/ci/side-panel/driver.py" "$mode" "$work" "$root/ci/side-panel/ext" > "$work/driver.log" 2>&1 &
+python3 "$root/ci/side-panel/driver.py" "$mode" "$work" "$root/ci/side-panel/ext" "$profile_dir" > "$work/driver.log" 2>&1 &
 driver=$!
+
+# launched_still_up <pid> <path>: true when <pid> is up, is not a zombie, and
+# its command line starts with <path>, the browser this script launched. A pid
+# that has ended, or was reused by another process, is not ours to kill.
+launched_still_up() {
+  state=$(ps -o stat= -p "$1" 2>/dev/null) || return 1
+  case "$state" in
+    ''|Z*) return 1 ;;
+  esac
+  cmdline=$(ps -o command= -p "$1" 2>/dev/null) || return 1
+  case "$cmdline" in
+    "$2"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # launch <n> <seconds>: one run of the browser on two tabs, with Finder
 # brought to the front six seconds in so that its window is not focused.
 launch() {
   n=$1
-  grace=$(( $2 + 120 ))
+  allow=120   # how long a launch may stay up after its --exit-after
+  grace=$(( $2 + allow ))
   touch "$work/run-$n.started"
   ( sleep 6; open -a Finder ) &
   finder=$!
@@ -93,16 +109,19 @@ launch() {
     "$app" --profile "$profile" --exit-after "$2" https://example.com/ https://example.org/ \
     > "$work/run-$n.log" 2>&1 &
   app_pid=$!
-  # The watchdog: only a browser still up at $grace seconds is killed. Its
-  # marker file says so, which is how a kill by this script differs from the
-  # browser's own exit. TERM (from cleanup or from the wait below) stops it,
-  # and its sleep with it.
+  # The watchdog: only a browser still up at $grace seconds is killed. The
+  # browser may end by itself as the sleep does, so before the kill it must
+  # still be this launch (launched_still_up), and the marker file is written
+  # only when the kill itself succeeds: the parent reads "hung" from that
+  # marker alone, never from the watchdog's intent. TERM (from cleanup or from
+  # the wait below) stops it, and its sleep with it.
   (
     sleep "$grace" & s=$!
     trap 'kill "$s" 2>/dev/null; exit 0' TERM
     wait "$s" || exit 0
-    touch "$work/run-$n.hung"
-    kill -KILL "$app_pid" 2>/dev/null || true
+    if launched_still_up "$app_pid" "$app" && kill -KILL "$app_pid" 2>/dev/null; then
+      touch "$work/run-$n.hung"
+    fi
   ) &
   watchdog=$!
   status=0
@@ -115,13 +134,15 @@ launch() {
   finder=""
 
   if [ -e "$work/run-$n.hung" ]; then
-    echo "FAIL launch $n: the browser was still up $grace s after its --exit-after $2; the script killed it"
+    echo "FAIL launch $n: the browser was still up $allow s after its --exit-after $2; the script killed it"
     failed=1
   elif [ "$status" -ne 0 ]; then
     echo "FAIL launch $n: the browser exited with status $status (128 plus a signal number for a signal)"
     failed=1
   fi
-  for marker in "panicked at" "fatal runtime error" "already borrowed" "browser(s) still open at shutdown"; do
+  # Rust's RefCell says "already borrowed" or "already mutably borrowed",
+  # depending on which borrow was taken; both are the same defect.
+  for marker in "panicked at" "fatal runtime error" "already borrowed" "already mutably borrowed" "browser(s) still open at shutdown"; do
     if grep -qF "$marker" "$work/run-$n.log"; then
       echo "FAIL launch $n: its log has '$marker' (run-$n.log)"
       failed=1
@@ -142,6 +163,15 @@ case "$mode" in
     ;;
   pump)
     launch 1 "${PUMP_SECONDS:-160}"
+    ;;
+  reload)
+    launch 1 "${RELOAD_SECONDS:-75}"
+    ;;
+  broken)
+    launch 1 "${BROKEN_SECONDS:-110}"
+    ;;
+  stop)
+    launch 1 "${STOP_SECONDS:-100}"
     ;;
 esac
 

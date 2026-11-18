@@ -9,6 +9,7 @@ with NAUTILUS_TEST_CONTROL=<work>/ctl-<n>, touching <work>/run-<n>.started
 before each launch. Prints one PASS or FAIL line per check; exits 0 when
 every check passed.
 """
+import glob
 import json
 import os
 import re
@@ -18,6 +19,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = 47613
+PROFILE = ''   # the throwaway profile's directory (argv 4), for the broken-relay mode
 URLS = {'https://example.com/', 'https://example.org/'}
 records = []   # what the extension posted, in arrival order
 cfg = {}       # what the extension reads from /cfg
@@ -54,6 +56,14 @@ class Handler(BaseHTTPRequestHandler):
             records.append(record)
             with open(os.path.join(WORK, 'results.jsonl'), 'a') as out:
                 out.write(json.dumps(record) + '\n')
+            if record.get('kind') == 'reloading':
+                # The worker that asked to reload is answered only now, so
+                # the worker the reload starts reads the flags set here: the
+                # reload is not repeated, and the new worker checks whether
+                # its debugger session on the tab survived it.
+                cfg['provokeReload'] = False
+                cfg['provokeStopCheck'] = True
+                cfg['stopTab'] = (record.get('data') or {}).get('tabId')
         self._ok()
 
 
@@ -378,10 +388,192 @@ def pump(ext):
     latency_result('pump', 0, 140, 1)
 
 
+def reload_provocation(ext):
+    """(I10) The worker attaches a debugger to the background tab, then the
+    extension reloads itself (chrome.runtime.reload). The engine must show the
+    tab for the attach; after the reload, with no debugger left on it, the tab
+    must be hidden again. Whatever the engine logs is kept in run-1.log."""
+    with lock:
+        cfg['provokeReload'] = True
+    check('run 1 started', wait_file(os.path.join(WORK, 'run-1.started'), 60))
+    control = Control(os.path.join(WORK, 'ctl-1'))
+    control.send({'load': ext})
+    start = wait_for(0, 'sw-start', 40)
+    check('reload: the worker started', start is not None)
+    provoke = wait_for(0, 'provoke', 60)
+    check('reload: the worker attached its debugger to the background tab',
+          bool(provoke and provoke.get('attached')), provoke)
+    if not wait_for(0, 'reloading', 20):
+        check('reload: the worker asked to reload', False)
+        return
+    mark = count()
+    # The engine's reaction to the reload comes after the attach's shown line,
+    # which is logged before the reload: the log is read from there on (a
+    # length taken after the reload could already be past the reaction).
+    log_lines = engine_lines(1)
+    shown_at = [(i, re.search(r'bridge: TabId\((\d+)\) \(Chromium tab (\d+)\) was hidden; shown for the debugger of', line))
+                for i, line in enumerate(log_lines)]
+    shown_at = [(i, m) for i, m in shown_at if m]
+    check('reload: the engine showed the tab for the attach',
+          bool(shown_at), None if shown_at else 'no "was hidden; shown" line before the reload')
+    if not shown_at:
+        return
+    lines_at_reload = shown_at[-1][0] + 1
+    shown = [shown_at[-1][1]]
+    tab, chromium = shown[-1].group(1), shown[-1].group(2)
+    # The new worker's record can precede `mark` (the reloading record is
+    # answered before the reload), so it is found by its run id, not by count.
+    old_run = (start or {}).get('run')
+    new_start = wait_for(0, 'sw-start', 40, lambda d: d.get('run') != old_run)
+    check('reload: the extension restarted with a new worker',
+          new_start is not None, None if new_start else 'no sw-start after the reload')
+    # The new worker's own check (`after-stop`, sent once it runs) is Chromium's
+    # answer: a debugger session that survived the reload keeps the tab
+    # painted, and one that ended hides it again. The engine's log is read
+    # after the answer, and a little longer for the engine to act on it.
+    answer = wait_for(0, 'after-stop', 60, lambda d: d.get('run') != old_run)
+    time.sleep(10)
+    targets = control.devtools('Target.getTargets')
+    infos = ((targets or {}).get('result') or {}).get('targetInfos') or []
+    for t in infos:
+        if (start or {}).get('id') and (start or {}).get('id') in t.get('url', ''):
+            print('INFO target after the reload: type %s %s' % (t.get('type'), t.get('url')), flush=True)
+    after = engine_lines(1)[lines_at_reload:]
+    for line in after:
+        if 'bridge' in line:
+            print('INFO   ' + line, flush=True)
+    detaches = since(0, 'event', lambda d: d.get('name') == 'debugger.onDetach')
+    print('INFO debugger.onDetach reports from any worker: %d %s' % (
+        len(detaches), [d['data'].get('reason') for d in detaches]), flush=True)
+    print('INFO the engine logged the page loss after the reload: %s' % any('is gone' in line for line in after), flush=True)
+    # Two lines say a tab is hidden again: "hidden again" when the last
+    # debugger's detach is reported, "has no debugger left" when the engine
+    # forgets the extension's debuggers (its relay was closed, or its worker
+    # instance was found to have ended its sessions).
+    hidden_again = 'bridge: TabId(%s) (Chromium tab %s) hidden again: no debugger is left on it' % (tab, chromium)
+    left = 'bridge: TabId(%s) has no debugger left' % tab
+    hidden = any(hidden_again in line or left in line for line in after)
+    if not check('reload: the new worker checked its debugger session on the tab', answer is not None):
+        return
+    print('INFO after the reload, the new worker: debugger.sendCommand on Chromium tab %s %s%s' % (
+        chromium, 'answered' if answer.get('ok') else 'failed', '' if answer.get('ok') else ' (' + str(answer.get('error')) + ')'), flush=True)
+    if answer.get('ok'):
+        check('reload: the session survived the reload, so the engine keeps the tab painted', not hidden)
+    else:
+        check('reload (I10): the session ended with the reload, so the tab is hidden again', hidden,
+              'no "%s" or "%s" line after the reload' % (hidden_again, left))
+
+
+def broken_relay(ext):
+    """(I11) The loaded extension's stored relay page is replaced, inside the
+    throwaway profile, with a page that has no relay, and the relay is closed.
+    Every opening then fails its first poll and is closed again. The engine
+    must open the relay a bounded number of times, log the give-up once, open
+    nothing more for 12 s after it, refuse a click for the extension, and the
+    browser must still exit by itself (run.sh judges the exit)."""
+    check('run 1 started', wait_file(os.path.join(WORK, 'run-1.started'), 60))
+    control = Control(os.path.join(WORK, 'ctl-1'))
+    control.send({'load': ext})
+    start = wait_for(0, 'sw-start', 40)
+    check('broken: the worker started', start is not None)
+    ext_id = (start or {}).get('id') or ''
+    if not check('broken: the relay became ready', wait_text(1, 'bridge: page %s ready' % ext_id, 40)):
+        return
+    copies = glob.glob(os.path.join(PROFILE, 'chromium', 'extensions', 'unpacked-ext-*', 'nautilus-bridge', 'relay.html'))
+    if not check('broken: the stored copy of the relay page is in the throwaway profile', len(copies) == 1, copies):
+        return
+    with open(copies[0], 'w') as f:
+        f.write('<!doctype html><title>damaged</title>\n')
+    mark = len(engine_lines(1))
+    answer = control.devtools('Target.getTargets')
+    infos = ((answer or {}).get('result') or {}).get('targetInfos') or []
+    relays = [t for t in infos if ext_id in t.get('url', '') and 'relay.html' in t.get('url', '')]
+    if not check('broken: DevTools lists the relay page to close', len(relays) == 1, len(relays)):
+        return
+    closed = control.devtools('Target.closeTarget', {'targetId': relays[0]['targetId']}, secs=10)
+    check('broken: Target.closeTarget closed the relay page',
+          ((closed or {}).get('result') or {}).get('success') is True, closed)
+    opening = 'opening at chrome-extension://%s/nautilus-bridge/relay.html' % ext_id
+    giving_up = 'giving up'
+    end = time.time() + 60
+    while time.time() < end and not any(giving_up in line for line in engine_lines(1)[mark:]):
+        time.sleep(0.5)
+    lines = engine_lines(1)[mark:]
+    openings = [line for line in lines if opening in line]
+    gave_up = [line for line in lines if giving_up in line]
+    print('INFO broken: %d opening(s) of the damaged relay before the give-up line; %d give-up line(s)' % (
+        len(openings), len(gave_up)), flush=True)
+    check('broken (I11): the relay was opened a bounded number of times (1 to 6)', 1 <= len(openings) <= 6, len(openings))
+    check('broken (I11): the engine logged the give-up once', len(gave_up) == 1, len(gave_up))
+    quiet_from = len(engine_lines(1))
+    time.sleep(12)
+    later = [line for line in engine_lines(1)[quiet_from:] if opening in line]
+    check('broken (I11): no opening for 12 s after the give-up', not later, len(later))
+    mark_click = len(engine_lines(1))
+    control.send({'click': ext_id})
+    time.sleep(3)
+    click_lines = [line for line in engine_lines(1)[mark_click:] if 'TEST HOOK' in line and 'click on' in line]
+    check('broken (I11): a click for the extension is refused (not sent)',
+          bool(click_lines) and all('not sent' in line for line in click_lines), click_lines)
+
+
+def stop_provocation(ext):
+    """(I10, identity) The worker debugs the background tab; the driver stops
+    it over DevTools (ServiceWorker.stopAllWorkers). The engine restarts the
+    worker through the relay to learn who it is, and the restarted worker
+    reports whether its own debugger session survived the stop. The engine
+    must agree with Chromium: a surviving session keeps the tab painted, a
+    session that ended hides it again."""
+    with lock:
+        cfg['provokeStop'] = True
+    check('run 1 started', wait_file(os.path.join(WORK, 'run-1.started'), 60))
+    control = Control(os.path.join(WORK, 'ctl-1'))
+    control.send({'load': ext})
+    start = wait_for(0, 'sw-start', 40)
+    check('stop: the worker started', start is not None)
+    ready = wait_for(0, 'stop-ready', 60)
+    check('stop: the worker attached its debugger to the background tab',
+          bool(ready and ready.get('attached')), ready)
+    if not (ready and ready.get('attached')):
+        return
+    tab = ready['tabId']
+    shown = [line for line in engine_lines(1) if 'was hidden; shown for the debugger of' in line and '(Chromium tab %s)' % tab in line]
+    check('stop: the engine showed the tab for the attach', bool(shown), None if shown else 'no shown line')
+    with lock:
+        cfg['provokeStop'] = False
+        cfg['provokeStopCheck'] = True
+        cfg['stopTab'] = tab
+    mark = count()
+    lines_at_stop = len(engine_lines(1))
+    control.devtools('ServiceWorker.enable', secs=5)
+    stopped = control.devtools('ServiceWorker.stopAllWorkers', secs=5)
+    check('stop: ServiceWorker.stopAllWorkers was answered', stopped is not None, stopped)
+    after = wait_for(mark, 'after-stop', 60)
+    check('stop: the engine restarted the worker and its check ran', after is not None)
+    if after is None:
+        return
+    time.sleep(8)
+    print('INFO after the stop, the restarted worker: debugger.sendCommand on Chromium tab %s %s%s' % (
+        tab, 'answered' if after.get('ok') else 'failed', '' if after.get('ok') else ' (' + str(after.get('error')) + ')'), flush=True)
+    after_lines = engine_lines(1)[lines_at_stop:]
+    for line in after_lines:
+        if 'bridge' in line:
+            print('INFO   ' + line, flush=True)
+    restarted = any('runs a new worker instance' in line for line in after_lines)
+    check('stop (identity): the engine learned that the worker was started again', restarted)
+    tab_name = re.search(r'TabId\((\d+)\)', shown[-1]).group(0) if shown else 'TabId(?)'
+    left = any(tab_name + ' has no debugger left' in line for line in after_lines)
+    if after.get('ok'):
+        check('stop: the session survived the stop, so the engine keeps the tab painted', not left)
+    else:
+        check('stop: the session ended with the stop, so the engine hid the tab again', left)
+
+
 if __name__ == '__main__':
     mode, WORK, extension = sys.argv[1], sys.argv[2], sys.argv[3]
+    PROFILE = sys.argv[4] if len(sys.argv) > 4 else ''
     server = ThreadingHTTPServer(('127.0.0.1', PORT), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    {'spike': spike, 'pump': pump}[mode](extension)
+    {'spike': spike, 'pump': pump, 'reload': reload_provocation, 'broken': broken_relay, 'stop': stop_provocation}[mode](extension)
     print('RESULT ' + ('all checks passed' if not failures else '%d check(s) failed: %s' % (len(failures), '; '.join(failures))), flush=True)
     sys.exit(1 if failures else 0)

@@ -28,7 +28,53 @@ chrome.action.onClicked.addListener((tab) => {
 });
 
 post('sw-start', { run: RUN, id: chrome.runtime.id, bridge: self.__nautilusTransport || null, script: self.location.pathname });
-config().then((cfg) => { if (cfg.latencyAtStart) { latency(); } });
+config().then((cfg) => {
+  if (cfg.latencyAtStart) { latency(); }
+  if (cfg.provokeReload) { provokeReload(); }
+  if (cfg.provokeStop) { provokeStop(); }
+  if (cfg.provokeStopCheck) { afterStop(cfg.stopTab); }
+});
+
+// I10 (identity, by a stop): this worker attaches a debugger to the background
+// tab and reports it. The driver then stops the worker over DevTools; the
+// engine restarts it through the relay to ask who it is, and the restarted
+// worker checks whether its own debugger session survived the stop.
+async function provokeStop() {
+  const tabs = await timed(RUN, 'provoke.tabs.query', () => chrome.tabs.query({}).then((list) => list.map(slim)));
+  const background = (tabs.result || []).find((t) => !t.active);
+  if (!background) { await post('stop-ready', { run: RUN, error: 'no background tab' }); return; }
+  const attach = await timed(RUN, 'provoke.debugger.attach', () => chrome.debugger.attach({ tabId: background.id }, '1.3').then(() => 'attached'), { tabId: background.id });
+  await post('stop-ready', { run: RUN, tabId: background.id, attached: attach.ok === true, error: attach.error || null });
+}
+
+async function afterStop(tabId) {
+  const target = { tabId: tabId };
+  const check = await timed(RUN, 'afterstop.debugger.sendCommand', () =>
+    chrome.debugger.sendCommand(target, 'Runtime.evaluate', { expression: 'location.href', returnByValue: true }).then((r) => r.result.value), { tabId: tabId });
+  await post('after-stop', { run: RUN, tabId: tabId, ok: check.ok === true, error: check.error || null });
+}
+
+// I10: the debugger's session is seen from the worker it belongs to. Any
+// detach Chromium makes (the reload's included) is posted here, if this
+// worker still runs to hear it.
+chrome.debugger.onDetach.addListener((source, reason) => {
+  post('event', { run: RUN, name: 'debugger.onDetach', source, reason });
+});
+
+// I10 provocation: this worker attaches a debugger to the background tab
+// (the bridge reports it, and the engine must show the tab), then reloads
+// the extension. The driver clears provokeReload when 'reloading' arrives,
+// so the worker that the reload starts does not reload again.
+async function provokeReload() {
+  const tabs = await timed(RUN, 'provoke.tabs.query', () => chrome.tabs.query({}).then((list) => list.map(slim)));
+  const background = (tabs.result || []).find((t) => !t.active);
+  if (!background) { await post('provoke', { run: RUN, error: 'no background tab: ' + (tabs.error || 'none is inactive') }); return; }
+  const target = { tabId: background.id };
+  const attach = await timed(RUN, 'provoke.debugger.attach', () => chrome.debugger.attach(target, '1.3').then(() => 'attached'), { tabId: background.id });
+  await post('provoke', { run: RUN, tabId: background.id, attached: attach.ok === true, error: attach.error || null });
+  await post('reloading', { run: RUN, tabId: background.id });
+  chrome.runtime.reload();
+}
 
 // tabs.query through the bridge, then Chromium's own id-addressed APIs
 // on every id it returned.
