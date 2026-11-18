@@ -10,8 +10,6 @@
 //! `rewrite`, `table`, `debugger` and `policy` are pure. `relay` holds
 //! the CEF side.
 
-#![allow(dead_code)]
-
 pub(crate) mod debugger;
 pub(crate) mod install;
 pub(crate) mod policy;
@@ -39,6 +37,9 @@ const CORE_JS: &str = include_str!("js/core.js");
 const TABS_JS: &str = include_str!("js/tabs.js");
 const WINDOWS_JS: &str = include_str!("js/windows.js");
 const RUNTIME_JS: &str = include_str!("js/runtime.js");
+// The page lane's transport script, which Task 12 (the extension pages' bridge) injects;
+// nothing uses it before then.
+#[allow(dead_code)]
 pub(crate) const PAGE_TRANSPORT_JS: &str = include_str!("js/page_transport.js");
 
 /// The replacement of every bridged namespace, for a context whose
