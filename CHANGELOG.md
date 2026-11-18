@@ -136,6 +136,20 @@ has no releases yet; `Unreleased` holds everything on `main`.
   test extension only: a store-installed or "Load unpacked…" extension's
   debugger is not reported yet, nor one called from an extension page.
   A background tab that no reported debugger is on stays hidden as before.
+- A tab that an extension is debugging is hidden again when the extension
+  is reloaded and the browser sees its debugger session end. Before, a
+  reload could leave such a tab painted with nothing debugging it. The
+  browser now asks the extension's worker which debugger sessions still
+  answer after it starts again, and forgets the others. A worker that
+  stops and starts again keeps its sessions, so its tab stays painted.
+  A reload that leaves the extension's page open without telling the
+  browser is not yet shown to be handled.
+- A page of the extension bridge that does not load (an extension's relay
+  page, or the helper's) is opened at most five times in a row, the gap
+  between openings doubling from a quarter second. Then the browser gives
+  up on it until its extension changes: it logs once that it has done so,
+  and the extension's clicks are refused. Before, such a page was reopened
+  four times a second for as long as the browser ran.
 - On Windows the scripted-run control directory (`NAUTILUS_TEST_CONTROL`,
   for test runs only) must lie inside the user's profile folder; any
   other directory, or one that cannot be found, is refused with a warning

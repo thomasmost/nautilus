@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-18 (review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-18 (review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -80,7 +80,7 @@ Ninja on `PATH`:
   runs a script in a page when its load finishes. The macOS smoke test
   in CI launches the bundle up to three times on the `ci-smoke`
   profile because a fresh profile's first launch sometimes loads
-  nothing on the Intel runner (C6 in `docs/upstream-issues.md`); `NAUTILUS_TEST_CONTROL=<dir>` makes the engine carry out `cmd-N.json` commands from that directory (`load` an unpacked extension through the bridge's rewrite, `click` an extension's action, a raw `devtools` message through the management browser with its answers in `devtools.log`, `table`). The hook is for scripted runs only: it is compiled into release builds and is powerful while set (it loads extensions and sends DevTools messages on the management browser's browser-wide channel). On Unix the engine refuses, with a logged warning and the hook off, a directory not owned by the profile's owner or writable by its group or others (use mode 0700); on Windows it refuses a directory that is not inside the user's own profile tree (the canonical `%USERPROFILE%`, with `%TEMP%` normally inside it, compared part by part and case-insensitively: `extensions.rs` `outside_profile`), and any platform without a rule refuses; `NAUTILUS_PUMP_LOG=1` reports a message pump that has not spun and `NAUTILUS_PUMP_TICK_MS` sets the pump's fallback interval (0 switches it off). `ci/side-panel/run.sh spike|pump` is the scripted run of the extension bridge on a throwaway profile (macOS; about six minutes; judge it by its exit status, never through a pipe). A launch that exits non-zero or by a signal, is still up 120 s after its `--exit-after` (the script kills it), or logs a panic, a fatal runtime error, a RefCell borrowed twice, or browsers still open at shutdown fails the run.
+  nothing on the Intel runner (C6 in `docs/upstream-issues.md`); `NAUTILUS_TEST_CONTROL=<dir>` makes the engine carry out `cmd-N.json` commands from that directory (`load` an unpacked extension through the bridge's rewrite, `click` an extension's action, a raw `devtools` message through the management browser with its answers in `devtools.log`, `table`). The hook is for scripted runs only: it is compiled into release builds and is powerful while set (it loads extensions and sends DevTools messages on the management browser's browser-wide channel). On Unix the engine refuses, with a logged warning and the hook off, a directory not owned by the profile's owner or writable by its group or others (use mode 0700); on Windows it refuses a directory that is not inside the user's own profile tree (the canonical `%USERPROFILE%`, with `%TEMP%` normally inside it, compared part by part and case-insensitively: `extensions.rs` `outside_profile`), and any platform without a rule refuses; `NAUTILUS_PUMP_LOG=1` reports a message pump that has not spun and `NAUTILUS_PUMP_TICK_MS` sets the pump's fallback interval (0 switches it off). `ci/side-panel/run.sh spike|pump` is the scripted run of the extension bridge on a throwaway profile (macOS; about six minutes; judge it by its exit status, never through a pipe); `reload`, `stop` and `broken` are the provocations of review cycle 3 (I10: a reload and a worker stop with a debugger on a background tab; I11: a relay that cannot load), each about two minutes. A launch that exits non-zero or by a signal, is still up 120 s after its `--exit-after` (the script kills it, only if the pid is still the browser it launched), or logs a panic, a fatal runtime error, a RefCell borrowed twice (`already borrowed` or `already mutably borrowed`), or browsers still open at shutdown fails the run.
 
 ## Conventions
 
@@ -310,16 +310,22 @@ Ninja on `PATH`:
   hidden tab is shown while any debugs it and hidden again when the last
   debugger goes. Only the test extension is bridged in this build, and
   `chrome.debugger` from an extension page is not reported until Phase 5.
-  Never key this
-  on CEF's DevTools-agent callbacks: they fire for the engine's own
+  A worker's identity (`worker_hello`, `policy::identity`) and its
+  sessions (`policy::tabs_to_forget`, which asks `sendCommand` through the
+  hello's `attached` list, since `getTargets` marks a tab attached for any
+  client) decide what is forgotten when it restarts; the relay's `alive`
+  check finds a reloaded extension whose relay page stayed open. Never key
+  this on CEF's DevTools-agent callbacks: they fire for the engine's own
   `Target.getTargetInfo` probe and for every tab at creation, so they say
   nothing about an extension's debugger.
 - **Relays are opened on the engine's turn, never in a callback.**
   `Bridge::sync` records what is wanted and closes what is gone;
   `Bridge::reopen` (`ExtensionManager::poll_bridge`, called from `spin`)
-  opens what is wanted and not open, at most once per 250 ms
-  (`REOPEN_GAP`). A relay whose evaluation fails, or whose DevTools
-  session ends, is closed in its callback and opened by the next turn. A
+  opens what is wanted and not open, on `policy::next_opening`'s schedule
+  (a quarter second, doubling; five openings without a successful probe,
+  then given up until a sync sees the extension change: `Bridge::give_up`).
+  A relay whose evaluation fails, or whose DevTools session ends, is closed
+  in its callback and opened by the next turn. A
   debugger report is never failed by a page's loss (`policy::failed_by_loss`);
   a full queue of them applies its oldest against the table instead.
 - **A `cef` binding callback that returns an int defaults to 0.** The
@@ -440,6 +446,109 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-18, review cycle 3 of Phase 1)
+
+The third review left five issues (I10, I11, M13 to M15). Commits
+`5e305f7` (engine and worker: I10, I11) and `57cdc1f` (harness: I10, I11,
+M14, M15) are on `extension-side-panel`; this part's commit carries the
+docs. The kept logs are `evidence/phase-1/review3-*` (not committed); the
+names below are relative to it. Exit statuses are in the matching
+`*.status` files.
+
+What changed:
+
+- **Identity and sessions (I10).** `bridge.js` gives each worker start an
+  instance id and sends a `hello` on every port: the instance and the tab
+  ids whose debugger session still answers `sendCommand` (`getTargets`
+  alone marks a tab attached for any client, the engine's probe too). Each
+  call and reply carries the instance; a reply for another instance is
+  ignored by the bridge. `relay.rs` `worker_hello` drops the old instance's
+  queued tab lists and debugger reports, and forgets the tracked debuggers
+  whose session no longer answers (`policy::tabs_to_forget`,
+  `policy::identity`, `policy::job_belongs`, `table::hello_of`,
+  `debugger::Debuggers::tabs_of`). The engine asks (`identify`) when a
+  relay's port reports `gone` or the relay opens again, and only while the
+  extension holds a debugger; `alive` is checked every 2 s for a relay that
+  holds one (`check_alive`, `policy::check_due`).
+- **Openings (I11).** `policy::next_opening`: five openings in a row
+  without a successful probe, the gap 250 ms doubling to 8 s; then
+  `Bridge::give_up` (one warning; debuggers forgotten; queued work dropped;
+  clicks refused; the helper's queued tab lists answered with an error).
+  `sync` restarts an extension's count when its wanted state changes. The
+  count is cleared by the page's probe (`PROBE`), not its poll: a poll only
+  answers when the worker calls, so an idle healthy relay never reports it.
+- **M13.** The README no longer names `targetId` as unreported. The
+  protocol doc's limits and the CHANGELOG were checked against the code.
+- **M14.** The hang FAIL prints the allowed 120 s. The marker also matches
+  "already mutably borrowed".
+- **M15.** The watchdog checks `launched_still_up` (pid alive, not a
+  zombie, command line starts with the browser's path) before a kill, and
+  writes the hang marker only when the kill succeeds.
+
+What the runs show (final build, `review3-final-*` and the sweeps below):
+
+- `reload` (I10): the new worker's `sendCommand` failed (session ended) and
+  the engine forgot the tab (`has no debugger left`); `final-reload` exited
+  0. Seven reload runs with the `alive` check (`review3-reload-after-attempt3`
+  to `-7`, `review3-final-reload`, and `review3-reload-final-extra-try`) all
+  took the `sync` path: the list showed the extension off during the reload.
+- **Not shown fixed: the zombie path.** On the build before `alive`, a
+  reload that left the relay page open with no port event left the tab
+  painted with its session gone (`review3-reload-after-attempt2`, status 1,
+  no `has no debugger left` line; the same shape as the first attempt
+  before any fix, `review3-reload-before-attempt1`). `alive` was added for
+  it; the failure path it takes was run under a forced failure
+  (`review3-control-alive-forced-fail`, status 1 by design: the stop check
+  expects the session, which the forced forget does not keep). No run on
+  the final build reached the zombie path, so whether `alive` fails on a
+  real reload is not shown. Treat I10's reload case as open until a run
+  shows it.
+- `stop` (I10, identity): the session survived a `ServiceWorker.stopAllWorkers`
+  stop; the restarted worker's `sendCommand` answered and the hello listed
+  the tab (`review3-final-stop`, status 0; `review3-reload-stop-probe`).
+  The engine kept the tab painted.
+- `broken` (I11): five openings of the damaged relay, one give-up line,
+  nothing for 12 s, a click refused (`review3-final-broken`, status 0). Before
+  the change the same provocation opened it 229 times in 60 s, no give-up
+  (`review3-broken-before`, status 1 as expected).
+- `spike`, twice (`review3-final-spike1`, `-spike2`, status 0 each): 50 PASS,
+  0 FAIL each; unfocused 202 calls, max 72 and 69 ms, p95 63 ms, no timeout.
+- `pump`, twice (`review3-final-pump1`, `-pump2`, status 0 each): 7 PASS,
+  0 FAIL each; 202 calls, max 78 and 86 ms, p95 63 to 64 ms, no timeout.
+- Stub runs (`review3-stub-*`): a crash (status 3 → FAIL exit), a log with
+  `already mutably borrowed` (FAIL on the marker), a healthy exit (PASS).
+  The hang: the new script's FAIL reads "still up 120 s"
+  (`review3-stub-hang-new`), the HEAD script's reads "still up 125 s"
+  (`review3-stub-hang-old`); both killed the stub. A browser that exits half a
+  second before the grace is not reported hung (`review3-stub-early`,
+  status 0, no marker). A browser still up at the exact grace is killed and
+  reported (`review3-stub-boundary-1`, status 1; it was up at the check).
+  The window in which the HEAD script misreported a browser that exits
+  within milliseconds of the grace was not reproduced.
+- Checks on the final tree: `cargo fmt --all --check`, `cargo clippy
+  --workspace --all-targets -- -D warnings`, `cargo test --workspace` (132
+  passed in `nautilus-engine`, 2 in xtask), `cargo build --workspace`,
+  `cargo xtask bundle-mac`, `sh -n`, `python3` ast parse of `driver.py` (no
+  `__pycache__`), `node --check` on the four JS files
+  (`review3-final-*.log`).
+
+Not verified in this cycle:
+
+- The zombie reload path (above). The Chromium behaviour of `alive()` in an
+  invalidated context is not known; `alive` checks `chrome.runtime.id` and
+  `getManifest` (a guess).
+- I10's queued attach applied to a new worker: not provoked. The table had
+  every tab in every run, so no debugger report was queued. `job_belongs` is
+  unit-tested only.
+- Windows (nothing ran), the Intel build, macOS 26, and the toolbar's own
+  click (Task 13 step 5, not done).
+- The sweep does not include a worker stopped while a debugger sits on a
+  hidden tab (the tab is shown while debugged, so none was seen).
+
+For the next cycle: the zombie path needs a run in which the list does not
+show the extension off during a reload, or a different trigger; without it,
+I10 stays open for the reload case.
 
 ## Status and handoff (2026-11-18, review cycle 2 of Phase 1)
 

@@ -214,10 +214,14 @@ belongs to one running Nautilus at a time.
   not the toolbar's button) delivered once to a stopped worker,
   `chrome.tabs.query` and the ids it returns, and that no extension call
   takes a second with the window unfocused. `pump` runs the last part
-  alone. Judge it by its exit status, not through a pipe: a browser launch
-  that exits non-zero or by a signal, is still up 120 s after its
-  `--exit-after`, or logs a panic, a fatal runtime error, a RefCell
-  borrowed twice, or browsers still open at shutdown fails the run.
+  alone. `reload` (I10) makes the worker attach a debugger to the background
+  tab and reload the extension; `stop` stops the worker over DevTools while
+  it holds that debugger; `broken` (I11) replaces the stored relay page with
+  one that has no relay and closes the relay. Judge each by its exit status,
+  not through a pipe: a browser launch that exits non-zero or by a signal,
+  is still up 120 s after its `--exit-after`, or logs a panic, a fatal
+  runtime error, a RefCell borrowed twice ("already borrowed" or "already
+  mutably borrowed"), or browsers still open at shutdown fails the run.
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
   browser read commands from the named directory: `load` an unpacked
   extension, `click` an action, send a raw DevTools message on the
@@ -669,9 +673,15 @@ Upstream causes and the features they block are tracked in
   debugging is kept painted, for an extension the bridge reaches (in this
   build, the scripted test extension only); a background tab nothing
   reported as debugged is hidden, so DevTools ("Inspect") on a background
-  tab is slow until it is shown. A debugger attached by `targetId`, a
-  debugger called from an extension page (popup, options, side panel), and
-  an unbridged extension's debugger are not reported until Phase 5 (see
+  tab is slow until it is shown. A debugged tab is hidden again when its
+  extension is reloaded and the browser sees its session end (measured
+  with the test extension, `run.sh reload`; a reload that leaves the
+  extension's page open without a signal is not yet shown to be handled),
+  and a
+  bridge page that will not load is given up after five openings: its
+  extension's clicks are refused until the extension changes. A debugger
+  called from an extension page (popup, options, side panel), and an
+  unbridged extension's debugger, are not reported until Phase 5 (see
   `docs/bridge-protocol.md`, "Limits in protocol 1"). A symlink in an
   unpacked extension is not copied: it is skipped with a warning that
   names it, and a worker entry that is a link or missing fails the load.
