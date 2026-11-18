@@ -108,7 +108,15 @@ impl Hub {
             call.method,
             call.asker
         );
-        let effects = self.state.borrow_mut().call(call);
+        // A page's call is held where the state says (`page_call`); a
+        // worker's is answered at once.
+        let effects = {
+            let mut state = self.state.borrow_mut();
+            match lane {
+                Lane::Page => state.page_call(call, Instant::now()),
+                Lane::Worker => state.call(call),
+            }
+        };
         self.run(effects);
     }
 
@@ -144,12 +152,6 @@ impl Hub {
     pub(crate) fn set_extensions(self: &Rc<Self>, extensions: Vec<(String, Grants)>) {
         let effects = self.state.borrow_mut().set_extensions(extensions);
         self.run(effects);
-    }
-
-    /// Whether the bridge serves `extension` (its page lane asks before it
-    /// takes a page's call).
-    pub(crate) fn serves(&self, extension: &str) -> bool {
-        self.state.borrow().serves(extension)
     }
 
     /// Called on every spin of the engine.

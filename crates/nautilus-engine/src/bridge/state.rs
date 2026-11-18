@@ -15,11 +15,35 @@ use super::pattern::Grants;
 use super::router::{self, Outcome, Settled, Then};
 use super::shape::View;
 use super::snapshot::Snapshot;
-use super::transport::{BridgeCall, CallId};
+use super::transport::{Asker, BridgeCall, CallId};
 
 /// How long a strip waits for Chromium's id of a new live tab before it
-/// is published with a synthetic one.
+/// is published with a synthetic one. A page's call waits for the same
+/// bound, for the tab it is in or for its extension to be served.
 pub(crate) const PUBLISH_WAIT: Duration = Duration::from_secs(2);
+
+/// The error a page's call gets when its extension is still not bridged
+/// when the call's wait is over.
+pub(crate) const UNBRIDGED: &str = "the extension is not bridged.";
+
+/// What a page's call waits for before the engine answers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Hold {
+    /// The tab the page is in is not in the published strip, and a strip is
+    /// still pending.
+    Tab(TabId),
+    /// The page's extension is not served yet.
+    Served,
+    /// An earlier held call must go first, so that calls keep their order.
+    Queued,
+}
+
+/// A page's call held until its `Hold` is met or the bound has passed.
+struct HeldCall {
+    call: BridgeCall,
+    hold: Hold,
+    since: Instant,
+}
 
 /// What an extension the engine has not listed may see: nothing private.
 static NO_GRANTS: Grants = Grants {
@@ -90,6 +114,8 @@ pub(crate) struct BridgeState {
     /// The first refusal among a call's requests.
     refused: HashMap<CallId, String>,
     waiting: Vec<Waiting>,
+    /// Page calls held for their tab or their extension, in arrival order.
+    held_calls: Vec<HeldCall>,
     last_token: u64,
     last_focused: Option<WindowId>,
     seq: u64,
@@ -107,7 +133,7 @@ impl BridgeState {
 
     /// Whether `tick` has anything to wait for.
     pub(crate) fn needs_tick(&self) -> bool {
-        self.held.is_some() || !self.waiting.is_empty()
+        self.held.is_some() || !self.waiting.is_empty() || !self.held_calls.is_empty()
     }
 
     /// Whether `extension` is one the bridge serves: the page lane drops
@@ -171,6 +197,37 @@ impl BridgeState {
             Outcome::Request { requests, then } => {
                 self.request(call.id, &call.extension, requests, then)
             }
+        }
+    }
+
+    /// A call from an extension page (the page lane). It is held while its
+    /// extension is not served, or while the tab it is in is not in the
+    /// published strip and a strip is still pending; `settle` answers it when
+    /// that is so, or at `PUBLISH_WAIT`. A call that finds calls held ahead of
+    /// it is held behind them, so the calls are answered in arrival order.
+    pub(crate) fn page_call(&mut self, call: BridgeCall, now: Instant) -> Vec<Effect> {
+        let hold = if !self.serves(&call.extension) {
+            Some(Hold::Served)
+        } else if let Asker::View(tab) = call.asker
+            && self.held.is_some()
+            && self.published.locate(tab).is_none()
+        {
+            Some(Hold::Tab(tab))
+        } else if !self.held_calls.is_empty() {
+            Some(Hold::Queued)
+        } else {
+            None
+        };
+        match hold {
+            Some(hold) => {
+                self.held_calls.push(HeldCall {
+                    call,
+                    hold,
+                    since: now,
+                });
+                Vec::new()
+            }
+            None => self.call(call),
         }
     }
 
@@ -241,6 +298,26 @@ impl BridgeState {
     /// Answer every waiting call the published strip now allows.
     fn settle(&mut self, now: Instant) -> Vec<Effect> {
         let mut effects = Vec::new();
+        // Held page calls, from the front: a call goes once its hold is met
+        // or its bound has passed, and a later one never goes before it.
+        while let Some(front) = self.held_calls.first() {
+            let ready = match front.hold {
+                Hold::Queued => true,
+                Hold::Served => self.serves(&front.call.extension),
+                Hold::Tab(tab) => self.published.locate(tab).is_some() || self.held.is_none(),
+            };
+            let waited = now.saturating_duration_since(front.since);
+            if !ready && waited < PUBLISH_WAIT {
+                break;
+            }
+            let held = self.held_calls.remove(0);
+            match held.hold {
+                Hold::Served if !ready => {
+                    effects.push(Effect::Reply(held.call.id, Err(UNBRIDGED.to_string())));
+                }
+                _ => effects.extend(self.call(held.call)),
+            }
+        }
         for waiting in std::mem::take(&mut self.waiting) {
             let settled = router::settle(
                 &waiting.then,
@@ -775,5 +852,140 @@ mod tests {
         state.set_extensions(vec![(EXT.to_string(), all())]);
         assert!(state.serves(EXT));
         assert!(!state.serves("bcdefghijklmnopabcdefghijklmnopa"));
+    }
+
+    /// A page's call on the page lane, from the view of `tab`.
+    fn page_call(id: CallId, tab: u64, method: &str) -> BridgeCall {
+        BridgeCall {
+            id,
+            extension: EXT.to_string(),
+            asker: Asker::View(TabId(tab)),
+            namespace: "tabs".to_string(),
+            method: method.to_string(),
+            args: Vec::new(),
+        }
+    }
+
+    fn answered(effects: &[Effect]) -> Vec<CallId> {
+        effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Effect::Reply(id, _) => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_page_call_for_a_tab_not_yet_published_waits_for_the_publish() {
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all())]);
+        let t0 = Instant::now();
+        state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a*")])]),
+            &live,
+            t0,
+        );
+        // The second tab's id is not known yet: the strip is held.
+        state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a*"), tab(2, "b")])]),
+            &unknown,
+            t0,
+        );
+        assert!(
+            state
+                .page_call(page_call(7, 2, "getCurrent"), t0)
+                .is_empty()
+        );
+        assert!(state.needs_tick());
+        // The table learns the id: the strip publishes, and the call is
+        // answered from it.
+        let effects = state.table_changed(&live, t0);
+        // A live tab's `get` is forwarded to Chromium under its id (102).
+        assert_eq!(
+            effects.iter().find_map(|effect| match effect {
+                Effect::Reply(7, Ok(value)) => Some(value["__forward"]["args"][0].clone()),
+                _ => None,
+            }),
+            Some(json!(102))
+        );
+    }
+
+    #[test]
+    fn a_page_call_from_a_published_view_is_answered_at_once() {
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        let effects = state.page_call(page_call(3, 1, "getCurrent"), now);
+        assert_eq!(answered(&effects), vec![3]);
+    }
+
+    #[test]
+    fn a_page_call_for_a_tab_that_never_arrives_is_answered_at_the_bound() {
+        let (mut state, t0) = started(vec![tab(1, "a*")]);
+        state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a*"), tab(2, "b")])]),
+            &unknown,
+            t0,
+        );
+        assert!(
+            state
+                .page_call(page_call(4, 9, "getCurrent"), t0)
+                .is_empty()
+        );
+        assert!(state.tick(&unknown, t0 + Duration::from_secs(1)).is_empty());
+        let effects = state.tick(&unknown, t0 + PUBLISH_WAIT);
+        assert_eq!(answered(&effects), vec![4]);
+        assert!(!state.needs_tick());
+    }
+
+    #[test]
+    fn held_page_calls_are_answered_in_arrival_order() {
+        let (mut state, t0) = started(vec![tab(1, "a*")]);
+        state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a*"), tab(2, "b")])]),
+            &unknown,
+            t0,
+        );
+        assert!(
+            state
+                .page_call(page_call(5, 2, "getCurrent"), t0)
+                .is_empty()
+        );
+        assert!(
+            state
+                .page_call(page_call(6, 2, "getCurrent"), t0)
+                .is_empty()
+        );
+        assert_eq!(answered(&state.table_changed(&live, t0)), vec![5, 6]);
+    }
+
+    #[test]
+    fn a_page_call_of_an_extension_not_yet_served_waits_until_it_is_served() {
+        let mut state = BridgeState::default();
+        let t0 = Instant::now();
+        assert!(
+            state
+                .page_call(page_call(8, 1, "getCurrent"), t0)
+                .is_empty()
+        );
+        assert!(state.needs_tick());
+        state.set_extensions(vec![(EXT.to_string(), all())]);
+        let effects = state.tick(&unknown, t0);
+        assert_eq!(answered(&effects), vec![8]);
+        assert!(matches!(&effects[..], [Effect::Reply(8, Ok(_))]));
+    }
+
+    #[test]
+    fn a_page_call_of_an_extension_never_served_is_rejected_at_the_bound() {
+        let mut state = BridgeState::default();
+        let t0 = Instant::now();
+        assert!(
+            state
+                .page_call(page_call(9, 1, "getCurrent"), t0)
+                .is_empty()
+        );
+        assert!(state.tick(&unknown, t0 + Duration::from_secs(1)).is_empty());
+        let effects = state.tick(&unknown, t0 + PUBLISH_WAIT);
+        assert_eq!(effects, vec![Effect::Reply(9, Err(UNBRIDGED.to_string()))]);
+        assert!(!state.needs_tick());
     }
 }

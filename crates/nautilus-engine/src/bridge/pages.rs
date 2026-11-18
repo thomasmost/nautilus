@@ -9,8 +9,9 @@
 //! Trust: the render process is not believed about who it is. The
 //! browser process takes the extension's id from the frame's own address
 //! and drops a message from a frame that is not an extension's page, and
-//! delivers nothing to a frame that has navigated elsewhere. A page is
-//! bridged only when its extension is one the hub serves.
+//! delivers nothing to a frame that has navigated elsewhere. A call from a
+//! page of an extension the hub does not serve yet is held until it is
+//! served, and refused if it never is; it is never answered by Chromium.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -219,12 +220,9 @@ impl PageLane {
         let Some(hub) = delegate.hub() else {
             return true;
         };
-        if !hub.serves(&extension) {
-            log::warn!(
-                "a bridge call from a page of {extension}, which is not bridged, was dropped"
-            );
-            return true;
-        }
+        // An extension the hub does not serve yet is not dropped here: the
+        // call is held there until it is served, and then refused if it
+        // never is (`BridgeState::page_call`), so the page always gets a reply.
         let text = message
             .argument_list()
             .filter(|arguments| arguments.size() >= 1)
