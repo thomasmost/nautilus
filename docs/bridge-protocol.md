@@ -668,14 +668,96 @@ the transport needs no third kind of reply:
 The script calls Chromium's `method` of the same namespace with `args`
 and lays `strip` over the tab objects in the result.
 
-Calls added to the protocol: the namespaces `tabs` and `windows` with
-the methods of the method tables (in the design: `tabs.query`,
-`tabs.get`, `tabs.create`, `tabs.update`, `tabs.remove`, and the rest
-of the `chrome.tabs` and `chrome.windows` surface the bridge answers,
-forwards, or refuses), `tabs.stripOf(id)` (the seven strip fields or
-`null`, used for `sender.tab`), and `bridge.listen(eventName)` (sent by
-the script on the first `addListener` of an event, so the engine fires
-only events someone listens to).
+Calls added to the protocol: the namespaces `tabs` and `windows`, with
+the methods of the two tables below; `tabs.stripOf(id)` (the seven strip
+fields or `null`, used for `sender.tab`); and `bridge.listen(eventName)`
+(sent by the script on the first `addListener` of an event, so the engine
+fires only events someone listens to).
+
+**Method tables, as built** (`bridge/router.rs`). `S` answered from the
+snapshot; `R` becomes an `ExtensionRequest`; `F` forwarded to Chromium by
+name with translated ids; `D` called on Chromium directly by the script;
+`X` rejected. A tab id the strip lacks rejects `No tab with id: N.`; a
+window id, `No window with id: N.`; `N` is always the id the extension
+used. The router checks ids before it emits a request, and where the model
+still refuses one (the tab went meanwhile) `router::refusal` puts the
+extension's id back in place of osmena's `TabId`. `F` on a tab with a
+synthetic id rejects `The tab with id N is not loaded.` (there is no
+browser to ask).
+
+`chrome.tabs`:
+
+| Method | | How |
+| --- | --- | --- |
+| `query(info)` | S | every key of the reference; an unknown key rejects `Unexpected property: 'k'.`. `title` and `url` filters match only tabs the extension may see. `windowType` matches `"normal"` only. |
+| `get(id)` | F / S | live: forward `get(id)`; synthetic: the snapshot's object |
+| `getCurrent()` | F / S | `View(tab)` in a strip: as `get`; otherwise `undefined` |
+| `create(props)` | R | `OpenTab { window, url, active }`: `windowId` (or none: the model's focused window), `url` resolved against the extension's origin and checked as Chromium checks it (default `about:blank`), `active` (default true; `selected` is its old name). `index`, `pinned`, `openerTabId` are ignored: a new tab goes where osmena puts new tabs. Reply `Tab(id)`; resolves with the tab object once the snapshot holding it is published. |
+| `duplicate(id)` | R | `OpenTab` in the tab's window at the tab's URL, active; history is not copied |
+| `remove(id \| ids)` | R | `CloseTabs(ids)`; resolves `undefined` once the published strip no longer shows them, so a query straight after does not list them |
+| `update(id?, props)` | R / F / S | `active`, `highlighted` or `selected` true on a tab that is not active: `ActivateTab`, then (once the tab is active and live) forward `update` with the remaining keys, or `get` when none remain. Otherwise forward `update` with the remaining keys. `pinned`, and those three keys, are never forwarded. A `url` on a synthetic id without activation rejects as not loaded. No id: the current window's active tab. |
+| `move(id \| ids, {index, windowId?})` | R | one `MoveTab { tab, index }` per tab, `index` being the tab's final index in the strip (osmena's rule), so the tabs land at `index`, `index + 1`, … (`-1`: the end; past the end: the end); resolves with the tab object or objects after the next publish. Another window's id rejects `Moving a tab to another window is not supported.` |
+| `highlight({tabs, windowId?})` | R / S | activates the tab at the first index (`ActivateTab`); resolves with the populated window. `No tab at index: N.` |
+| `discard(id?)` | S | resolves `undefined` ("not discarded"), after checking the id. Never forwarded. |
+| `group`, `ungroup` | X | `tabs.group is not supported.` until tab groups arrive |
+| `captureVisibleTab(windowId?, options?)` | engine | needs `<all_urls>` in the manifest; `Page.captureScreenshot` on the window's active tab's browser; resolves `data:image/<format>;base64,…` |
+| `reload`, `goBack`, `goForward`, `getZoom`, `setZoom`, `getZoomSettings`, `setZoomSettings`, `detectLanguage` (tab id optional) | F | the id translated, or filled in with the current window's active tab (Chromium has no current window to fall back on) |
+| `executeScript`, `insertCSS`, `removeCSS` (Manifest V2 only) | F | the same, defined only where Chromium defines them |
+| `sendMessage`, `connect` | D | Chromium's own functions, bound |
+| anything else Chromium defines | X | `tabs.<name> is not supported.` |
+
+`setZoom` lasts until the tab's next navigation: osmena re-applies the
+site's zoom then (its zoom convention).
+
+`chrome.windows`:
+
+| Method | | How |
+| --- | --- | --- |
+| `get(id, opts?)`, `getCurrent(opts?)`, `getLastFocused(opts?)`, `getAll(opts?)` | S | `populate` adds `tabs`. `getAll` with `windowTypes` lacking `"normal"` is `[]`. Objects: `id`, `focused`, `incognito: false`, `alwaysOnTop: false`, `type: "normal"`, `state: "normal"`; no bounds. |
+| `create(data?)` | R | `OpenWindow { url }` with the first URL; each further URL an `OpenTab` into the window the reply names; resolves with the populated window. `incognito: true` rejects `Incognito mode is disabled.`; `tabId` rejects as unsupported; `type` and bounds are ignored (the window is an ordinary one). |
+| `update(id, info)` | S | resolves with the window, changing nothing (no request exists for focus, state or bounds) |
+| `remove(id)` | R | `CloseTabs` of every tab in it (a window whose last tab closes, closes: osmena's `an_extension_closing_every_tab_of_a_window_closes_the_window`). Limit: the only window's last tab goes through osmena's quit guard, so the browser quits, or, while downloads are going, the quit prompt shows, the tab stays, and the promise resolves at `SETTLE_LIMIT` with the window still there |
+| anything else | X | `windows.<name> is not supported.` |
+
+`onBoundsChanged` exists and never fires. A listener whose
+`filters.windowTypes` lacks `"normal"` is never called.
+
+**Events, in the order one publish yields them** (`bridge/differ.rs`,
+`differ::diff`; the argument lists are those the script passes to the
+listeners):
+
+1. `tabs.onReplaced(added, removed)` for each tab whose id changed and that extensions already knew.
+2. `windows.onCreated(window)` for each new window, in window order.
+3. `tabs.onRemoved(id, {windowId, isWindowClosing})` for each tab gone from the model, by old window then old index; `isWindowClosing` when its window is gone too.
+4. `tabs.onDetached(id, {oldWindowId, oldPosition})` for a tab now in another window.
+5. `tabs.onCreated(tab)` for each new tab, by window then index.
+6. `tabs.onAttached(id, {newWindowId, newPosition})`.
+7. `tabs.onMoved(id, {windowId, fromIndex, toIndex})` per window: one event when taking a single tab out of both orders makes them equal (a drag), otherwise one per tab that has to be lifted, left to right.
+8. `tabs.onActivated({tabId, windowId})` then `tabs.onHighlighted({windowId, tabIds: [tabId]})` for each window whose active tab changed (a new window's first tab included).
+9. `tabs.onUpdated(id, changeInfo, tab)` for each tab present before and after whose `url`, `title`, `status`, `groupId` or `discarded` changed, with exactly those keys (`url` and `title` only for an extension that may see them; an event whose `changeInfo` would be empty is not sent).
+10. `windows.onRemoved(id)`.
+11. `windows.onFocusChanged(id)` when the focused window changed (`-1`: none).
+
+The model moves a tab between windows by closing it and making a new one,
+so steps 4 and 6 do not occur today; the differ still handles a `TabId`
+that changes window.
+
+An event goes to an extension only when one of its contexts has added a
+listener for it this run (`bridge.listen`). The engine wakes an extension's
+worker once when it first learns of the extension (`state::set_extensions`),
+so top-level listeners are registered. A delivered event starts a stopped
+worker that listens for it (see "The scripted run", below).
+
+**Id spaces** (`bridge/ids.rs`):
+
+- **Tab ids.** An extension sees **Chromium's tab id** for a tab that has a browser and is not deferred, so every id-addressed Chromium API accepts it unchanged. A tab with no Chromium id (a deferred tab; a live tab whose id the table could not learn within two seconds) has a **synthetic id**: the first free integer at or above `2_000_000_000` (`ids::SYNTHETIC_BASE`), never one the table holds, stable for that tab until it closes. A deferred tab that is being warmed has a browser, but stays on its synthetic id: the warm's browser is temporary.
+- **When a tab's id changes** (a deferred tab is shown; a late table entry arrives) the bridge fires `chrome.tabs.onReplaced(addedTabId, removedTabId)`. The old id **keeps resolving** in every bridged and forwarded `chrome.tabs` call for as long as the tab lives (the router translates it), so an extension that ignores `onReplaced` still works through `chrome.tabs`; only APIs the bridge does not see (`scripting`, `debugger`) need the new id, which `tabs.get(oldId)` returns.
+- **A new live tab is held back until its id is known.** The engine keeps the snapshot it was given and publishes it (answers queries from it, diffs it for events) only once the table has an id for every tab that is not deferred, or two seconds have passed (`state::PUBLISH_WAIT`). So `onCreated` carries the real id in the ordinary case, and `tabs.create` resolves after that publish with the tab object extensions will go on seeing.
+- **Window ids** are osmena's: `windowId = WindowId.0`. The model counts from 1, so an id is never 0, `WINDOW_ID_NONE` (-1) or `WINDOW_ID_CURRENT` (-2). Chromium's own window ids never reach an extension (the whole `windows` namespace is replaced, and forwarded tab objects have `windowId` overwritten) and no window id is ever forwarded to Chromium, so the two spaces cannot meet.
+- **Group ids** are osmena's: `groupId = FolderId.0` (from 1), `-1` (`TAB_GROUP_ID_NONE`) for a tab in no folder. `ids::group_id` maps a folder to its id; the tab groups namespace is not bridged yet, so nothing else maps the other way.
+
+`tabs.js` also keeps Chromium's `onZoomChange` as a native event, which the
+engine does not fire.
 
 Extension pages have their own lane (`bridge/pages.rs`): a process
 message `nautilus-bridge-call` with one string argument
@@ -689,6 +771,14 @@ publishes, or for `PUBLISH_WAIT` (2 s); a call of an extension the hub does not
 serve yet is held until it is served, or for the same bound, and then refused
 with `the extension is not bridged.`. A page's call always gets a reply.
 
+
+## How a later phase adds a namespace
+
+1. A file under `bridge/js/` calls `__nautilusBridge.define('<name>', { bridged, optional, direct, events, nativeEvents })` (the comment on `define` in `js/core.js` says what each list does; `js/tabs.js` and `js/windows.js` are the examples). `bridged` names the functions the engine answers, `optional` the same where Chromium defines them, `direct` Chromium's own functions, called bound, `events` the events the engine fires, `nativeEvents` Chromium's events, kept.
+2. Its name is added to `namespaces_script()` in `bridge/mod.rs`, so the file's text follows the others in a worker's and a page's script.
+3. Its rows go in `router::route` (`bridge/router.rs`): one arm per namespace, one per method, each answered as S, R, F, D or X in the method tables above.
+4. Its events are `StripEvent` variants (`bridge/differ.rs`) produced by `diff`, with a `render` arm giving the event name and its argument list.
+5. Its names are covered by the test `every_function_of_a_replaced_namespace_is_ours` (`bridge/mod.rs`), which checks that every bridged or optional method of the `tabs` and `windows` scripts reaches the router (the names in its `later` list excepted).
 
 ## The scripted run (phase5.py)
 
@@ -924,3 +1014,4 @@ the three page checks above and `sender.tab`.
 is not determined by these runs. The owner's toolbar click, real popups and
 Windows were not run. The helper extension's page is not bridged: not observed,
 since the run has no way to evaluate in it.
+

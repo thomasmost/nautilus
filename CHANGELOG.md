@@ -22,14 +22,28 @@ has no releases yet; `Unreleased` holds everything on `main`.
   tile, and Most visited is a shelf of shortcut discs across the
   panel, so the mosaic has no hole.
 - An extension's toolbar action with no popup now shows its button in
-  the toolbar and the puzzle menu; pressing it does nothing until the
-  extension bridge answers it.
+  the toolbar and the puzzle menu; pressing it sends the click to the
+  extension's worker through the extension bridge.
 - A loaded unpacked extension's copy in the profile no longer includes
   dot-files and dot-directories (`.git`, `.DS_Store`). An extension whose
   worker's entry is under one fails to load, with a message that says so.
 
 ### Added
 
+- Extensions see the browser's own tabs and windows. `chrome.tabs` and
+  `chrome.windows` are answered from the tab strip in service workers and
+  in extension pages (a tab or an action popup): `tabs.query` lists every
+  tab of every window in order with its window, index, active state and
+  folder; `tabs.create`, `remove`, `update({active})`, `move`, `duplicate`
+  and `windows.create` and `remove` act on the strip; the tab and window
+  events fire as the strip changes; and, for a tab that has loaded, a
+  tab's id is the one `chrome.scripting`, `chrome.debugger` and
+  `chrome.webNavigation` accept. A restored tab that has not loaded yet is
+  listed too and takes its real id when first shown (`tabs.onReplaced`).
+  `tabs.group` and `tabs.discard`, which used to crash the browser, now
+  answer without reaching Chromium. An unpacked extension is run from a
+  copy inside the profile: choose "Load unpacked…" on the same folder again
+  to pick up edits.
 - Each profile gets a small helper extension, written into it on start,
   that the extension bridge uses to find DevTools targets. It is loaded
   only while an extension bridged by the bridge is on.

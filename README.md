@@ -684,10 +684,18 @@ Upstream causes and the features they block are tracked in
   Mac has been tried by hand.
 - Extensions: an action popup on macOS is a borderless child window of
   the browser window (`popup.rs`); it was built from the Windows
-  behaviour and not yet clicked by hand. Extension popups see Chromium's own tabs,
-  not Nautilus's: `chrome.tabs.query({active: true})` finds the hidden
-  management page, so a popup that acts on "the current tab" acts on
-  nothing. An action without a popup sends its click to the extension's worker
+  behaviour and not yet clicked by hand.
+  Extensions see Nautilus's tabs and windows through a bridge that
+  replaces `chrome.tabs` and `chrome.windows`: pinning, muting state,
+  window bounds and focus changes asked for by an extension are not
+  carried out, `windows.create` always opens an ordinary window, a tab
+  cannot be moved between windows, and `tabs.group` rejects until tab
+  groups arrive. A page's address and title are given only to an
+  extension whose manifest has the `tabs` permission or a matching host
+  permission (`activeTab` and optional permissions are not counted).
+  An unpacked extension runs from a copy in the profile; load the
+  folder again to pick up edits.
+  A click on an action with no popup reaches the extension's worker
   through the bridge. Every loaded extension's worker is bridged (store
   installs, "Load unpacked…" and the test control alike); an extension's
   pages (popup, options page, a page shown as a tab) are bridged on their own
@@ -704,7 +712,11 @@ Upstream causes and the features they block are tracked in
   debuggers are kept (the browser forgets a debugger only on the worker's
   own word, or when the extension is off or its tab closes). A debugger
   called from an extension page (popup, options, side panel) is not reported
-  (see `docs/bridge-protocol.md`, "Limits in protocol 1"). A symlink in an
+  (see `docs/bridge-protocol.md`, "Limits in protocol 1"). For an extension
+  page shown as a tab, `sender.tab` in the receiving worker lacks the strip's
+  fields: `windowId` and `index` are -1, because the engine has no Chromium
+  tab id for such a tab. This is open; a decision is pending
+  (`docs/bridge-protocol.md`, "The sender's tab"). A symlink in an
   unpacked extension is not copied: it is skipped with a warning that
   names it, and a worker entry that is a link or missing fails the load.
   Dot-files and dot-directories (`.git`, `.DS_Store`) are not copied
