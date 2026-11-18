@@ -679,6 +679,12 @@ mod native {
             self.bridge.reopen();
         }
 
+        /// The engine's end of the bridge: the hub's worker lane and its
+        /// table.
+        pub(crate) fn bridge(&self) -> Rc<Bridge> {
+            self.bridge.clone()
+        }
+
         pub(crate) fn track_tab(
             &self,
             tab: TabId,

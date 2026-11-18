@@ -28,6 +28,8 @@ mod state;
 pub(crate) mod transport;
 
 #[cfg(any(windows, target_os = "macos"))]
+pub(crate) mod hub;
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod relay;
 
 #[cfg(any(windows, target_os = "macos"))]

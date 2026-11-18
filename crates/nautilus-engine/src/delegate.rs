@@ -103,6 +103,18 @@ pub(crate) struct DelegateState {
     blocked: RefCell<BlockedSites>,
     /// The id of the next request for the microphone or the camera.
     next_media_request: Cell<u64>,
+    /// Each tab's browser, by the model's id: for the screenshot
+    /// `tabs.captureVisibleTab` takes, and to tell which view a page that
+    /// calls the bridge is in.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    views: RefCell<HashMap<TabId, Browser>>,
+    /// Each open action popup's browser, by CEF's identifier, with the tab
+    /// that was active when it opened (which names its window).
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    popups_over: RefCell<HashMap<std::os::raw::c_int, TabId>>,
+    /// The bridge's hub; the engine owns it, hence weak.
+    #[cfg(any(windows, target_os = "macos"))]
+    hub: RefCell<Weak<crate::bridge::hub::Hub>>,
 }
 
 impl DelegateState {
@@ -141,13 +153,81 @@ impl DelegateState {
     }
 
     pub(crate) fn forget_browser(&self, browser: &Browser) {
-        let mut focused = self.focused_browser.borrow_mut();
-        if focused
-            .as_ref()
-            .is_some_and(|f| f.identifier() == browser.identifier())
         {
-            *focused = None;
+            let mut focused = self.focused_browser.borrow_mut();
+            if focused
+                .as_ref()
+                .is_some_and(|f| f.identifier() == browser.identifier())
+            {
+                *focused = None;
+            }
         }
+        let id = browser.identifier();
+        self.views
+            .borrow_mut()
+            .retain(|_, known| known.identifier() != id);
+        self.popups_over.borrow_mut().remove(&id);
+    }
+
+    /// A tab's view was created: its browser is `browser`.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub(crate) fn register_view(&self, tab: TabId, browser: &Browser) {
+        self.views.borrow_mut().insert(tab, browser.clone());
+    }
+
+    /// A tab's view is gone (`TabHost::close_tab`, or the host dropped).
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub(crate) fn unregister_view(&self, tab: TabId) {
+        self.views.borrow_mut().remove(&tab);
+    }
+
+    /// The browser showing the view `tab`.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub(crate) fn browser_of(&self, tab: TabId) -> Option<Browser> {
+        self.views.borrow().get(&tab).cloned()
+    }
+
+    /// An action popup opened over `over`: its browser, by CEF's id.
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub(crate) fn register_popup(&self, browser: &Browser, over: TabId) {
+        self.popups_over
+            .borrow_mut()
+            .insert(browser.identifier(), over);
+    }
+
+    /// Who is asking, for a bridge call from a page in `browser`: the view it
+    /// is, the popup it is, or (any other browser) nobody with a window, like
+    /// a worker. Used by the extension pages' lane (Task 12).
+    // Called only by the page lane, which Task 12 adds.
+    #[allow(dead_code)]
+    pub(crate) fn asker_of(&self, browser: &Browser) -> crate::bridge::transport::Asker {
+        use crate::bridge::transport::Asker;
+        let id = browser.identifier();
+        let view = self
+            .views
+            .borrow()
+            .iter()
+            .find(|(_, known)| known.identifier() == id)
+            .map(|(tab, _)| *tab);
+        if let Some(tab) = view {
+            return Asker::View(tab);
+        }
+        match self.popups_over.borrow().get(&id) {
+            Some(over) => Asker::Popup { over: *over },
+            None => Asker::Worker,
+        }
+    }
+
+    /// The bridge's hub, once the engine has made it.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn set_hub(&self, hub: &Rc<crate::bridge::hub::Hub>) {
+        *self.hub.borrow_mut() = Rc::downgrade(hub);
+    }
+
+    /// The bridge's hub, while the engine is alive.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn hub(&self) -> Option<Rc<crate::bridge::hub::Hub>> {
+        self.hub.borrow().upgrade()
     }
 
     /// Answer the next folder dialog with `dir` instead of showing it.

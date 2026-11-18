@@ -31,6 +31,7 @@ use serde_json::{Value, json};
 
 use super::debugger::{Change, Debuggers};
 use super::evaluation;
+use super::hub::Lane;
 use super::install::HELPER_ID;
 use super::policy::{
     AfterAsk, Answered, Evidence, Identity, JobKind, JobTurn, MAX_OPENINGS, Next, Opening,
@@ -38,16 +39,25 @@ use super::policy::{
     asks_on, check_due, failed_by_loss, forgets, identity, is_generation, job_kept, job_turn,
     next_opening, overflow, relay_changes, reply_due, session_evidence, tabs_to_forget,
 };
-use super::rewrite::BRIDGE_DIR;
 use super::table::{
-    Debuggee, Hello, TabTable, Target, debuggee_of, hello_of, parse_targets, query_rows,
-    target_id_of, worker_target_of,
+    Debuggee, Hello, TabTable, Target, debuggee_of, hello_of, parse_targets, target_id_of,
+    worker_target_of,
 };
+use super::transport::{Asker, BridgeCall, BridgeTransport, CallId};
 use crate::delegate::{DelegateState, ViewState};
 
 /// The key of the helper's page among the hidden pages; a relay's key
 /// is its extension's id, which this can never be.
 const HELPER_KEY: &str = "helper";
+
+/// The path of an extension's relay page, after its extension's id
+/// (`chrome-extension://<id><RELAY_PATH>`). It is `BRIDGE_DIR`'s relay.
+pub(crate) const RELAY_PATH: &str = "/nautilus-bridge/relay.html";
+
+/// The sentinel of a tab's probe whose call is in progress (`Probe::sent`).
+const RESERVED: i32 = -1;
+/// The sentinel of a tab's probe whose call failed: no result carries it.
+const NOT_SENT: i32 = -2;
 
 /// Waiting jobs beyond this are failed, oldest first, so a page that
 /// never comes back cannot grow the queue without bound.
@@ -346,17 +356,18 @@ enum Pending {
         attempt: u8,
         delivery: u64,
     },
+    /// An event for an extension's worker (`Job::Emit`), kept to retry it.
+    Emit {
+        event: String,
+        args: Vec<Value>,
+        attempt: u8,
+        delivery: u64,
+        instance: Option<String>,
+    },
 }
 
 /// Work that waits for a fresh table, or for its relay to be ready.
 enum Job {
-    /// Answer call `call` of `extension`'s worker with the tabs. `instance`
-    /// is the worker instance that made the call.
-    Query {
-        extension: String,
-        call: u64,
-        instance: String,
-    },
     /// Deliver a click on `extension`'s action for `tab`. `delivery` is
     /// the id the worker will see, kept for every attempt so a worker
     /// instance that already ran it ignores the repeat.
@@ -375,22 +386,37 @@ enum Job {
         debuggee: Debuggee,
         attach: bool,
     },
+    /// Deliver `event` with `args` to `extension`'s worker: a listener's
+    /// event, or `bridge.wake`. `delivery` is its id, the same on every
+    /// attempt (a worker instance that ran it ignores the repeat).
+    /// `instance` is the worker instance the extension was known to have
+    /// when the event was queued (`None`: before any hello).
+    Emit {
+        extension: String,
+        event: String,
+        args: Vec<Value>,
+        attempt: u8,
+        delivery: u64,
+        instance: Option<String>,
+    },
 }
 
+/// `Job::Emit` (an event for an extension's worker) sits in the queue with
+/// the fields of its delivery; the kind is what the queue's rules read.
 impl Job {
     fn extension(&self) -> &str {
         match self {
-            Job::Query { extension, .. }
-            | Job::Click { extension, .. }
-            | Job::Debugger { extension, .. } => extension,
+            Job::Click { extension, .. }
+            | Job::Debugger { extension, .. }
+            | Job::Emit { extension, .. } => extension,
         }
     }
 
     fn kind(&self) -> JobKind {
         match self {
-            Job::Query { .. } => JobKind::Query,
             Job::Click { .. } => JobKind::Click,
             Job::Debugger { .. } => JobKind::Debugger,
+            Job::Emit { .. } => JobKind::Emit,
         }
     }
 }
@@ -423,6 +449,90 @@ struct TabRecord {
     view: Rc<ViewState>,
     /// The DevTools observer that reads the tab's target id.
     _probe: Option<Registration>,
+}
+
+/// The engine's ids for worker calls. A worker numbers its calls itself, so
+/// two extensions' workers can both have a call 7, and a worker instance
+/// that is replaced leaves calls whose answers its successor would ignore.
+/// The hub is given a Bridge-local id per call (`issue`); this map gives back
+/// the worker's (extension, instance, call) when the answer comes (`take`).
+#[derive(Default)]
+pub(crate) struct CallIds {
+    last: CallId,
+    calls: HashMap<CallId, (String, String, u64)>,
+}
+
+impl CallIds {
+    /// The Bridge-local id of call `worker_call` of `instance` of `extension`.
+    pub(crate) fn issue(&mut self, extension: &str, instance: &str, worker_call: u64) -> CallId {
+        self.last += 1;
+        self.calls.insert(
+            self.last,
+            (extension.to_string(), instance.to_string(), worker_call),
+        );
+        self.last
+    }
+
+    /// The triple of `call`, removed: an answer is sent once.
+    pub(crate) fn take(&mut self, call: CallId) -> Option<(String, String, u64)> {
+        self.calls.remove(&call)
+    }
+
+    /// Drop the calls of `extension`'s instances other than `current`, the
+    /// instance a hello has just named. Returns how many were dropped.
+    pub(crate) fn retire_instances(&mut self, extension: &str, current: &str) -> usize {
+        let before = self.calls.len();
+        self.calls
+            .retain(|_, (e, instance, _)| e != extension || instance == current);
+        before - self.calls.len()
+    }
+}
+
+#[cfg(test)]
+mod call_ids_tests {
+    use super::CallIds;
+
+    #[test]
+    fn calls_of_two_workers_with_the_same_number_stay_apart() {
+        let mut ids = CallIds::default();
+        let a = ids.issue("aaaa", "i1", 7);
+        let b = ids.issue("bbbb", "i2", 7);
+        assert_ne!(a, b);
+        assert_eq!(ids.take(b), Some(("bbbb".to_string(), "i2".to_string(), 7)));
+        assert_eq!(ids.take(a), Some(("aaaa".to_string(), "i1".to_string(), 7)));
+        assert_eq!(ids.take(a), None, "an answer is sent once");
+    }
+
+    #[test]
+    fn a_new_worker_instance_retires_the_calls_of_the_old_one_and_no_others() {
+        let mut ids = CallIds::default();
+        let old_one = ids.issue("aaaa", "old", 1);
+        let old_two = ids.issue("aaaa", "old", 2);
+        let other = ids.issue("bbbb", "old", 3);
+        let same = ids.issue("aaaa", "new", 4);
+        assert_eq!(
+            ids.retire_instances("aaaa", "new"),
+            2,
+            "the two calls of the old instance go"
+        );
+        assert_eq!(ids.take(old_one), None);
+        assert_eq!(ids.take(old_two), None);
+        assert_eq!(
+            ids.take(other),
+            Some(("bbbb".to_string(), "old".to_string(), 3)),
+            "another extension's calls stay"
+        );
+        assert_eq!(
+            ids.take(same),
+            Some(("aaaa".to_string(), "new".to_string(), 4)),
+            "the current instance's calls stay"
+        );
+        assert_eq!(
+            ids.retire_instances("aaaa", "new"),
+            0,
+            "a hello of the same instance retires nothing"
+        );
+    }
 }
 
 #[derive(Default)]
@@ -459,6 +569,11 @@ struct Inner {
     next_token: u64,
     /// The helper has been asked for the targets and has not answered.
     refreshing: bool,
+    /// A tab's target id was learned after the last refresh: the next turn
+    /// refreshes (`reopen`), so no timer is added for it.
+    refresh_wanted: bool,
+    /// The worker calls the hub is answering, by the Bridge-local id.
+    calls: CallIds,
     jobs: Vec<Job>,
     next_delivery: u64,
     next_generation: u64,
@@ -549,10 +664,24 @@ impl Bridge {
         let Some(host) = browser.host() else {
             return;
         };
-        let mut observer = TabProbe::new(self.clone(), tab);
+        let probe = Rc::new(Probe::default());
+        // Reserved before the call: CEF can answer inside it (see `Probe`).
+        probe.sent.set(RESERVED);
+        let mut observer = TabProbe::new(self.clone(), tab, probe.clone());
         let registration = host.add_dev_tools_message_observer(Some(&mut observer));
-        if host.execute_dev_tools_method(0, Some(&"Target.getTargetInfo".into()), None) == 0 {
+        let id = host.execute_dev_tools_method(0, Some(&"Target.getTargetInfo".into()), None);
+        if id == 0 {
+            probe.sent.set(NOT_SENT);
+            probe.early.borrow_mut().clear();
             log::warn!("bridge: cannot ask {tab:?} for its target id");
+        } else {
+            probe.sent.set(id);
+            let early: Vec<(i32, bool, Vec<u8>)> = probe.early.borrow_mut().drain(..).collect();
+            for (message, success, result) in early {
+                if message == id {
+                    self.target_known(tab, success, &result);
+                }
+            }
         }
         self.inner.borrow_mut().tabs.insert(
             tab,
@@ -569,7 +698,11 @@ impl Bridge {
         match target_id_of(&parsed).filter(|_| success) {
             Some(target) => {
                 log::debug!("bridge: {tab:?} is DevTools target {target}");
-                self.inner.borrow_mut().table.set_target(tab, target);
+                // This runs inside a CEF observer, so no evaluation happens
+                // here: the next turn refreshes the table (`reopen`).
+                let mut inner = self.inner.borrow_mut();
+                inner.table.set_target(tab, target);
+                inner.refresh_wanted = true;
             }
             None => log::warn!("bridge: {tab:?} gave no target id: {parsed}"),
         }
@@ -654,7 +787,8 @@ impl Bridge {
     /// two whatever CEF was doing when it died.
     pub(crate) fn reopen(self: &Rc<Self>) {
         let now = std::time::Instant::now();
-        if self.refresh_due(now) {
+        let asked = std::mem::take(&mut self.inner.borrow_mut().refresh_wanted);
+        if asked || self.refresh_due(now) {
             self.refresh();
         }
         let (helper_loaded, wanted, helper_open, open) = {
@@ -897,7 +1031,7 @@ impl Bridge {
     }
 
     fn open_relay(self: &Rc<Self>, extension: &str) {
-        let url = format!("chrome-extension://{extension}/{BRIDGE_DIR}/relay.html");
+        let url = format!("chrome-extension://{extension}{RELAY_PATH}");
         let generation = self.next_generation();
         match HiddenPage::open(self, extension, &url, generation) {
             Some(page) => {
@@ -1240,12 +1374,15 @@ impl Bridge {
         true
     }
 
-    /// One request of `extension`'s worker, as the relay passed it on.
+    /// One request of `extension`'s worker, as the relay passed it on. The
+    /// debugger reports are the bridge's own and stay here; every other method
+    /// goes to the hub, which answers it (the router) or sends it to the model,
+    /// and whose answer comes back through `BridgeTransport::reply`.
     fn worker_call(&self, extension: &str, item: &serde_json::Value) {
         let Some(call) = item.get("call") else {
             return;
         };
-        let Some(id) = call.get("id").and_then(|v| v.as_u64()) else {
+        let Some(worker_id) = call.get("id").and_then(|v| v.as_u64()) else {
             return;
         };
         let method = call
@@ -1258,38 +1395,50 @@ impl Bridge {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        log::debug!("bridge: {extension} calls {method} ({id})");
-        match method {
-            "tabs.query" => {
-                if self.given_up(HELPER_KEY) {
-                    let answer = json!({"error": "the tab list is unavailable: the helper's page did not load."});
-                    self.reply(extension, &instance, id, &answer);
-                    return;
-                }
-                self.queue(Job::Query {
-                    extension: extension.to_string(),
-                    call: id,
-                    instance,
-                });
-                self.refresh();
-            }
-            "debugger.attached" | "debugger.detached" => {
-                let debuggee = debuggee_of(call.get("args").and_then(|args| args.get(0)));
-                self.debugger_report(
-                    extension,
-                    &instance,
-                    id,
-                    debuggee,
-                    method == "debugger.attached",
-                );
-            }
-            _ => {
-                // Fail closed: a call the engine does not know is refused,
-                // never passed to Chromium.
-                let answer = json!({"error": format!("{method} is not supported by Nautilus.")});
-                self.reply(extension, &instance, id, &answer);
-            }
+        log::debug!("bridge: {extension} calls {method} ({worker_id})");
+        if method == "debugger.attached" || method == "debugger.detached" {
+            let debuggee = debuggee_of(call.get("args").and_then(|args| args.get(0)));
+            self.debugger_report(
+                extension,
+                &instance,
+                worker_id,
+                debuggee,
+                method == "debugger.attached",
+            );
+            return;
         }
+        let (namespace, name) = method.split_once('.').unwrap_or((method, ""));
+        let args = call
+            .get("args")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let id = self
+            .inner
+            .borrow_mut()
+            .calls
+            .issue(extension, &instance, worker_id);
+        let Some(hub) = self.delegate.hub() else {
+            self.inner.borrow_mut().calls.take(id);
+            self.reply(
+                extension,
+                &instance,
+                worker_id,
+                &json!({"error": "The engine is not ready."}),
+            );
+            return;
+        };
+        hub.call(
+            Lane::Worker,
+            BridgeCall {
+                id,
+                extension: extension.to_string(),
+                asker: Asker::Worker,
+                namespace: namespace.to_string(),
+                method: name.to_string(),
+                args,
+            },
+        );
     }
 
     /// The worker attached or detached a debugger to a tab. The worker's
@@ -1403,7 +1552,7 @@ impl Bridge {
     /// (`reply_due`). A session for a tab the table cannot name yet is kept
     /// pending (`apply_pending`).
     fn worker_hello(&self, extension: &str, hello: &Hello) {
-        let (identity, stale, forget, pending) = {
+        let (identity, stale, forget, pending, retired) = {
             let mut inner = self.inner.borrow_mut();
             let seen = inner.identities.get(extension).cloned();
             let identity = identity(seen.as_deref(), &hello.instance);
@@ -1413,15 +1562,12 @@ impl Bridge {
             let current = hello.instance.as_str();
             let (stale, kept): (Vec<Job>, Vec<Job>) = std::mem::take(&mut inner.jobs)
                 .into_iter()
-                .partition(|job| match job {
-                    Job::Query {
-                        extension: e,
-                        instance,
-                        ..
-                    } => e.as_str() == extension && !job_kept(JobKind::Query, instance, current),
-                    Job::Debugger { .. } | Job::Click { .. } => false,
-                });
+                .partition(|job| is_stale_event(job, extension, current));
             inner.jobs = kept;
+            // The answers to the old instance's calls would be ignored by the
+            // worker that now runs: those calls are retired, and their answers
+            // are not sent (`BridgeTransport::reply`).
+            let retired = inner.calls.retire_instances(extension, current);
             let mut resolved = Vec::new();
             let mut pending = Vec::new();
             for (chromium, state) in &hello.sessions {
@@ -1440,7 +1586,7 @@ impl Bridge {
             let tracked = inner.debuggers.tabs_of(extension);
             let forget = tabs_to_forget(&resolved, &tracked);
             let pending_count = inner.pending_sessions.get(extension).map_or(0, Vec::len);
-            (identity, stale, forget, pending_count)
+            (identity, stale, forget, pending_count, retired)
         };
         let count = |state: Session| hello.sessions.iter().filter(|(_, s)| *s == state).count();
         if identity == Identity::Restarted {
@@ -1459,10 +1605,18 @@ impl Bridge {
                 pending = pending
             );
         }
+        if retired > 0 {
+            log::info!(
+                "bridge: {extension}: {retired} call(s) of its replaced worker instance are retired; no answer is sent for them"
+            );
+        }
         for job in stale {
-            if let Job::Query { call, .. } = job {
+            if let Job::Emit {
+                event, delivery, ..
+            } = job
+            {
                 log::warn!(
-                    "bridge: {extension}: the tab list of call {call} is dropped: its worker is gone"
+                    "bridge: {extension}: event {event} (delivery {delivery}) is dropped: its worker instance was replaced"
                 );
             }
         }
@@ -1584,13 +1738,15 @@ impl Bridge {
     fn fail_jobs(&self, jobs: Vec<Job>, why: &str) {
         for job in jobs {
             match job {
-                Job::Query {
+                Job::Emit {
                     extension,
-                    call,
-                    instance,
+                    event,
+                    delivery,
+                    ..
                 } => {
-                    let answer = json!({"error": format!("the tab list is unavailable: {why}.")});
-                    self.reply(&extension, &instance, call, &answer);
+                    log::warn!(
+                        "bridge: {extension}: event {event} (delivery {delivery}) is dropped: {why}"
+                    );
                 }
                 Job::Click {
                     extension,
@@ -1620,16 +1776,28 @@ impl Bridge {
 
     fn run(&self, job: Job) {
         match job {
-            Job::Query {
+            Job::Emit {
                 extension,
-                call,
+                event,
+                args,
+                attempt,
+                delivery,
                 instance,
             } => {
-                let rows = {
-                    let inner = self.inner.borrow();
-                    query_rows(inner.table.rows(), self.delegate.last_focused())
+                let message = json!({"id": delivery, "event": event, "args": args});
+                let expression = format!("nautilusRelay.deliver({message})");
+                let pending = Pending::Emit {
+                    event: event.clone(),
+                    args,
+                    attempt,
+                    delivery,
+                    instance,
                 };
-                self.reply(&extension, &instance, call, &json!({"result": rows}));
+                if self.evaluate(&extension, &expression, pending) {
+                    log::debug!("bridge: {extension}: event {event} (delivery {delivery}) sent");
+                } else {
+                    log::warn!("bridge: cannot reach the relay of {extension} for {event}");
+                }
             }
             Job::Click {
                 extension,
@@ -1754,6 +1922,12 @@ impl Bridge {
                     self.apply_pending();
                 }
                 self.run_jobs();
+                // The hub is called with no borrow of `inner` held: it calls
+                // back into this bridge.
+                let hub = self.delegate.hub();
+                if let Some(hub) = hub {
+                    hub.table_changed();
+                }
             }
             Pending::Probe => match value {
                 Ok(Value::Bool(true)) => {
@@ -1909,6 +2083,46 @@ impl Bridge {
                     }
                 }
             },
+            Pending::Emit {
+                event,
+                args,
+                attempt,
+                delivery,
+                instance,
+            } => match after_delivery(&value, attempt) {
+                Next::Finished => {
+                    log::debug!(
+                        "bridge: {key}: event {event} (delivery {delivery}) taken by the worker"
+                    );
+                }
+                Next::Retry => {
+                    log::warn!(
+                        "bridge: {key}: event {event} (delivery {delivery}) was not acknowledged ({}); trying once more with a fresh relay",
+                        describe(&value)
+                    );
+                    // Closed here, reopened by the next turn (`reopen`): a
+                    // callback creates no browser. The id is kept, so an
+                    // instance that ran the event ignores the repeat.
+                    self.close_relay(key);
+                    self.queue(Job::Emit {
+                        extension: key.to_string(),
+                        event,
+                        args,
+                        attempt: attempt + 1,
+                        delivery,
+                        instance,
+                    });
+                }
+                Next::Abandon { reopen } => {
+                    log::warn!(
+                        "bridge: {key}: event {event} (delivery {delivery}) dropped: {}",
+                        describe(&value)
+                    );
+                    if reopen {
+                        self.close_relay(key);
+                    }
+                }
+            },
         }
     }
 
@@ -1942,6 +2156,99 @@ impl Bridge {
     }
 }
 
+impl Bridge {
+    /// The Chromium id of `tab`, when the table knows it (the hub's lookup).
+    pub(crate) fn chromium_id(&self, tab: TabId) -> Option<i64> {
+        self.inner.borrow().table.chromium(tab)
+    }
+
+    /// Queue delivery of `event`, with `args`, to `extension`'s worker
+    /// (`BridgeTransport::emit`, `wake`). An extension that is not bridged and
+    /// on, or whose relay has given up, has nothing to deliver to: the event is
+    /// dropped (logged) and never retried, as an undeliverable click is.
+    fn event(&self, extension: &str, event: &str, args: &[Value]) {
+        if self.given_up(extension) || self.given_up(HELPER_KEY) {
+            log::warn!("bridge: {event} for {extension} is dropped: its page did not load");
+            return;
+        }
+        let (delivery, instance) = {
+            let mut inner = self.inner.borrow_mut();
+            if !inner.wanted.iter().any(|id| id == extension) {
+                log::debug!(
+                    "bridge: {event} for {extension} is not delivered: it is not bridged and on"
+                );
+                return;
+            }
+            let delivery = inner.next_delivery;
+            inner.next_delivery += 1;
+            (delivery, inner.identities.get(extension).cloned())
+        };
+        self.queue(Job::Emit {
+            extension: extension.to_string(),
+            event: event.to_string(),
+            args: args.to_vec(),
+            attempt: 0,
+            delivery,
+            instance,
+        });
+        self.refresh();
+    }
+}
+
+impl BridgeTransport for Bridge {
+    fn reply(&self, call: CallId, result: Result<Value, String>) {
+        let taken = self.inner.borrow_mut().calls.take(call);
+        let Some((extension, instance, worker_call)) = taken else {
+            // The worker instance was replaced (`CallIds::retire_instances`),
+            // or the call was already answered: nothing is sent.
+            log::debug!("bridge: call {call} has no worker call to answer");
+            return;
+        };
+        let answer = match result {
+            Ok(value) => json!({"result": value}),
+            Err(message) => json!({"error": message}),
+        };
+        Bridge::reply(self, &extension, &instance, worker_call, &answer);
+    }
+
+    fn emit(&self, extension: &str, event: &str, args: &[Value]) {
+        self.event(extension, event, args);
+    }
+
+    fn wake(&self, extension: &str) {
+        self.event(extension, "bridge.wake", &[]);
+    }
+}
+
+/// Whether `job` is a queued event of `extension` that the hello of the
+/// instance `current` makes stale (`policy::job_kept`).
+fn is_stale_event(job: &Job, extension: &str, current: &str) -> bool {
+    match job {
+        Job::Emit {
+            extension: e,
+            instance: Some(instance),
+            ..
+        } => e.as_str() == extension && !job_kept(JobKind::Emit, instance, current),
+        _ => false,
+    }
+}
+
+/// Log a pending evaluation that is lost with its page: a delivery or an
+/// event among them is unknown to the engine from now on.
+fn log_lost(key: &str, pending: &Pending, why: &str) {
+    match pending {
+        Pending::Deliver { delivery, .. } => {
+            log::warn!("bridge: {key}: delivery {delivery} is unknown ({why})");
+        }
+        Pending::Emit {
+            event, delivery, ..
+        } => {
+            log::warn!("bridge: {key}: event {event} (delivery {delivery}) is unknown ({why})");
+        }
+        _ => {}
+    }
+}
+
 /// Drop the pending evaluations of `key`; a delivery among them is lost
 /// with its page, and the log says so.
 fn drop_pending(inner: &mut Inner, key: &str, why: &str) {
@@ -1949,16 +2256,14 @@ fn drop_pending(inner: &mut Inner, key: &str, why: &str) {
         if k != key {
             return true;
         }
-        if let Pending::Deliver { delivery, .. } = pending {
-            log::warn!("bridge: {key}: delivery {delivery} is unknown ({why})");
-        }
+        log_lost(key, pending, why);
         false
     });
     // An evaluation still inside its call is dropped with its page: its
     // answer, if any, is for a page that is gone.
     for sent in inner.sending.iter_mut().filter(|s| s.key == key) {
-        if let Some(Pending::Deliver { delivery, .. }) = &sent.pending {
-            log::warn!("bridge: {key}: delivery {delivery} is unknown ({why})");
+        if let Some(pending) = &sent.pending {
+            log_lost(key, pending, why);
         }
         sent.pending = None;
     }
@@ -1972,22 +2277,44 @@ fn describe(value: &Result<Value, String>) -> String {
     }
 }
 
+/// One tab's probe for its target id: the message id of the one
+/// `Target.getTargetInfo` it sends (`sent`). Until the call returns, that id
+/// is `RESERVED`, and CEF's answers in the window are kept (`early`); they
+/// count only once the call has returned the id they carry. So the probe
+/// acts on its own result and on no other method's result.
+#[derive(Default)]
+struct Probe {
+    sent: Cell<i32>,
+    early: RefCell<Vec<(i32, bool, Vec<u8>)>>,
+}
+
 wrap_dev_tools_message_observer! {
     struct TabProbe {
         bridge: Rc<Bridge>,
         tab: TabId,
+        probe: Rc<Probe>,
     }
 
     impl DevToolsMessageObserver {
         fn on_dev_tools_method_result(
             &self,
             _browser: Option<&mut Browser>,
-            _message_id: ::std::os::raw::c_int,
+            message_id: ::std::os::raw::c_int,
             success: ::std::os::raw::c_int,
             result: Option<&[u8]>,
         ) {
-            self.bridge
-                .target_known(self.tab, success != 0, result.unwrap_or_default());
+            let result = result.unwrap_or_default();
+            match self.probe.sent.get() {
+                RESERVED => self
+                    .probe
+                    .early
+                    .borrow_mut()
+                    .push((message_id, success != 0, result.to_vec())),
+                sent if sent == message_id => {
+                    self.bridge.target_known(self.tab, success != 0, result);
+                }
+                _ => {}
+            }
         }
     }
 }

@@ -196,9 +196,10 @@ carries it. The engine's rules (`policy.rs`, `relay.rs` `worker_hello`):
   tabs it does not name, keep their debuggers. A tab forgotten this way is
   hidden again when no debugger is left on it.
 - **Same instance:** nothing else is dropped.
-- **New instance:** the tab lists the old instance made and has not had
-  answered are dropped without an answer, since their call ids belong to
-  that instance. A debugger report the old instance made and has not had
+- **New instance:** the calls the old instance made are retired
+  (`CallIds::retire_instances`): no answer is sent for them, since their call
+  ids belong to that instance. The events queued for the old instance are
+  dropped (`policy::job_kept`), and logged. A debugger report the old instance made and has not had
   answered is kept and applied when the table resolves its tab (its session
   survives a stop; measured), and its answer is not sent (`policy::reply_due`).
   Clicks are kept (a delivery's id is unique).
@@ -223,7 +224,9 @@ target does not name the instance; it only decides the relay (below).
 **The worker target, a reload, and a restart.** The engine asks the helper
 for the target list every 2 s while any relay is open (`REFRESH_INTERVAL`,
 `refresh_due`), so a reload is seen within a bounded time with no tab
-activity. The helper lists an extension's service worker with type `worker`
+activity. A tab whose DevTools target id is learned between two refreshes
+asks for one on the next turn (`refresh_wanted`, read by `reopen`); no
+second timer exists for the table. The helper lists an extension's service worker with type `worker`
 (`chrome.debugger.getTargets`: a fact measured in the probe; `service_worker`
 is accepted too), with the extension's URL (`policy::worker_target`,
 `table::worker_target_of`). A target other than the recorded one is a change
@@ -308,8 +311,9 @@ delivery sent through it and not acknowledged is logged as unknown and is not
 retried (`drop_pending`; `after_delivery` never retries a failed evaluation, so
 it is at most once). A click queued but not yet sent waits for the fresh relay
 and is delivered once (`job_turn`). A tab list or debugger report of the old
-instance is dropped, or applied and not answered (`job_kept`, `reply_due`),
-because its call ids belong to a worker that is gone. In the zombie runs no
+instance is retired (its answer is not sent), and an event queued for it is
+dropped (`job_kept`); a debugger report is applied and not answered
+(`reply_due`), because its call ids belong to a worker that is gone. In the zombie runs no
 delivery was in flight on the closed relay, so the runs show the close and the
 hello, not a lost call. A call in flight across a restart window was not
 provoked deterministically: the stop run's quiet click is not timed against the
@@ -326,7 +330,7 @@ reopen, three to four seconds after the change). Cycle 6 asks the relay instead.
 
 | `method` | `args` | `result` | Since |
 |----------|--------|----------|-------|
-| `tabs.query` | `[queryInfo]` | `[{id, index, windowId, active, url, title}]` | 1 |
+| any `tabs.*` or `windows.*` function the script bridges, by name (`tabs.query`, `tabs.update`, `windows.get`, …) | the arguments as the extension passed them | the router's answer (`router.rs`): an answer from the engine's strip, a forward to Chromium, a request to the model, or a rejection | 5 |
 | `debugger.attached` | `[debuggee]` | `null` | 1 |
 | `debugger.detached` | `[debuggee]` | `null` | 1 |
 
@@ -354,20 +358,18 @@ treats any failure or timeout of a report as no answer and lets the
 extension's own call go on, so a report never blocks a debugger it
 cannot track.
 
-`id` is Chromium's tab id from the tab-id table. In protocol 1 the
-engine ignores `queryInfo` and returns every Nautilus tab, `windowId`
-is 1 and `index` is the tab's place among the engine's tabs: Phase 5
-answers from the shell's strip and filters. The bridge fetches
-Chromium's own tab object for each id (`chrome.tabs.get`) and lays
-`index`, `windowId`, `active` and `highlighted` over it. (Task 9 removed
-that fetch from the bridge: `tabs.query` is now sent by name through
-`core.js`, and a forward's `strip` is laid over Chromium's objects there,
-by `patchTabs`.) Any other
-method is answered `{error: "<method> is not supported by Nautilus."}`:
-the bridge fails closed. A `tabs.query` is answered when the helper's
-list of targets arrives, so a query made while the helper's page is
-still loading waits for it. When the helper's page has been given up, a
-query is answered with an error at once.
+The call's `method` is split at its first dot into the namespace and the
+function, and the hub routes it (`hub.rs`, `router.rs`). `tabs.query`, the
+other `tabs` and `windows` functions, and the `bridge.listen` message are
+answered by the engine from its strip or its own state, with no CEF call; a
+forwarded call goes to Chromium by name with the translated ids; a request
+(create, close, move, activate, open) waits for the model's answer; and a
+method the router does not know is rejected, never passed to Chromium. A
+worker's answer goes back down the relay under the worker instance that made
+the call (`CallIds`, which keeps the extension, the instance and the
+worker's own call id for each call the hub is answering). Phase 5 answers
+from the strip, so a query no longer waits for the helper's list of targets;
+the helper's page is needed only for the debugger and for clicks. 
 
 ## Events (engine to bridge)
 
@@ -385,6 +387,19 @@ the first error's message. The relay reports that as `received` with a
 failure, which the engine never retries (`policy::after_delivery`). Chromium's
 `tabs.get` for the click is the one `core.js` kept in `native` before it
 replaced the namespace, so a click never reaches the engine.
+
+Phase 5's events are the same messages: the engine sends `deliver` with
+`{id, event, args}` for each listener's event (`tabs.onCreated`,
+`windows.onFocusChanged`, and the rest of `differ.rs`'s list) and for
+`bridge.wake`, which starts a stopped worker and nothing else. A delivery
+is queued as a job (`Job::Emit`) with a bound of 256 queued jobs, and each
+has one delivery id, kept across its attempts, so an instance that ran it
+ignores a repeat. An event is retried once, on a fresh relay, only when the
+relay says the worker never received it (`policy::after_delivery`); a failed
+evaluation is not retried. An event that cannot be delivered (its extension
+is not on, its page has been given up, its queued event belongs to a worker
+instance that was replaced, or the queue sheds it) is logged and dropped,
+never delivered later, as an undeliverable click is.
 
 A click reaches the engine only when osmena's dispatch finds an action
 (`has_action()`: enabled, with an `action_title`, which `on_list` sets for
@@ -417,7 +432,8 @@ that page:
   stay shown; they go by the list, by a tab's close, or by a hello; I14). Its
   queued work is dropped with a log line, and its clicks are refused from
   then on;
-- the helper's queued tab lists are answered with an error, and clicks
+- the helper's queued work fails: clicks and events are dropped with a
+  log line, and each debugger report is answered without a change; clicks
   are refused.
 
 Nothing opens the page again until a sync sees its extension change (it
@@ -432,8 +448,8 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
 
 ## Limits in protocol 1
 
-- `tabs.query` reports every Nautilus tab with `windowId` 1; `queryInfo`
-  is ignored.
+- Phase 5 answers `tabs.query` from the strip; this line is kept for the
+  protocol 1 history. `windowId` and `index` are the strip's, not Chromium's.
 - Only the methods in the table above are answered; everything else is
   refused, never passed to Chromium.
 - Extension pages (the relay page included) receive the bridge's port,

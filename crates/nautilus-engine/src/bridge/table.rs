@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use osmena_core::TabId;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::policy::Session;
 
@@ -236,31 +236,10 @@ pub(crate) fn debuggee_of(arg: Option<&Value>) -> Option<Debuggee> {
     }
 }
 
-/// The answer to the bridge's `tabs.query` in Phase 1: every row, in
-/// tab order, with the fields the bridge lays over Chromium's own tab
-/// object. `windowId` is 1 for every tab and `index` is the row's
-/// place until Phase 5 answers from the shell's strip.
-pub(crate) fn query_rows(rows: &[Row], active: Option<TabId>) -> Value {
-    Value::Array(
-        rows.iter()
-            .enumerate()
-            .map(|(index, row)| {
-                json!({
-                    "id": row.chromium,
-                    "index": index,
-                    "windowId": 1,
-                    "active": Some(row.tab) == active,
-                    "url": row.url,
-                    "title": row.title,
-                })
-            })
-            .collect(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn a_hello_reports_each_tab_as_attached_not_attached_or_unknown() {
@@ -500,31 +479,5 @@ mod tests {
             table.resolve(&Debuggee::Target("D2C9E333".to_string())),
             None
         );
-    }
-
-    #[test]
-    fn a_query_lists_every_row_with_chromiums_id_and_marks_the_active_tab() {
-        let rows = vec![
-            Row {
-                tab: TabId(2),
-                chromium: 41,
-                url: "https://a/".into(),
-                title: "A".into(),
-            },
-            Row {
-                tab: TabId(5),
-                chromium: 42,
-                url: "https://b/".into(),
-                title: "B".into(),
-            },
-        ];
-        assert_eq!(
-            query_rows(&rows, Some(TabId(5))),
-            json!([
-                {"id": 41, "index": 0, "windowId": 1, "active": false, "url": "https://a/", "title": "A"},
-                {"id": 42, "index": 1, "windowId": 1, "active": true, "url": "https://b/", "title": "B"},
-            ])
-        );
-        assert_eq!(query_rows(&[], None), json!([]));
     }
 }

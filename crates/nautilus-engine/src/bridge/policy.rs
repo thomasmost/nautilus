@@ -72,8 +72,6 @@ pub(crate) fn job_turn(page: Option<bool>, wanted: bool) -> JobTurn {
 /// `relay`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum JobKind {
-    /// A tab list: answered with an error when it cannot be made.
-    Query,
     /// A click: logged as dropped when it cannot be delivered.
     Click,
     /// A debugger report: the table decides it, and the relay only carries
@@ -204,9 +202,8 @@ pub(crate) fn identity(seen: Option<&str>, reported: &str) -> Identity {
 }
 
 /// Whether a queued job made by the worker instance `instance` is kept once
-/// the extension's worker is `current`. A tab list holds the call id of one
-/// instance: answering it in another would resolve that instance's own call
-/// with the same id, so it is dropped. A click is a delivery and is kept (a
+/// the extension's worker is `current`. An event is for the listeners of the
+/// instance it was queued for, so a new instance drops it. A click is a delivery and is kept (a
 /// new instance has no record of its id, so it runs once there). A debugger
 /// report is kept whichever instance made it: the session it reports
 /// survives a worker stop (measured), so the table still applies it. An
@@ -215,7 +212,7 @@ pub(crate) fn identity(seen: Option<&str>, reported: &str) -> Identity {
 /// old one.
 pub(crate) fn job_kept(kind: JobKind, instance: &str, current: &str) -> bool {
     match kind {
-        JobKind::Query | JobKind::Emit => instance == current,
+        JobKind::Emit => instance == current,
         JobKind::Click | JobKind::Debugger => true,
     }
 }
@@ -498,9 +495,9 @@ mod tests {
     }
 
     #[test]
-    fn a_page_loss_fails_its_queries_and_clicks_and_never_a_debugger_report() {
+    fn a_page_loss_fails_its_events_and_clicks_and_never_a_debugger_report() {
         let jobs = [
-            (JobKind::Query, "a"),
+            (JobKind::Emit, "a"),
             (JobKind::Click, "a"),
             (JobKind::Debugger, "a"),
             (JobKind::Click, "b"),
@@ -519,9 +516,9 @@ mod tests {
 
     #[test]
     fn a_full_queue_fails_the_oldest_job_that_is_not_a_debugger_report() {
-        use JobKind::{Click, Debugger, Query};
-        assert_eq!(overflow(&[Query, Click], 2), Overflow::Fits);
-        assert_eq!(overflow(&[Debugger, Query, Click], 2), Overflow::Fail(1));
+        use JobKind::{Click, Debugger, Emit};
+        assert_eq!(overflow(&[Emit, Click], 2), Overflow::Fits);
+        assert_eq!(overflow(&[Debugger, Emit, Click], 2), Overflow::Fail(1));
         assert_eq!(
             overflow(&[Debugger, Debugger, Click], 2),
             Overflow::Fail(2),
@@ -542,14 +539,14 @@ mod tests {
     fn requeueing_past_the_bound_is_trimmed_to_it_one_job_at_a_time() {
         // The relay's requeue path: after a turn, the kept jobs and any new
         // ones are trimmed until the queue fits.
-        use JobKind::{Click, Query};
-        let mut kinds = vec![Query; 3];
+        use JobKind::{Click, Emit};
+        let mut kinds = vec![Emit; 3];
         kinds.extend(vec![Click; 2]);
         let mut failed = Vec::new();
         while let Overflow::Fail(index) = overflow(&kinds, 4) {
             failed.push(kinds.remove(index));
         }
-        assert_eq!(failed, vec![Query]);
+        assert_eq!(failed, vec![Emit]);
         assert_eq!(kinds.len(), 4, "the queue is at its bound, not past it");
     }
 
@@ -683,12 +680,6 @@ mod tests {
         // after it says hello. The same instance keeps its queued events.
         assert!(!job_kept(JobKind::Emit, "old", "new"));
         assert!(job_kept(JobKind::Emit, "a", "a"));
-    }
-
-    #[test]
-    fn a_tab_list_is_answered_only_by_the_instance_that_made_it() {
-        assert!(job_kept(JobKind::Query, "a", "a"));
-        assert!(!job_kept(JobKind::Query, "a", "b"));
     }
 
     #[test]

@@ -345,6 +345,7 @@ impl TabHostApi for TabHost {
         );
         match browser {
             Some(browser) => {
+                self.delegate.register_view(tab, &browser);
                 self.extensions.track_tab(tab, &browser, view.clone());
                 self.tabs.insert(tab, TabEntry { browser, view });
             }
@@ -374,6 +375,7 @@ impl TabHostApi for TabHost {
                     host.was_resized();
                 }
                 view.adopt(tab);
+                self.delegate.register_view(tab, &browser);
                 self.extensions.track_tab(tab, &browser, view.clone());
                 self.tabs.insert(tab, TabEntry { browser, view });
                 true
@@ -385,6 +387,7 @@ impl TabHostApi for TabHost {
     /// open. It finishes closing on the message loop.
     fn close_tab(&mut self, tab: TabId) {
         if let Some(entry) = self.tabs.remove(&tab) {
+            self.delegate.unregister_view(tab);
             self.extensions.untrack_tab(tab);
             entry.view.closing.set(true);
             // A button pressed in this tab is released nowhere (the
@@ -654,7 +657,9 @@ impl TabHostApi for TabHost {
     /// to the extension's worker for `tab` through the bridge.
     fn open_extension_action(&self, tab: TabId, extension: &str, anchor: ScreenRect) {
         match self.extensions.popup_url(extension) {
-            Some(url) => self.popups.open(extension, &url, anchor, self.scale.get()),
+            Some(url) => self
+                .popups
+                .open(extension, &url, anchor, self.scale.get(), tab),
             None => {
                 if !self.extensions.click_action(extension, tab) {
                     log::warn!(
