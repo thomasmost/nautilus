@@ -48,6 +48,12 @@ const HELPER_KEY: &str = "helper";
 /// never comes back cannot grow the queue without bound.
 const MAX_JOBS: usize = 256;
 
+/// The least time between two openings of hidden pages by `reopen`. A relay
+/// that dies right after it opens (or cannot open at all) is therefore opened
+/// again at most four times a second, while one that dies long after its
+/// opening comes back on the next turn.
+const REOPEN_GAP: std::time::Duration = std::time::Duration::from_millis(250);
+
 #[cfg(target_os = "macos")]
 fn no_window() -> cef::sys::cef_window_handle_t {
     std::ptr::null_mut()
@@ -401,6 +407,8 @@ struct Inner {
     wanted: Vec<String>,
     /// Whether the helper extension is loaded, as the last `sync` said.
     helper_loaded: bool,
+    /// When `reopen` last opened a page (see `REOPEN_GAP`).
+    last_open: Option<std::time::Instant>,
     /// Evaluations sent and not yet answered, by page key and the
     /// DevTools message id of that page's browser.
     pending: HashMap<(String, i32), Pending>,
@@ -580,7 +588,7 @@ impl Bridge {
     /// never from a CEF callback, so a dead relay returns within a turn or
     /// two whatever CEF was doing when it died.
     pub(crate) fn reopen(self: &Rc<Self>) {
-        let (helper_loaded, wanted, helper_open, open) = {
+        let (helper_loaded, wanted, helper_open, open, last) = {
             let inner = self.inner.borrow();
             let open: Vec<String> = inner.relays.keys().cloned().collect();
             (
@@ -588,12 +596,20 @@ impl Bridge {
                 inner.wanted.clone(),
                 inner.helper.is_some(),
                 open,
+                inner.last_open,
             )
         };
-        if wanted.is_empty() {
+        if wanted.is_empty() || last.is_some_and(|at| at.elapsed() < REOPEN_GAP) {
             return;
         }
-        if helper_loaded && !helper_open {
+        let (helper_wanted, relays_wanted) = {
+            let open: Vec<&str> = open.iter().map(String::as_str).collect();
+            (
+                helper_loaded && !helper_open,
+                relay_changes(&open, &wanted).0,
+            )
+        };
+        if helper_wanted {
             let url = format!("chrome-extension://{HELPER_ID}/helper.html");
             let generation = self.next_generation();
             let page = HiddenPage::open(self, HELPER_KEY, &url, generation);
@@ -602,9 +618,10 @@ impl Bridge {
             }
             self.inner.borrow_mut().helper = page;
         }
-        let open: Vec<&str> = open.iter().map(String::as_str).collect();
-        let (to_open, _) = relay_changes(&open, &wanted);
-        for id in to_open {
+        if helper_wanted || !relays_wanted.is_empty() {
+            self.inner.borrow_mut().last_open = Some(std::time::Instant::now());
+        }
+        for id in relays_wanted {
             self.open_relay(&id);
         }
     }
