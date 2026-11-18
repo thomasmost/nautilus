@@ -2,7 +2,7 @@
 //! extension into the profile. File work only; no CEF.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
@@ -74,7 +74,7 @@ pub(crate) fn rewrite_in_place(dir: &Path) -> Result<Bridged, String> {
         original,
     } = rewrite
     {
-        write(&dir.join(&loader_path), &loader)?;
+        write(&join_under(dir, &loader_path)?, &loader)?;
         let record = serde_json::json!({
             "service_worker": original.service_worker,
             "module": original.module,
@@ -91,7 +91,9 @@ pub(crate) fn rewrite_in_place(dir: &Path) -> Result<Bridged, String> {
 /// folder's name reduced to lower-case letters, digits and dashes, and
 /// eight hex digits of the SHA-256 of its path. The same source always
 /// lands in the same copy, and two folders of one name do not collide.
-/// Phases 5 to 7 keep this scheme; nothing else names a copy.
+/// On Windows the path is case-folded first (`path_key_text`), so two
+/// spellings of one folder share a copy. Phases 5 to 7 keep this scheme;
+/// nothing else names a copy.
 pub(crate) fn copy_name(source: &Path) -> String {
     let name = source
         .file_name()
@@ -104,7 +106,8 @@ pub(crate) fn copy_name(source: &Path) -> String {
         .collect();
     let slug = slug.trim_matches('-');
     let slug = if slug.is_empty() { "extension" } else { slug };
-    let hash: String = Sha256::digest(source.to_string_lossy().as_bytes())
+    let key = path_key_text(&source.to_string_lossy(), cfg!(windows));
+    let hash: String = Sha256::digest(key.as_bytes())
         .iter()
         .take(4)
         .map(|byte| format!("{byte:02x}"))
@@ -126,13 +129,75 @@ pub(crate) fn copy_and_rewrite(
     // spelling of one folder land in one copy.
     let source =
         &std::path::absolute(source).map_err(|e| format!("resolving {}: {e}", source.display()))?;
+    fs::create_dir_all(store_dir).map_err(|e| format!("creating {}: {e}", store_dir.display()))?;
+    refuse_nested(source, store_dir)?;
     let copy = store_dir.join(copy_name(source));
-    if copy.exists() {
-        fs::remove_dir_all(&copy).map_err(|e| format!("clearing {}: {e}", copy.display()))?;
+    // Built beside the copy and renamed into place, so a failure leaves
+    // nothing half-written in the store.
+    let staging = store_dir.join(format!("{}.partial", copy_name(source)));
+    let _ = fs::remove_dir_all(&staging);
+    match stage(source, &staging, &copy) {
+        Ok(bridged) => Ok((copy, bridged)),
+        Err(e) => {
+            let _ = fs::remove_dir_all(&staging);
+            Err(e)
+        }
     }
-    copy_dir(source, &copy)?;
-    let bridged = rewrite_in_place(&copy)?;
-    Ok((copy, bridged))
+}
+
+/// Copy `source` into `staging`, bridge the copy, and move it to `copy`,
+/// replacing an earlier copy.
+fn stage(source: &Path, staging: &Path, copy: &Path) -> Result<Bridged, String> {
+    copy_dir(source, staging)?;
+    let bridged = rewrite_in_place(staging)?;
+    if copy.exists() {
+        fs::remove_dir_all(copy).map_err(|e| format!("clearing {}: {e}", copy.display()))?;
+    }
+    fs::rename(staging, copy)
+        .map_err(|e| format!("moving the copy into {}: {e}", copy.display()))?;
+    Ok(bridged)
+}
+
+/// Refuse a source that is the store, inside it, or holds it: copying
+/// either into the other would recurse into its own copy.
+fn refuse_nested(source: &Path, store: &Path) -> Result<(), String> {
+    let canon =
+        |p: &Path| fs::canonicalize(p).map_err(|e| format!("resolving {}: {e}", p.display()));
+    let (source, store) = (canon(source)?, canon(store)?);
+    if source.starts_with(&store) || store.starts_with(&source) {
+        return Err(format!(
+            "{} and the extension store {} are nested; refusing to copy",
+            source.display(),
+            store.display()
+        ));
+    }
+    Ok(())
+}
+
+/// `relative` joined onto `dir`, if it names a file inside `dir`: no
+/// root, no `..`, no drive or stream (a `:` in any component).
+fn join_under(dir: &Path, relative: &str) -> Result<PathBuf, String> {
+    let rel = Path::new(relative);
+    let plain = !relative.is_empty()
+        && !relative.contains(':')
+        && rel.components().all(|c| matches!(c, Component::Normal(_)));
+    let joined = dir.join(rel);
+    if plain && joined.starts_with(dir) {
+        Ok(joined)
+    } else {
+        Err(format!("{relative:?} is not a file inside the extension"))
+    }
+}
+
+/// The text a path is hashed as. On Windows it is folded to lower case
+/// with backslashes, so one folder typed two ways names one copy; elsewhere
+/// the path is hashed as it is, so existing copies keep their names.
+fn path_key_text(path: &str, windows: bool) -> String {
+    if windows {
+        path.to_lowercase().replace('/', "\\")
+    } else {
+        path.to_string()
+    }
 }
 
 fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
@@ -141,11 +206,14 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
     for entry in entries {
         let entry = entry.map_err(|e| format!("reading {}: {e}", from.display()))?;
         let (source, target) = (entry.path(), to.join(entry.file_name()));
-        // `metadata` follows a symbolic link, so a linked file or
-        // directory is copied as what it points at.
-        let kind =
-            fs::metadata(&source).map_err(|e| format!("reading {}: {e}", source.display()))?;
-        if kind.is_dir() {
+        // `symlink_metadata` does not follow a link. A link is skipped:
+        // following one can loop back into the tree or leave it, and a
+        // dangling one has nothing to copy.
+        let kind = fs::symlink_metadata(&source)
+            .map_err(|e| format!("reading {}: {e}", source.display()))?;
+        if kind.is_symlink() {
+            log::debug!("bridge: skipping the symbolic link {}", source.display());
+        } else if kind.is_dir() {
             copy_dir(&source, &target)?;
         } else {
             fs::copy(&source, &target).map_err(|e| format!("copying {}: {e}", source.display()))?;
@@ -337,6 +405,125 @@ mod tests {
         assert_eq!(bridged, Bridged::NoWorker);
         assert!(!copy.join("nautilus-bridge").exists());
         assert!(copy_and_rewrite(&root.join("missing"), &root.join("store")).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_windows_spelling_is_folded_before_it_is_hashed_on_every_platform() {
+        // Case and separators fold on Windows only.
+        assert_eq!(
+            path_key_text(r"C:\Users\Me\Ext", true),
+            path_key_text(r"c:\users\me\ext", true)
+        );
+        assert_eq!(
+            path_key_text("C:/Users/Me/Ext", true),
+            path_key_text(r"c:\users\me\ext", true)
+        );
+        assert_ne!(
+            path_key_text("/Users/Me/Ext", false),
+            path_key_text("/users/me/ext", false)
+        );
+    }
+
+    #[test]
+    fn a_loader_path_must_stay_inside_the_extension() {
+        let dir = Path::new("/ext/root");
+        assert_eq!(
+            join_under(dir, "background/nautilus-loader.js"),
+            Ok(dir.join("background/nautilus-loader.js"))
+        );
+        for bad in [
+            "/etc/x.js",
+            "../x.js",
+            "C:/Users/x/nautilus-loader.js",
+            "C:sw.js",
+            "a:b.js",
+        ] {
+            assert!(join_under(dir, bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_macos_copy_name_is_unchanged() {
+        // Pinned from the scheme before the Windows case fold: existing
+        // installs find their copies by this name.
+        assert_eq!(
+            copy_name(Path::new("/Users/someone/dev/My Extension (v2)")),
+            "unpacked-my-extension--v2-cd4209bb"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_loop_in_the_source_is_skipped_and_the_copy_ends() {
+        let root = scratch("loop");
+        let source = extension(
+            &root,
+            r#"{"background":{"service_worker":"background/sw.js"}}"#,
+        );
+        std::os::unix::fs::symlink(&source, source.join("loop")).unwrap();
+        std::os::unix::fs::symlink(&source, source.join("background/up")).unwrap();
+        let (copy, bridged) = copy_and_rewrite(&source, &root.join("store")).unwrap();
+        assert_eq!(bridged, Bridged::Yes);
+        assert!(fs::symlink_metadata(copy.join("loop")).is_err());
+        assert!(fs::symlink_metadata(copy.join("background/up")).is_err());
+        assert!(copy.join("background/sw.js").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_in_the_source_does_not_fail_the_load() {
+        let root = scratch("dangling");
+        let source = extension(
+            &root,
+            r#"{"background":{"service_worker":"background/sw.js"}}"#,
+        );
+        std::os::unix::fs::symlink(root.join("nowhere"), source.join("dangling.js")).unwrap();
+        let (copy, bridged) = copy_and_rewrite(&source, &root.join("store")).unwrap();
+        assert_eq!(bridged, Bridged::Yes);
+        assert!(fs::symlink_metadata(copy.join("dangling.js")).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_source_that_contains_is_inside_or_is_the_store_is_refused() {
+        let root = scratch("nested");
+        let manifest = r#"{"background":{"service_worker":"background/sw.js"}}"#;
+        // The store inside the source, as a profile inside an extension.
+        let source = extension(&root, manifest);
+        let inside = source.join("chromium/extensions");
+        assert!(copy_and_rewrite(&source, &inside).is_err());
+        assert!(!inside.join(copy_name(&source)).exists());
+        // The source inside the store.
+        let profile = root.join("profile");
+        let nested = extension(&profile, manifest);
+        assert!(copy_and_rewrite(&nested, &profile).is_err());
+        // The source is the store.
+        assert!(copy_and_rewrite(&source, &source).is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_copy_leaves_nothing_behind_in_the_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("partial");
+        let source = extension(
+            &root,
+            r#"{"background":{"service_worker":"background/sw.js"}}"#,
+        );
+        let unreadable = source.join("zz.js");
+        fs::write(&unreadable, "x").unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        let store = root.join("store");
+        let result = copy_and_rewrite(&source, &store);
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(result.is_err());
+        let leftovers: Vec<_> = fs::read_dir(&store)
+            .map(|dir| dir.map(|e| e.unwrap().file_name()).collect())
+            .unwrap_or_default();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
         fs::remove_dir_all(&root).unwrap();
     }
 
