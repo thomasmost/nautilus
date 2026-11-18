@@ -65,6 +65,18 @@
     await step('query-active-current', async function () {
       return (await chrome.tabs.query({ active: true, currentWindow: true })).map(slim);
     });
+    // A web page (tabs[0] is https://example.com/) has no bridge in its main
+    // world; the id lets the driver ask the relay page what it holds.
+    await step('web-page', async function () {
+      var page = (await chrome.scripting.executeScript({
+        target: { tabId: tabs[0].id },
+        world: 'MAIN',
+        func: function () {
+          return { call: typeof self.__bridgeCall, send: typeof self.__nautilusBridgeSend, bridge: typeof self.__nautilusBridge };
+        }
+      }))[0].result;
+      return { page: page, id: chrome.runtime.id, url: tabs[0].url };
+    });
     await step('windows', async function () {
       return {
         all: await chrome.windows.getAll({ populate: true }),
