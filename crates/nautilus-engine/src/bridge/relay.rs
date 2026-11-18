@@ -787,12 +787,13 @@ impl Bridge {
         }
     }
 
-    /// A hidden page is gone: it was closed, or its renderer terminated.
-    /// Its pending evaluations are dropped, and the jobs that need it fail
-    /// now (`policy::failed_by_loss`): a debugger report does not, since it
-    /// needs the table, and waits for the next join. A wanted relay is opened
-    /// again by the next turn (`reopen`), never from this callback. `close`
-    /// says the page still has to be closed by us.
+    /// A hidden page is gone: it was closed, its renderer terminated, or its
+    /// DevTools session ended. Its pending evaluations are dropped, and the
+    /// jobs that need it fail now (`policy::failed_by_loss`): a debugger
+    /// report does not, since it needs the table, and waits for the next
+    /// join. A wanted relay is opened again by the next turn (`reopen`),
+    /// never from this callback. `close` says the page still has to be
+    /// closed by us.
     fn page_gone(self: &Rc<Self>, key: &str, generation: u64, why: &str, close: bool) {
         let (page, stale_jobs) = {
             let mut inner = self.inner.borrow_mut();
@@ -824,36 +825,25 @@ impl Bridge {
             (page, stale)
         };
         log::warn!("bridge: page {key} is gone ({why})");
-        if key != HELPER_KEY {
-            self.forget_debuggers(key);
-        }
+        // The extension's debuggers are kept: its worker may still be
+        // debugging, and its detach comes through the page that reopens.
+        // `sync` forgets them when the extension is no longer wanted.
         if close {
             page.close();
         }
         self.fail_jobs(stale_jobs, "its page is gone");
     }
 
-    /// A page's DevTools session ended: its pending results will not come.
-    /// The helper's list is asked again if something waits for it, and a
-    /// relay listens again.
+    /// A page's DevTools session ended: the page cannot be evaluated in any
+    /// more, so it is gone, like a closed one. It is closed and removed here,
+    /// and the next turn opens it again if it is still wanted. It is not
+    /// asked again from this callback: CEF reports the end again to a call
+    /// made inside it, which turned into an endless loop (the run that found
+    /// this logged the report thousands of times in a millisecond).
     fn page_detached(self: &Rc<Self>, key: &str, generation: u64) {
-        {
-            let mut inner = self.inner.borrow_mut();
-            if !is_current(&inner, key, generation) {
-                return;
-            }
-            drop_pending(&mut inner, key, "its DevTools session ended");
-            if key == HELPER_KEY {
-                inner.refreshing = false;
-            }
-        }
-        log::warn!("bridge: page {key}: DevTools session ended; asking again");
-        if key == HELPER_KEY {
-            if !self.inner.borrow().jobs.is_empty() {
-                self.refresh();
-            }
-        } else {
-            self.poll(key);
+        let current = is_current(&self.inner.borrow(), key, generation);
+        if current {
+            self.page_gone(key, generation, "its DevTools session ended", true);
         }
     }
 
