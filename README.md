@@ -207,6 +207,14 @@ belongs to one running Nautilus at a time.
   and routing tests live in osmena.
 - `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo fmt --all --check` — what CI runs.
+- `ci/side-panel/run.sh spike` (macOS, needs the bundle) — the scripted
+  run of the extension bridge: installs a test extension through the
+  bridge's rewrite on a throwaway profile, restarts, and checks the
+  bridge in its worker, an action click (sent through the test control,
+  not the toolbar's button) delivered once to a stopped worker,
+  `chrome.tabs.query` and the ids it returns, and that no extension call
+  takes a second with the window unfocused. `pump` runs the last part
+  alone. Judge it by its exit status, not through a pipe.
 
 ## Manual checklist
 
@@ -636,7 +644,9 @@ Upstream causes and the features they block are tracked in
   behaviour and not yet clicked by hand. Extension popups see Chromium's own tabs,
   not Nautilus's: `chrome.tabs.query({active: true})` finds the hidden
   management page, so a popup that acts on "the current tab" acts on
-  nothing. An action without a popup cannot be clicked. The Web Store
+  nothing. An action without a popup shows a button that does nothing yet
+  (the bridge that delivers its click reaches only the test extension so
+  far). The Web Store
   may show "Switch to Chrome" instead of an install button (install
   through the puzzle menu or Settings then); when it shows "Add to
   Chrome", the button installs through Nautilus but the page reports

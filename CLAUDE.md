@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-17 (a page's request for the microphone or the
+_Last updated: 2026-11-17 (the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -23,7 +23,7 @@ Cargo workspace (Rust 1.97.1 pinned in `rust-toolchain.toml`, edition 2024).
 
 | Crate                    | What it is |
 | ------------------------ | ---------- |
-| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s, and the page commands). `delegate.rs` turns CEF handlers into `EngineEvent`s (the context menu and downloads among them), `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events, `devtools.rs` opens a tab's developer tools, `mac_app.rs` gives winit's `NSApplication` the protocol CEF requires. `extensions.rs` drives Chromium's extension system through a hidden `chrome://extensions` page (`crx.rs` reads store downloads), `popup.rs` opens an action's popup in an owned window, `store.rs` reroutes the Chrome Web Store's own install buttons to the manager from inside the renderer. |
+| `crates/nautilus-engine` | `nautilus-engine` — the only crate that imports `cef`. Implements `osmena_engine::Engine` (`engine.rs`: `run_subprocess`, `Engine`, the message-pump bridge, `INFO`) and `osmena_engine::TabHost` (`host.rs`: the tabs of one window, each a windowless browser, handing the shell `PagePaint::Frame`s, and the page commands). `delegate.rs` turns CEF handlers into `EngineEvent`s (the context menu and downloads among them), `frame.rs` composes a tab's BGRA pixels with the popup widget, `input.rs` and `keycodes.rs` turn `EngineInput` into CEF events, `devtools.rs` opens a tab's developer tools, `mac_app.rs` gives winit's `NSApplication` the protocol CEF requires. `extensions.rs` drives Chromium's extension system through a hidden `chrome://extensions` page (`crx.rs` reads store downloads), `popup.rs` opens an action's popup in an owned window, `store.rs` reroutes the Chrome Web Store's own install buttons to the manager from inside the renderer. `bridge/` puts a script ahead of an extension's service worker (`rewrite.rs`, `install.rs`), reaches it through a relay page in a hidden browser (`relay.rs`), and joins tab ids with a helper extension's DevTools targets (`table.rs`); `docs/bridge-protocol.md` has the messages. |
 | `crates/nautilus`        | `nautilus` — the binary: `brand.rs` (the `Brand`), `main.rs` (dispatches Chromium's helper processes first, then logging, clap, and `osmena_shell::run`), `helper.rs` (the `nautilus-helper` bin for macOS), `build.rs` (the Windows icon resource), and the cargo-packager metadata in its `Cargo.toml`. |
 | `xtask`                  | `cargo xtask icons`, through `osmena-xtask`, and `cargo xtask bundle-mac` (`bundle_mac.rs`: the macOS app bundle). |
 
@@ -80,7 +80,7 @@ Ninja on `PATH`:
   runs a script in a page when its load finishes. The macOS smoke test
   in CI launches the bundle up to three times on the `ci-smoke`
   profile because a fresh profile's first launch sometimes loads
-  nothing on the Intel runner (C6 in `docs/upstream-issues.md`).
+  nothing on the Intel runner (C6 in `docs/upstream-issues.md`); `NAUTILUS_TEST_CONTROL=<dir>` makes the engine carry out `cmd-N.json` commands from that directory (`load` an unpacked extension through the bridge's rewrite, `click` an extension's action, a raw `devtools` message through the management browser with its answers in `devtools.log`, `table`); `NAUTILUS_PUMP_LOG=1` reports a message pump that has not spun and `NAUTILUS_PUMP_TICK_MS` sets the pump's fallback interval (0 switches it off). `ci/side-panel/run.sh spike|pump` is the scripted run of the extension bridge on a throwaway profile (macOS; about six minutes; judge it by its exit status, never through a pipe).
 
 ## Conventions
 
@@ -283,6 +283,24 @@ Ninja on `PATH`:
   store's, and loads it unpacked. Chromium keeps unpacked extensions
   across launches itself, in prefs it writes a few seconds later: a
   forced kill right after an install loses it, a normal exit does not.
+- **The pump runs CEF's work unasked.** `on_schedule_message_pump_work`
+  is a hint, not a complete account: CEF leaves work behind after a
+  10 ms slice and Chromium then does not ask again (C14). So
+  `PumpScheduler` clamps every delayed request to 33 ms, lets a later
+  request replace the pending one, and arms the timer after every
+  `spin`. Do not remove the tick to save idle wake-ups without
+  running `ci/side-panel/run.sh pump`.
+- **The extension bridge reaches a worker through one of the
+  extension's own pages.** CEF's frame hooks never fire for a service
+  worker and `store.rs`'s binding has no way back into a renderer, so
+  the bridge uses neither: `bridge.js` is loaded by a loader the
+  rewritten manifest names, the loader sits beside the original entry
+  (relative `importScripts` resolve against the worker's URL), and
+  the engine talks to a relay page with `Runtime.evaluate`, as the
+  manager talks to `chrome://extensions`. Use the message id
+  `execute_dev_tools_method(0, …)` returns. Names in an extension's
+  root must not start with `_`. Only what `NAUTILUS_TEST_CONTROL`
+  loads is bridged until Phase 5 of the side-panel plan.
 - **A `cef` binding callback that returns an int defaults to 0.** The
   `wrap_*!` macros install every callback with the trait's default, which
   for an int return is `0`: `CefWindowDelegate::CanClose` then says "no"
@@ -401,6 +419,130 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-17, the extension bridge)
+
+Phase 1 of the side-panel plan (`docs/bridge-protocol.md` has the
+messages; `docs/upstream-issues.md` has C11 to C14). What exists: the
+manifest rewrite and the loader (`bridge/rewrite.rs`), the files on disk,
+the copy of an unpacked folder and the helper extension written into the
+profile (`bridge/install.rs`); the worker gets `nautilus-bridge/bridge.js`
+(`bridge/js/`); the engine reaches it through a relay page, one of the
+extension's own pages in a hidden browser (`bridge/relay.rs`: `HiddenPage`
+and `Bridge`), with `Runtime.evaluate` over DevTools, and the worker's
+calls come back through a long poll (`nautilusRelay.next()`); the tab-id
+table joins each tab's DevTools target id with the helper's
+`chrome.debugger.getTargets()` (`bridge/table.rs`); an action click goes
+through `ExtensionManager::click_action`; the test control
+(`NAUTILUS_TEST_CONTROL`, `poll_control`) and the scripted harness
+(`ci/side-panel/`) drive it; the pump's fallback tick (`PumpScheduler`)
+and the hidden-tab fix (`ViewState::dev_tools_attached`, `hidden`) went
+in with it. Only the test control's `load` bridges an extension in this
+phase.
+
+Verified, scripted: `ci/side-panel/run.sh spike` at the head of
+`extension-side-panel` on 2026-11-17 (the bundle from
+`cargo xtask bundle-mac`), three runs, each exiting 0 with
+`RESULT all checks passed` and 34 PASS lines. Run A was before the
+driver fix (4ea16f8); B and C were after it.
+- Install: the worker runs the loader beside its entry
+  (`/background/nautilus-loader.js`) and the bridge is in it
+  (`{'protocol': 1, 'portHidden': True}`).
+- (a) After a restart the worker runs with the bridge and the click
+  reaches `action.onClicked`. After a stop: the driver saw the worker
+  running, then `ServiceWorker.stopAllWorkers` over DevTools stopped it
+  (B and C: "the worker stopped after 0.9 s (by DevTools)"); the click
+  started it, with the bridge. Run A reads "0 s", the detection before
+  4ea16f8, which did not look for the worker running first, so it is no
+  evidence of a stop. Run 2's log has no `TEST HOOK: command … load`.
+- (b) The click on the stopped worker was delivered once, to the worker
+  it started (`delivery 2 (action.onClicked, tab …) sent`, then
+  `delivery 2 taken by the worker after 1 attempt(s)`). Run 2 of B and C
+  has three deliveries, one per click, each taken after one attempt.
+- (c) `tabs.query` answered with the two Nautilus tabs, exactly one
+  active, both before and after the stop; `scripting.executeScript`,
+  `debugger.attach` and `debugger` `Runtime.evaluate` accepted each id
+  (nine lines per launch); `bridge: table has 2 tab(s) of 6 target(s)`;
+  the extension's own `onConnect` listeners never saw the bridge's port.
+- (d) Unfocused (Finder in front from six seconds in; `focus = false` is
+  the last focus line): 202 calls, max 87 ms (A), 80 ms (B) and 115 ms
+  (C), p95 63 to 64 ms, 0 timeouts, none over one second.
+
+The pump. Task 11 confirmed H1: CEF had work it did not ask for. With
+the tick off on the instrumented build the pump logged `no spin for
+137354 ms; CEF asked 0 time(s) since it ended; timer pending: false`
+and the latency run did not finish (`task11/pump-tick0-run1`); a second
+tick-off run, on the fix build, failed the same way
+(`task12/tick0-control`). With a 33 ms tick the run passed
+(`task11/pump-tick33-run1`: max 90 ms, p95 63 ms). H2 (a lost delayed
+request) is ruled out: with the replace rule and a 600000 ms interval,
+the timer pending and nothing asking sooner, the run still stalled, two
+calls taking 20005 and 20010 ms (`task11/pump-tick600000-run1`). H3 (a
+lost wake) was not observed: the wakes stayed below the spins and no
+`sample` was taken; F3 was not applied. H4 (App Nap) was not tested: no
+run had the window focused; F4 was not applied. H5 (a debugger on a
+hidden tab) was seen once with the tick on and before the hidden-tab fix:
+27 `Input.dispatchMouseEvent` calls, each 5001 to 5011 ms, to a tab behind
+another with a debugger attached (`task12/fix-run1`). F5 fixes it: a tab
+with a DevTools agent attached is not hidden, and `track_tab` takes the
+view so the observer can set the flag. Passing `run.sh pump` runs, 202
+calls each, unfocused: F1 alone, `task12/fix-run2` and `fix-run3` (max 77
+and 68 ms, p95 64 ms); with F5, five runs `task12/f5-run1` to `f5-run5`
+(max 65 to 77 ms, p95 63 to 64 ms). Without F5 one run in three failed
+(`fix-run1`); with F5 none in five. Idle cost of the tick: about 0.5 %
+CPU and 416 wake-ups, against 0.0 % and 201 without it (sampled in the
+session; no log was kept).
+
+The uncertainties U1 to U5, all held; no fallback was taken.
+- U1: a windowless browser with no parent view loads a `chrome-extension://`
+  page on macOS: `bridge: page helper ready` in the run logs.
+- U2: `Runtime.evaluate` with `awaitPromise` stays pending while
+  `nautilusRelay.next()` waits: the relay's poll stayed pending through
+  every run and the calls were answered. The stop waits were under a
+  second (0.9 s); the 40 s wait the plan named was not run.
+- U3: `defineProperty` on `onConnect` holds for the worker: `portHidden`
+  is true and no listener saw the port. Pages are not covered (below).
+- U4: `chrome.action.onClicked.dispatch` from the bridge runs the
+  listeners: the click reached `action.onClicked` in every run.
+- U5: `chrome.debugger.getTargets()` works from the helper's page in a
+  windowless browser: `bridge: table has 2 tab(s) of 6 target(s)`.
+
+Verified by hand: nothing in this phase. The toolbar's own click (Task
+13, step 5) is not done.
+
+Not verified: Windows (nothing here has run there; the harness is `sh`
+and `open -a Finder`); a module worker (`"type": "module"`) in a real run
+(the loader for it is unit-tested only); a store-installed extension, or
+one loaded by "Load unpacked…" (only the test control's `load` is
+bridged); an extension that already has pages with their own `onConnect`
+listeners (they receive the bridge's port until Phase 5 bridges pages); a
+click while the helper's page is still loading; a tab adopted from a
+page-opened popup (`Pending::Popup`) in the table; the focused-window
+case of the latency run (no run had the window focused); `tabs.group` and
+`tabs.discard` still crash for any extension that calls them. Also not
+verified: App Nap and lost wakes (H3, H4); the stall with the tick off
+was reproduced on one instrumented run and one fix-build run, not the
+three the plan asked for; F5 rests on one bad run in three without it and
+none in five with it.
+
+For Phase 5: the transport is as `docs/bridge-protocol.md` says (the long
+poll over `Runtime.evaluate` held, U2; no console fallback); `tabs.query`
+ignores `queryInfo` and reports `windowId: 1`; `load_bridged` copies on
+the UI thread and must move to the unpacking thread; a copied extension's
+directory is `unpacked-<name>-<8 hex of the hash of the source path>`
+(`install::copy_name`, the scheme Phase 5 keeps), so `Request::Uninstall`'s
+cleanup (which deletes `<store>/<id>` only, `extensions.rs`) must learn to
+delete it; the bridge must go into extension pages too, where it has to
+hide the port the same way; the unpacked-load queue exists (`next_load`).
+
+For Phase 6: a hidden page is `HiddenPage` in `relay.rs` (a windowless
+browser with a 16 by 16 view and a DevTools observer); the panel's browser
+can start from it but needs the tab's render handler.
+
+For Phase 7: `ManifestFacts::commands` carries each command's name,
+description and this platform's `suggested_key` as written;
+`chrome.commands.onCommand.dispatch` worked in the probe from the worker's
+context; F5 was applied (the hidden-tab fix above).
 
 ## Status and handoff (2026-11-17, later)
 
