@@ -55,8 +55,9 @@ opens it: the relay to deliver (which starts a stopped worker), the
 bridge when the worker was started by something else and has a call.
 Each end uses the newest port. An idle port does not keep the worker
 alive. The bridge wraps `chrome.runtime.onConnect`'s `addListener`,
-`removeListener` and `hasListener` so that the extension's own
-listeners never receive this port. The wrapper is in the worker only:
+`removeListener`, `hasListener` and `hasListeners` so that the extension's
+own listeners never receive this port, and `hasListener` and
+`hasListeners` do not count the bridge's own listener. The wrapper is in the worker only:
 extension pages have no bridge in protocol 1 (see the limits below).
 
 | Direction | Message | Meaning |
@@ -69,18 +70,32 @@ extension pages have no bridge in protocol 1 (see the limits below).
 
 ## Delivered once
 
-The relay sends a delivery again, once, on a new port, only if the port
-closed before `received` arrived: a message to a port whose worker is
-gone is dropped, so nothing ran. After `received` it is never sent
-again. The bridge keeps the ids it has run and ignores a repeat. If the
-relay's promise fails or resolves `ok: false` with `received: false`,
-the engine closes that relay, opens a fresh one and tries once more; a
-second failure is logged and the event is dropped.
+What is guaranteed, and what is not:
 
-The guarantee has a limit. The bridge's record of ids is per worker
-instance. If a worker stops after it has received a delivery but before
-the relay has heard `received`, the relay can send the delivery to a new
-worker instance, which has no record of it, and the listeners could run
+- Within one relay, the relay page sends a delivery again, on a new
+  port, only if the port closed before `received` arrived. A message to a
+  port whose worker is gone is dropped, so nothing ran. After `received`
+  it is never sent again by the relay.
+- Within one worker instance, the bridge keeps the delivery ids it has run
+  and ignores a repeat, so a repeat that reaches the same worker runs
+  nothing twice.
+- The engine retries a delivery at most once, and only when the relay
+  answers `ok: false` with `received` not true on the first attempt. It
+  then opens a fresh relay and sends the same delivery id again (the id
+  is the one the first attempt carried, so the worker instance above
+  ignores it if it had already run it). A second failure is logged and the
+  click dropped; the relay is replaced so the next click has a live one.
+- When the relay's evaluation itself fails (the relay page is gone or its
+  call failed), the engine does not retry: whether the worker took the
+  delivery is unknown, and a retry could reach a new worker instance that
+  has no record of the id. The click is dropped and logged, and the relay
+  is replaced.
+- A worker that took a delivery and then failed (`received: true`,
+  `ok: false`) is never sent it again.
+
+Not guaranteed: a worker instance that stops after it has received a
+delivery but before the relay has heard `received` can be replaced by a
+new one, which has no record of the id; the listeners could then run
 twice. The window is the time between receipt and the `received` message
 arriving. No run hit it; every delivery in the Phase 1 runs was taken on
 its first attempt.
@@ -90,6 +105,23 @@ its first attempt.
 | `method` | `args` | `result` | Since |
 |----------|--------|----------|-------|
 | `tabs.query` | `[queryInfo]` | `[{id, index, windowId, active, url, title}]` | 1 |
+| `debugger.attached` | `[tabId]` | `null` | 1 |
+| `debugger.detached` | `[tabId]` | `null` | 1 |
+
+`debugger.attached` and `debugger.detached` report that an extension
+attached or detached a `chrome.debugger` session on a tab (`tabId` is
+Chromium's). The bridge sends them after Chromium has made the change,
+and the call (the wrapped `chrome.debugger.attach`/`detach`) resolves
+only when the engine has answered. The engine answers once the tab's
+state is applied: a tab that is hidden is shown while any extension
+debugs it, and hidden again when the last debugger goes (`bridge/debugger.rs`).
+So a debugger's first command meets a visible renderer. A report for a
+tab the table does not know waits for a table refresh first. A detach
+that Chromium makes without the extension (the tab closed, or the user
+cancelled the infobar) comes through `chrome.debugger.onDetach`. The
+bridge treats any failure or timeout of a report as no answer and lets
+the extension's own call go on, so a report never blocks a debugger it
+cannot track.
 
 `id` is Chromium's tab id from the tab-id table. In protocol 1 the
 engine ignores `queryInfo` and returns every Nautilus tab, `windowId`
