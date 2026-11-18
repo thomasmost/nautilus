@@ -710,10 +710,15 @@ impl Bridge {
 
     /// A tab closed.
     pub(crate) fn untrack(&self, tab: TabId) {
-        let mut inner = self.inner.borrow_mut();
-        inner.tabs.remove(&tab);
-        inner.table.forget(tab);
-        inner.debuggers.forget_tab(tab);
+        // The record (its browser and probe) is dropped after the borrow.
+        let record = {
+            let mut inner = self.inner.borrow_mut();
+            let record = inner.tabs.remove(&tab);
+            inner.table.forget(tab);
+            inner.debuggers.forget_tab(tab);
+            record
+        };
+        drop(record);
     }
 
     /// Any tab the table could name, for a test click when no tab has
@@ -1125,17 +1130,19 @@ impl Bridge {
         // The pages are taken out before they are closed: closing one can
         // call back into this bridge (its DevTools session ends), which
         // must find the state free.
-        let pages: Vec<HiddenPage> = {
+        let (pages, tabs): (Vec<HiddenPage>, Vec<TabRecord>) = {
             let mut guard = self.inner.borrow_mut();
             let inner = &mut *guard;
-            inner.tabs.clear();
+            let tabs: Vec<TabRecord> = inner.tabs.drain().map(|(_, record)| record).collect();
             inner.pending.clear();
             inner.jobs.clear();
             inner.wanted.clear();
             let mut pages: Vec<HiddenPage> = inner.helper.take().into_iter().collect();
             pages.extend(inner.relays.drain().map(|(_, page)| page));
-            pages
+            (pages, tabs)
         };
+        // The tabs' records and the pages are let go with no borrow held.
+        drop(tabs);
         for page in pages {
             page.close();
         }

@@ -150,7 +150,10 @@ impl Hub {
 
     /// Called on every spin of the engine.
     pub(crate) fn tick(self: &Rc<Self>) {
-        self.spent.borrow_mut().clear();
+        // Taken out before they are dropped: letting go of a registration
+        // is a CEF call, which is not made with a borrow held.
+        let spent = std::mem::take(&mut *self.spent.borrow_mut());
+        drop(spent);
         let effects = {
             let mut state = self.state.borrow_mut();
             if !state.needs_tick() {
@@ -164,9 +167,11 @@ impl Hub {
     /// Let go of everything that holds a CEF object, before CEF shuts
     /// down.
     pub(crate) fn shutdown(&self) {
-        self.captures.borrow_mut().clear();
-        self.spent.borrow_mut().clear();
+        let captures = std::mem::take(&mut *self.captures.borrow_mut());
+        let spent = std::mem::take(&mut *self.spent.borrow_mut());
         self.routes.borrow_mut().clear();
+        drop(captures);
+        drop(spent);
     }
 
     /// Carry out `effects`. No borrow of the hub's state is held here.
