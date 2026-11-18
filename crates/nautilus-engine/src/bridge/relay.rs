@@ -34,9 +34,9 @@ use super::evaluation;
 use super::install::HELPER_ID;
 use super::policy::{
     AfterChange, CHANGE_GRACE_REFRESHES, Evidence, Identity, JobKind, JobTurn, MAX_OPENINGS, Next,
-    Opening, Overflow, REFRESH_INTERVAL, Session, WorkerTarget, after_change, after_delivery,
+    Opening, Overflow, REFRESH_INTERVAL, Session, WorkerTarget, WorkerWatch, after_delivery,
     check_due, failed_by_loss, forgets, identity, is_generation, job_kept, job_turn, next_opening,
-    overflow, relay_changes, reply_due, session_evidence, tabs_to_forget, worker_target,
+    overflow, relay_changes, reply_due, session_evidence, tabs_to_forget,
 };
 use super::rewrite::BRIDGE_DIR;
 use super::table::{
@@ -440,15 +440,9 @@ struct Inner {
     openers: HashMap<String, Opener>,
     /// The worker instance each extension last reported (`identity`).
     identities: HashMap<String, String>,
-    /// The DevTools target id of each extension's worker at the last table
-    /// refresh that listed it (`policy::worker_target`).
-    worker_targets: HashMap<String, String>,
-    /// Refreshes since each extension's worker target changed, while no new
-    /// worker instance has said hello through its relay (`after_change`).
-    changed_waiting: HashMap<String, u32>,
-    /// Extensions whose new worker instance said hello through their relay since
-    /// the last refresh (`worker_hello`, a restarted instance).
-    new_instance_heard: std::collections::HashSet<String>,
+    /// Each extension's worker target as the table refreshes saw it, and the
+    /// change waiting for its relay's hello (`policy::WorkerWatch`).
+    watches: HashMap<String, WorkerWatch>,
     /// The sessions a hello reported for tabs the table could not yet name, by
     /// extension; applied by the next join that names them (`apply_pending`).
     pending_sessions: HashMap<String, Vec<(i64, Session)>>,
@@ -623,9 +617,7 @@ impl Bridge {
                 }
             }
             for id in &to_close {
-                inner.worker_targets.remove(id);
-                inner.changed_waiting.remove(id);
-                inner.new_instance_heard.remove(id);
+                inner.watches.remove(id);
                 inner.pending_sessions.remove(id);
             }
             let close_helper = bridged.is_empty() && inner.helper.is_some();
@@ -726,73 +718,45 @@ impl Bridge {
     /// the live worker and kept (a restart after a stop is this case: closing it
     /// would fail the calls in flight on its port); a relay no new instance
     /// reaches within `CHANGE_GRACE_REFRESHES` refreshes is a zombie, closed, and
-    /// the next turn opens a fresh one. Debuggers are kept in both cases; the
-    /// fresh relay's hello decides them (`worker_hello`).
+    /// the next turn opens a fresh one. Only a hello received after the change
+    /// was observed counts (`policy::WorkerWatch`): a restart whose hello came
+    /// first costs one reopen after the grace, and a reload after a restart
+    /// cannot be kept by the restart's hello (I16). Debuggers are kept in both
+    /// cases; the fresh relay's hello decides them (`worker_hello`).
     fn check_worker_targets(&self, targets: &[Target]) {
         let mut closes = Vec::new();
         {
             let mut inner = self.inner.borrow_mut();
             for extension in inner.wanted.clone() {
-                // A new instance heard through the relay since the last refresh.
-                let heard = inner.new_instance_heard.remove(&extension);
                 let listed = worker_target_of(targets, &extension);
-                let recorded = inner.worker_targets.get(&extension).cloned();
-                match worker_target(recorded.as_deref(), listed.as_deref()) {
+                let watch = inner.watches.entry(extension.clone()).or_default();
+                let recorded = watch.recorded().map(str::to_string);
+                let (target, verdict) = watch.refresh(listed.as_deref());
+                match target {
                     WorkerTarget::First => {
-                        if let Some(listed) = listed {
+                        if let Some(listed) = &listed {
                             log::info!("bridge: {extension}'s worker is target {listed}");
-                            inner.worker_targets.insert(extension, listed);
                         }
                     }
-                    WorkerTarget::Changed => {
-                        let listed = listed.unwrap_or_default();
-                        log::info!(
-                            "bridge: {extension}'s worker target changed from {} to {listed}: the worker was reloaded or started anew",
-                            recorded.unwrap_or_default()
-                        );
-                        inner.worker_targets.insert(extension.clone(), listed);
-                        inner.changed_waiting.remove(&extension);
-                        match after_change(heard, 0) {
-                            AfterChange::Keep => log::info!(
-                                "bridge: {extension}'s new worker instance already said hello through its relay: the relay is kept"
-                            ),
-                            AfterChange::Wait => {
-                                inner.changed_waiting.insert(extension, 0);
-                            }
-                            AfterChange::Close => closes.push(extension),
-                        }
-                    }
-                    WorkerTarget::Same | WorkerTarget::Absent => {
-                        // A change still waiting for its hello counts this refresh
-                        // (a refresh that lists no worker does not count).
-                        if let (Some(waited), true) = (
-                            inner.changed_waiting.get(&extension).copied(),
-                            listed.is_some(),
-                        ) {
-                            let waited = waited + 1;
-                            match after_change(heard, waited) {
-                                AfterChange::Keep => {
-                                    inner.changed_waiting.remove(&extension);
-                                    log::info!(
-                                        "bridge: {extension}'s new worker instance said hello through its relay: the relay is kept"
-                                    );
-                                }
-                                AfterChange::Wait => {
-                                    inner.changed_waiting.insert(extension, waited);
-                                }
-                                AfterChange::Close => {
-                                    inner.changed_waiting.remove(&extension);
-                                    closes.push(extension);
-                                }
-                            }
-                        }
-                    }
+                    WorkerTarget::Changed => log::info!(
+                        "bridge: {extension}'s worker target changed from {} to {}: the worker was reloaded or started anew",
+                        recorded.unwrap_or_default(),
+                        listed.unwrap_or_default()
+                    ),
+                    WorkerTarget::Same | WorkerTarget::Absent => {}
+                }
+                match verdict {
+                    Some(AfterChange::Keep) => log::info!(
+                        "bridge: {extension}'s new worker instance said hello through its relay: the relay is kept"
+                    ),
+                    Some(AfterChange::Close) => closes.push(extension),
+                    Some(AfterChange::Wait) | None => {}
                 }
             }
         }
         for extension in closes {
             log::info!(
-                "bridge: no new worker instance said hello through {extension}'s relay within {CHANGE_GRACE_REFRESHES} refreshes of its worker target changing: the relay is a zombie; it is closed and opened again (its debuggers are kept)"
+                "bridge: no new worker instance said hello through {extension}'s relay after its worker target changed, within {CHANGE_GRACE_REFRESHES} refreshes: the relay is closed and opened again (a zombie cannot reach the new worker; a live relay whose hello came before the change is closed the same way; its debuggers are kept)"
             );
             self.close_relay(&extension);
         }
@@ -925,20 +889,18 @@ impl Bridge {
         if !forgets(evidence) {
             return;
         }
-        let freed: Vec<(TabId, Option<TabHandles>)> = {
+        let freed = {
             let mut inner = self.inner.borrow_mut();
             inner
                 .debuggers
                 .forget_extension(extension)
                 .into_iter()
-                .map(|tab| (tab, tab_handles(&inner, tab)))
-                .collect()
+                .map(|tab| (tab, tab_handles(&inner, tab), inner.table.chromium(tab)))
+                .collect::<Vec<_>>()
         };
-        for (tab, handles) in freed {
+        for (tab, handles, chromium) in freed {
             log::info!("bridge: {tab:?} has no debugger left ({extension} is gone)");
-            if let Some((browser, view)) = handles {
-                set_tab_debugged(&browser, &view, false);
-            }
+            self.hide_again(tab, handles, chromium);
         }
     }
 
@@ -948,18 +910,31 @@ impl Bridge {
         if !forgets(evidence) {
             return;
         }
-        let handles = {
+        let (handles, chromium) = {
             let mut inner = self.inner.borrow_mut();
             if inner.debuggers.detach(extension, tab) != Change::Undebugged {
                 return;
             }
-            tab_handles(&inner, tab)
+            (tab_handles(&inner, tab), inner.table.chromium(tab))
         };
         log::info!(
             "bridge: {tab:?} has no debugger left ({extension}, its worker says it has no session on the tab: {evidence:?})"
         );
-        if let Some((browser, view)) = handles {
-            set_tab_debugged(&browser, &view, false);
+        self.hide_again(tab, handles, chromium);
+    }
+
+    /// Hide `tab` once no debugger is left on it, and log that it was hidden
+    /// again, in the words the detach path uses (`set_debugged`): the driver's
+    /// checks read that line, so it is logged only when the tab was hidden.
+    fn hide_again(&self, tab: TabId, handles: Option<TabHandles>, chromium: Option<i64>) {
+        let Some((browser, view)) = handles else {
+            return;
+        };
+        if set_tab_debugged(&browser, &view, false) {
+            let chromium = chromium.map_or_else(|| "?".to_string(), |id| id.to_string());
+            log::info!(
+                "bridge: {tab:?} (Chromium tab {chromium}) hidden again: no debugger is left on it"
+            );
         }
     }
 
@@ -1384,11 +1359,14 @@ impl Bridge {
             let mut inner = self.inner.borrow_mut();
             let seen = inner.identities.get(extension).cloned();
             let identity = identity(seen.as_deref(), &hello.instance);
-            if identity == Identity::Restarted {
-                // A new instance reached the engine through this relay: the relay
-                // is connected to the live worker (`check_worker_targets`).
-                inner.new_instance_heard.insert(extension.to_string());
-            }
+            // A new instance reached the engine through this relay: the relay is
+            // connected to the live worker, if a change is waiting for it
+            // (`check_worker_targets`; a hello before the change does not count).
+            inner
+                .watches
+                .entry(extension.to_string())
+                .or_default()
+                .hello(identity == Identity::Restarted);
             inner
                 .identities
                 .insert(extension.to_string(), hello.instance.clone());

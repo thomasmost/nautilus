@@ -282,6 +282,71 @@ pub(crate) fn after_change(heard: bool, waited: u32) -> AfterChange {
     }
 }
 
+/// What the engine remembers of one extension's worker target, and the change
+/// that waits for its relay's hello (`after_change`). Pure: relay.rs keeps one
+/// per extension and calls `hello` and `refresh` in the order the events came.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WorkerWatch {
+    /// The worker target last recorded. An absence (an idle stop) keeps it.
+    recorded: Option<String>,
+    /// Refreshes since the change that is waiting for a hello, the change's
+    /// own refresh counting as 0; `None` when no change waits.
+    waiting: Option<u32>,
+    /// A new worker instance said hello through the relay since the last
+    /// refresh, while a change waited.
+    heard: bool,
+}
+
+impl WorkerWatch {
+    /// The worker target recorded before the next refresh.
+    pub(crate) fn recorded(&self) -> Option<&str> {
+        self.recorded.as_deref()
+    }
+
+    /// A worker's hello came through the relay. `restarted` is `Identity::Restarted`.
+    /// It counts only while a change waits for its hello: a hello that came
+    /// before the change was observed is about the worker before it, so it
+    /// cannot keep the relay (I16: the zombie relay of a restart and a reload).
+    pub(crate) fn hello(&mut self, restarted: bool) {
+        if restarted && self.waiting.is_some() {
+            self.heard = true;
+        }
+    }
+
+    /// A table refresh listed `listed` as the extension's worker target. Returns
+    /// how the target compares with the recorded one, and the verdict on the
+    /// relay when a change is waiting for its hello. A change starts its wait
+    /// with no hello counted: the hellos before it were taken before it was seen.
+    pub(crate) fn refresh(&mut self, listed: Option<&str>) -> (WorkerTarget, Option<AfterChange>) {
+        let target = worker_target(self.recorded.as_deref(), listed);
+        let verdict = match target {
+            WorkerTarget::First => {
+                self.recorded = listed.map(str::to_string);
+                None
+            }
+            WorkerTarget::Changed => {
+                self.recorded = listed.map(str::to_string);
+                self.waiting = Some(0);
+                self.heard = false;
+                Some(after_change(false, 0))
+            }
+            WorkerTarget::Same | WorkerTarget::Absent => match (self.waiting, listed.is_some()) {
+                (Some(waited), true) => {
+                    let waited = waited + 1;
+                    let verdict = after_change(std::mem::take(&mut self.heard), waited);
+                    self.waiting = match verdict {
+                        AfterChange::Wait => Some(waited),
+                        AfterChange::Keep | AfterChange::Close => None,
+                    };
+                    Some(verdict)
+                }
+                _ => None,
+            },
+        };
+        (target, verdict)
+    }
+}
+
 /// How often a table refresh is asked for while a relay is open, so that a
 /// reloaded worker is seen within a bounded time even with no tab activity.
 /// A reload leaves the relay page alive with no port event (measured:
@@ -721,5 +786,127 @@ mod tests {
         }
         assert_eq!(openings, vec![0, 250, 750, 1750, 3750]);
         assert_eq!(openings.len() as u32, MAX_OPENINGS);
+    }
+
+    // The worker-target watch, as the table refreshes and the relay's hellos
+    // arrive. `W` is a listed target, `None` a stopped worker.
+    fn refresh(watch: &mut WorkerWatch, listed: Option<&str>) -> Option<AfterChange> {
+        watch.refresh(listed).1
+    }
+
+    #[test]
+    fn a_restart_whose_hello_came_before_the_change_is_observed_is_not_kept_by_that_hello() {
+        // Idle stop (A absent), then a click restarts it as B. B's hello reaches
+        // the engine before the refresh that lists B: that hello is about the
+        // worker before the change, so the change waits for a hello of its own.
+        let mut watch = WorkerWatch::default();
+        refresh(&mut watch, Some("a"));
+        refresh(&mut watch, None);
+        watch.hello(true);
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
+        assert_eq!(
+            refresh(&mut watch, Some("b")),
+            Some(AfterChange::Wait),
+            "no hello after the change: one reopen after the grace is the cost"
+        );
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Close));
+    }
+
+    #[test]
+    fn a_restart_whose_hello_comes_after_the_change_is_observed_is_kept() {
+        let mut watch = WorkerWatch::default();
+        refresh(&mut watch, Some("a"));
+        refresh(&mut watch, None);
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
+        watch.hello(true);
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Keep));
+        assert_eq!(
+            refresh(&mut watch, Some("b")),
+            None,
+            "a kept relay is watched no longer"
+        );
+    }
+
+    #[test]
+    fn a_restart_then_a_reload_in_one_window_closes_the_zombie_relay() {
+        // I16: A absent, a click restarts it as B through relay R, B's hello
+        // reaches the engine, and B reloads at once: C starts. R is a zombie
+        // (it cannot reach C), so no hello can come through it. B's hello was
+        // before the change that is now seen (A to C), so it must not keep R.
+        let mut watch = WorkerWatch::default();
+        refresh(&mut watch, Some("a"));
+        refresh(&mut watch, None);
+        watch.hello(true);
+        assert_eq!(
+            refresh(&mut watch, Some("c")),
+            Some(AfterChange::Wait),
+            "B's hello, before the change, does not keep the relay"
+        );
+        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Wait));
+        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Close));
+    }
+
+    #[test]
+    fn a_reload_seen_by_the_detector_with_no_hello_is_closed_after_the_grace() {
+        let mut watch = WorkerWatch::default();
+        refresh(&mut watch, Some("a"));
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Close));
+    }
+
+    #[test]
+    fn two_reloads_in_a_row_keep_nothing_and_each_change_waits_for_its_own_hello() {
+        // The hello between the two reloads is the first new worker's, and
+        // the second reload's change must not inherit it.
+        let mut watch = WorkerWatch::default();
+        refresh(&mut watch, Some("a"));
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
+        watch.hello(true);
+        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Wait));
+        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Wait));
+        assert_eq!(refresh(&mut watch, Some("c")), Some(AfterChange::Close));
+    }
+
+    #[test]
+    fn a_hello_on_a_freshly_reopened_relay_keeps_nothing_once_no_change_waits() {
+        let mut watch = WorkerWatch::default();
+        refresh(&mut watch, Some("a"));
+        refresh(&mut watch, Some("b"));
+        refresh(&mut watch, Some("b"));
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Close));
+        // The engine opens a fresh relay, which reaches the live worker.
+        watch.hello(true);
+        assert_eq!(refresh(&mut watch, Some("b")), None);
+    }
+
+    #[test]
+    fn a_hello_of_the_same_instance_does_not_keep_a_waiting_relay() {
+        let mut watch = WorkerWatch::default();
+        refresh(&mut watch, Some("a"));
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
+        watch.hello(false);
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Close));
+    }
+
+    #[test]
+    fn an_idle_stop_is_no_change_and_its_return_under_the_same_id_is_none() {
+        let mut watch = WorkerWatch::default();
+        refresh(&mut watch, Some("a"));
+        assert_eq!(refresh(&mut watch, None), None);
+        assert_eq!(refresh(&mut watch, Some("a")), None);
+    }
+
+    #[test]
+    fn a_hello_while_the_worker_is_absent_keeps_a_waiting_relay_when_it_is_listed_again() {
+        // A worker that said hello and is not listed yet (its listing is late)
+        // is still the live one; the listing that returns keeps the relay.
+        let mut watch = WorkerWatch::default();
+        refresh(&mut watch, Some("a"));
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Wait));
+        assert_eq!(refresh(&mut watch, None), None);
+        watch.hello(true);
+        assert_eq!(refresh(&mut watch, Some("b")), Some(AfterChange::Keep));
     }
 }
