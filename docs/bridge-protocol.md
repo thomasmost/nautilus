@@ -588,7 +588,7 @@ Adaptations carried by later tasks:
 Not determined at reconciliation:
 
 - Whether CEF answers `Target.getTargetInfo` inside the `execute_dev_tools_method` call (the basis of the reservation in B8).
-- Whether `ext/phase5.js` is inert when no suite is listening (B15).
+- Whether `ext/phase5.js` is inert when no suite is listening (B15): settled by Task 13, see "Phase 5 scripted run" below. Its results are the same as before, with one change the runs showed: its listeners let a delivered event start a stopped worker.
 - Whether the Phase 5 code compiles against the bridge: settled by the compiler in Tasks 9 to 12, not by reading.
 
 ## Messages Phase 5 adds
@@ -667,3 +667,112 @@ message `nautilus-bridge-call` with one string argument
 extension from the calling frame's own address, never from the message,
 and drops a call from a frame that is not a bridged extension's page.
 
+
+## Phase 5 scripted run (Task 13)
+
+What the run established, on the macOS bundle built from this tree (2026-11-18).
+Each figure is from the kept files under `evidence/phase-5/` (not committed);
+the names are the run's `.out` files, and `-logs/` directories hold the logs.
+
+**The regression modes (B15).** Each earlier mode, on the build with
+`ext/phase5.js` imported by the worker and `webNavigation` in the manifest:
+
+| Mode | Before the check change (first build) | Final (committed tree) |
+|---|---|---|
+| `spike` | 0 (`task13-regress-spike.out.status`) | 0 (`task13-final-spike.out.status`) |
+| `pump` | 0 (`task13-regress-pump.out.status`) | 0 (`task13-final-pump.out.status`) |
+| `zombie` | 0 (`task13-regress-zombie.out.status`) | 0 (`task13-final-zombie.out.status`) |
+| `broken` | 0 (`task13-regress-broken.out.status`) | 0 (`task13-final-broken.out.status`) |
+| `reload` | not run before the change | 0 (`task13-final-reload.out.status`) |
+| `stop` | 1 (`task13-regress-stop.out.status`), then 1 (`task13-regress-stop2.out.status`, the provocation race below), then 0 (`task13-regress-stop3.out.status`) | 0 (`task13-final-stop.out.status`) |
+| `idle` | not run before the change | 0 (`task13-final-idle.out.status`) |
+
+The control: `stop` with the two-line change reverted (no `importScripts`,
+no `webNavigation`) passed (`task13-control-noimport-stop.out.status`, 0).
+So the failure of the first `stop` came from `phase5.js`, not from the Phase 5
+code.
+
+Two things the runs showed, and what was done:
+
+- **A listening worker's stop is not quiet (the plan's emit contract).** The
+  test worker now listens for tab and window events. In
+  `task13-regress-stop-logs/run-1.log` the stop is at 19:47:46 (line 106); a
+  `windows.onFocusChanged` delivery reached the stopped worker at 19:47:50
+  (line 117), which started it ("runs a new worker instance", line 149). The
+  plan's `emit` starts a stopped worker for a delivery, so this is the contract,
+  not a defect. The I15 check of `stop` was asked for "no restart in 90 s" and
+  failed. It now says the contract: a restart or an identity request in the
+  quiet window must follow a delivery the engine sent (`driver.py`
+  `started_by_delivery`, tested first). The stop run on the final tree had such
+  a delivery in its window (`INFO deliveries sent in the 90 s quiet window:
+  ['windows.onFocusChanged']`). Owner's question: an idle worker that listens
+  for events is started by each delivered event; is that what I15 means?
+- **A query before the first strip is published answers an empty list.** The
+  worker's first `tabs.query` came while the first strip was held for the
+  table (`task13-regress-stop2-logs/run-1.log` line 69: "(3 waiting for the
+  table)", then the query at line 90), and answered `[]` with `ok: true`
+  (`task13-regress-stop2-logs/results.jsonl` line 4). The engine answers from
+  the published snapshot (the plan's wording), and before the first publish
+  that snapshot is empty. The test worker now waits until both tabs are listed
+  (`sw.js` `listedTabs`, commit `3fc4ef2`). Not changed in the engine: a query
+  that waits for the first publish changes the query contract, so it is the
+  owner's decision.
+
+**The scripted run (`ci/side-panel/phase5.py`) stops on a defect.** Two passes
+on the committed tree, both the same: exit status 1, 48 checks passed, 15 failed
+(`task13-p5-run1.out`, `task13-p5-run2.out`; logs in `task13-p5-run1-logs/`,
+`task13-p5-run2-logs/`). Every step through `remove` reports `ok`; the step
+`page` (an extension page opened as a tab, by `chrome.tabs.create` of
+`chrome-extension://<id>/p5page.html`) never reports, and the browser process
+dies:
+
+- The page's own bridge logs `nautilus-bridge: no transport or no chrome in
+  this context (:56)` (`task13-p5-run2-logs/main.log` line 300; `core.js`
+  line 16 is the message). Either `chrome` or `__bridgeCall`/`__bridgeOnEvent`
+  is missing when `core.js` runs, so the page is not bridged. The install runs
+  in the render process's `on_context_created` (`store.rs` line 203,
+  `pages::install`), and the plan assumed Chromium's extension bindings exist
+  by then. The run says otherwise. Which of the two is missing is not
+  determined; `core.js` fails closed, as designed.
+- The page's script never reports (`page` and `an extension page shown as a
+  tab reported` fail), so the page's `native` and `current` checks did not run.
+- The browser's log stops at the page's `load started` (`task13-p5-run2-logs/main.log`
+  line 299). The browser then traps 1 s, 6 s and 16 s after that line in the
+  three crashing launches (reports at 20:12:56, 20:12:06 and 20:01:58 UTC):
+  `EXC_BREAKPOINT` (SIGTRAP) on `CrBrowserMain` inside `Engine::spin`
+  (crash reports `task13-p5-Nautilus-2026-11-18-151206.txt` and
+  `task13-p5-Nautilus-2026-11-18-151256.txt`; the first pass's report is
+  `Nautilus-2026-11-18-150158.ips`). The frames above `spin` are Chromium's,
+  and Chromium's fatal message did not reach the log (`enable-logging=stderr`
+  was tried in a diagnostic pass: nothing). The cause is not localised.
+- The later checks fail as a consequence: the events and `windows.create` steps
+  never run, and the `restore` launch reports no step at all.
+
+Passing checks before the stop (both passes): every tab listed in strip order
+with `windowId`, `index`, `active`, `groupId`; `{active, currentWindow}` is the
+window's active tab; `windows.getAll`, `getCurrent`, `getLastFocused`;
+`tabs.create` resolves with the tab that exists afterwards; `update({active})`
+activates it; `move` puts it first; `scripting.executeScript`,
+`tabs.sendMessage`, `tabs.update({url})` with `webNavigation`, and
+`chrome.debugger` (`Runtime.evaluate`, `Page.captureScreenshot`,
+`Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`) on an id `tabs.query`
+returned; `captureVisibleTab` answers a JPEG data URL; `tabs.group` and
+`tabs.discard` answer as the plan says; `tabs.remove` of an unknown id and
+`chrome.tabs.get` with a callback reject in Chromium's words; `duplicate` and
+`remove`; `remove` closes the tab; the relay page answers `bridge: undefined`
+(`bridge: relay <id> answers the relay page: …`, `task13-p5-run2-logs/main.log`);
+a web page (`https://example.com/`) has no `__bridgeCall`, `__nautilusBridgeSend`
+or `__nautilusBridge` in its main world.
+
+The event deliveries before the stop are each sent once and taken once:
+`event tabs.onCreated (delivery 2) sent` and `… taken by the worker`
+(`task13-p5-run2-logs/main.log` lines 130 and 135), the same for `tabs.onUpdated`,
+`tabs.onActivated`, `tabs.onHighlighted`, `tabs.onMoved`, `tabs.onRemoved`,
+`windows.onFocusChanged`. The requests reach the model: `OpenTab` (line 117,
+and token 5 `CloseTabs`), `ActivateTab(TabId(3))` (line 159), `MoveTab` (line
+173), `CloseTabs([TabId(4)])` (line 259).
+
+**Still open.** Whether CEF answers `Target.getTargetInfo` inside the call (B8)
+is not determined by these runs. The owner's toolbar click, real popups and
+Windows were not run. The helper extension's page is not bridged: not observed,
+since the run has no way to evaluate in it.

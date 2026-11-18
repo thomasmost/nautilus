@@ -227,6 +227,18 @@ belongs to one running Nautilus at a time.
   is still up 120 s after its `--exit-after`, or logs a panic, a fatal
   runtime error, a RefCell borrowed twice ("already borrowed" or "already
   mutably borrowed"), or browsers still open at shutdown fails the run.
+- `python3 ci/side-panel/phase5.py` (macOS, needs the bundle, about
+  five minutes; judge it by its exit status, not through a pipe) — the
+  scripted run of `chrome.tabs` and `chrome.windows` over the bridge. Its
+  test extension (`ci/side-panel/ext/phase5.js`) listens for the tab and
+  window events and runs the `main` suite (the query, the create, activate,
+  move, id-addressed calls, the failed-closed methods, the events, an
+  extension page opened as a tab, `windows.create`) and the `restore` suite
+  (a deferred tab's first show). The owner's own Nautilus may run beside it:
+  its windows are not counted. **Status:** on 2026-11-18 both passes stopped at
+  the extension page's tab, where the browser process trapped and the page had
+  no bridge; the checks before that step pass. The run is kept as a record of
+  that defect, not as a pass (`docs/bridge-protocol.md`, "Phase 5 scripted run").
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
   browser read commands from the named directory: `load` an unpacked
   extension, `click` an action, send a raw DevTools message on the
