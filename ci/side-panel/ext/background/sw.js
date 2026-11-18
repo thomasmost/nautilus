@@ -24,7 +24,9 @@ chrome.runtime.onInstalled.addListener((d) => { post('event', { run: RUN, name: 
 chrome.runtime.onStartup.addListener(() => { post('event', { run: RUN, name: 'runtime.onStartup' }); });
 chrome.action.onClicked.addListener((tab) => {
   post('event', { run: RUN, name: 'action.onClicked', tab: slim(tab) });
-  config().then((cfg) => (cfg.latency ? latency() : checks()));
+  // `quietClick` (the stop mode's restart): the click only starts the worker;
+  // checks() would attach and detach a debugger on every tab, the held one too.
+  config().then((cfg) => (cfg.latency ? latency() : cfg.quietClick ? null : checks()));
 });
 
 post('sw-start', { run: RUN, id: chrome.runtime.id, bridge: self.__nautilusTransport || null, script: self.location.pathname });
@@ -49,6 +51,10 @@ async function provokeStop() {
 
 async function afterStop(tabId) {
   const target = { tabId: tabId };
+  // A bridged call first: the worker opens its own port, and its hello tells
+  // the engine that a new instance runs (the engine asks for no identity on a
+  // `gone` any more, I15). The answer is not needed here.
+  await timed(RUN, 'afterstop.tabs.query', () => chrome.tabs.query({}).then((list) => list.length), {});
   const check = await timed(RUN, 'afterstop.debugger.sendCommand', () =>
     chrome.debugger.sendCommand(target, 'Runtime.evaluate', { expression: 'location.href', returnByValue: true }).then((r) => r.result.value), { tabId: tabId });
   await post('after-stop', { run: RUN, tabId: tabId, ok: check.ok === true, error: check.error || null });

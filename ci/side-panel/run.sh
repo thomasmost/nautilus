@@ -1,12 +1,21 @@
 #!/bin/sh
 # The scripted run of the extension bridge (macOS).
 #
-# usage: ci/side-panel/run.sh [spike|pump]
+# usage: ci/side-panel/run.sh [spike|pump|reload|zombie|broken|stop|idle]
 #   spike  two launches on one throwaway profile: install the test
 #          extension through the bridge's rewrite, then restart and
 #          check the bridge, a click on a stopped worker, tabs.query
 #          and the latency of extension calls with the window unfocused.
 #   pump   one launch: only the latency run, started with the worker.
+#   reload one launch: the worker debugs a background tab, reloads the
+#          extension; the tab must end hidden only if no session survives.
+#   zombie as reload, with the extension list held during the reload (I10 b):
+#          the worker-target detector must be the path that sees it.
+#   broken one launch: the relay page is damaged; the give-up keeps a
+#          debugged tab shown (I14).
+#   stop   one launch: the worker is stopped over DevTools with a debugger held.
+#   idle   one launch: the worker debugs a background tab and idles; the engine
+#          must not start it again for 90 s after Chromium stops it (I15).
 #
 # Each launch is judged by the browser, not only by the driver. A launch
 # fails when the browser exits with a non-zero status (a signal included:
@@ -35,8 +44,8 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 app="$root/target/release/Nautilus.app/Contents/MacOS/Nautilus"
 [ -x "$app" ] || { echo "no bundle: run cargo xtask bundle-mac first" >&2; exit 2; }
 case "$mode" in
-  spike|pump|reload|broken|stop) ;;
-  *) echo "usage: $0 [spike|pump|reload|broken|stop]" >&2; exit 2 ;;
+  spike|pump|reload|zombie|broken|stop|idle) ;;
+  *) echo "usage: $0 [spike|pump|reload|zombie|broken|stop|idle]" >&2; exit 2 ;;
 esac
 
 # Set before the trap so that cleanup can read them whatever happened.
@@ -167,11 +176,17 @@ case "$mode" in
   reload)
     launch 1 "${RELOAD_SECONDS:-75}"
     ;;
+  zombie)
+    launch 1 "${ZOMBIE_SECONDS:-100}"
+    ;;
   broken)
     launch 1 "${BROKEN_SECONDS:-110}"
     ;;
   stop)
     launch 1 "${STOP_SECONDS:-100}"
+    ;;
+  idle)
+    launch 1 "${IDLE_SECONDS:-240}"
     ;;
 esac
 
