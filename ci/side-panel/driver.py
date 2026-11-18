@@ -166,24 +166,38 @@ def tabs_work(label, mark):
 
 
 def worker_running(control, ext_id):
+    """True or False from a target list; None when there is no list (no answer,
+    or an error), since an empty list would read as a stopped worker."""
     answer = control.devtools('Target.getTargets')
-    if answer is None:
+    infos = ((answer or {}).get('result') or {}).get('targetInfos')
+    if infos is None:
         return None
-    infos = (answer.get('result') or {}).get('targetInfos') or []
     return any(t.get('type') == 'service_worker' and ext_id in t.get('url', '') for t in infos)
 
 
 def stop_worker(control, ext_id):
-    """Stop the worker: by DevTools if the management page's session allows
-    it, otherwise by waiting out Chromium's 30 s idle stop."""
-    control.devtools('ServiceWorker.enable', secs=5)
-    control.devtools('ServiceWorker.stopAllWorkers', secs=5)
+    """Stop the worker with ServiceWorker.stopAllWorkers over DevTools, after
+    seeing it running, so that 'stopped' means it was running and is gone.
+    The clock starts before the stop. Falls back to waiting out the idle stop
+    when stopAllWorkers gets no answer."""
+    seen = False
+    for _ in range(5):
+        if worker_running(control, ext_id):
+            seen = True
+            break
+        time.sleep(2)
+    if not seen:
+        print('INFO the worker was not observed running before the stop', flush=True)
+        return False
     started = time.time()
+    control.devtools('ServiceWorker.enable', secs=5)
+    answered = control.devtools('ServiceWorker.stopAllWorkers', secs=5) is not None
     while time.time() - started < 90:
         running = worker_running(control, ext_id)
         if running is False:
-            took = time.time() - started
-            print('INFO the worker stopped after %.0f s (%s)' % (took, 'DevTools' if took < 8 else 'idle timeout'), flush=True)
+            print('INFO the worker stopped after %.1f s (%s)' % (
+                time.time() - started,
+                'by DevTools' if answered else 'no answer to stopAllWorkers; idle stop'), flush=True)
             return True
         time.sleep(3)
     return False
