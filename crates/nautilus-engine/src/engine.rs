@@ -465,6 +465,21 @@ fn next_deadline(
     }
 }
 
+/// The timer's deadline once a spin has ended. Something already pending
+/// is left alone; with nothing pending and the fallback on (an interval),
+/// the timer arms at `now + interval`; without an interval nothing arms.
+fn armed_after_spin(
+    pending: Option<Instant>,
+    now: Instant,
+    interval: Option<Duration>,
+) -> Option<Instant> {
+    match (pending, interval) {
+        (Some(_), _) => pending,
+        (None, Some(interval)) => Some(now + interval),
+        (None, None) => None,
+    }
+}
+
 /// Counters that say why CEF's work is not being run, read by the
 /// watch thread (`NAUTILUS_PUMP_LOG`). Times are milliseconds since
 /// the scheduler was made.
@@ -527,15 +542,14 @@ impl PumpScheduler {
         stats
             .longest_spin_us
             .fetch_max(took.as_micros() as u64, Ordering::Relaxed);
-        let Some(interval) = self.interval else {
-            return;
-        };
         let mut deadline = self
             .deadline
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if deadline.is_none() {
-            *deadline = Some(Instant::now() + interval);
+        let was_pending = deadline.is_some();
+        let armed = armed_after_spin(*deadline, Instant::now(), self.interval);
+        *deadline = armed;
+        if !was_pending && armed.is_some() {
             self.changed.notify_one();
         }
     }
@@ -846,9 +860,35 @@ wrap_display_handler! {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{next_deadline, pump_interval};
+    use super::{armed_after_spin, next_deadline, pump_interval};
 
     const TICK: Option<Duration> = Some(Duration::from_millis(33));
+
+    #[test]
+    fn after_a_spin_with_nothing_pending_the_timer_arms_at_the_interval() {
+        let now = Instant::now();
+        assert_eq!(
+            armed_after_spin(None, now, TICK),
+            Some(now + Duration::from_millis(33))
+        );
+    }
+
+    #[test]
+    fn after_a_spin_with_something_pending_the_pending_deadline_is_left_alone() {
+        let now = Instant::now();
+        let earlier = Some(now + Duration::from_millis(5));
+        let later = Some(now + Duration::from_millis(20));
+        assert_eq!(armed_after_spin(earlier, now, TICK), earlier);
+        assert_eq!(armed_after_spin(later, now, TICK), later);
+    }
+
+    #[test]
+    fn without_an_interval_a_spin_arms_nothing() {
+        let now = Instant::now();
+        assert_eq!(armed_after_spin(None, now, None), None);
+        let pending = Some(now + Duration::from_millis(5));
+        assert_eq!(armed_after_spin(pending, now, None), pending);
+    }
 
     #[test]
     fn the_pumps_interval_comes_from_the_setting_or_the_default() {
