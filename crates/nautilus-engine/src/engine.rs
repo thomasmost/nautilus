@@ -54,6 +54,10 @@ pub static INFO: EngineInfo = EngineInfo {
             store_name: "Chrome Web Store",
             store_url: "https://chromewebstore.google.com/",
             store_item_id: crate::extensions::web_store_item_id,
+            // The panel itself arrives in a later change; until then
+            // osmena draws none. The strip is sent regardless: this
+            // engine runs extensions.
+            side_panels: false,
         })
     } else {
         None

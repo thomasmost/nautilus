@@ -1150,6 +1150,8 @@ mod native {
                     // Any toolbar action has a title, with or without a
                     // popup: the host decides what a click does.
                     action_title: action.map(|a| a.title.clone().unwrap_or(name)),
+                    side_panel: false,
+                    commands: Vec::new(),
                 });
             }
             log::info!(
