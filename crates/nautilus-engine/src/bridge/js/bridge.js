@@ -65,28 +65,64 @@
   // for it, so the engine has this instance's identity before any call.
   var ready = Promise.resolve();
 
-  // The Chromium tab ids on which this extension's own debugger session is
-  // still open (null when Chromium did not say). `getTargets` marks a tab
-  // attached when any client is attached (the engine's own DevTools probe
-  // too), so each candidate is asked with `sendCommand`: only a session this
-  // extension opened answers it. The engine keeps a debugger's tab painted
-  // only while that session is there.
-  function attachedTabs() {
+  // ---- the worker's debugger sessions, asked by `sendCommand`.
+  // `getTargets` lists the tabs; each is probed with `Runtime.evaluate` of `1`,
+  // which only a session this extension opened answers. Each answer is one of
+  // three states: `attached`; `not-attached`, which is Chromium's own "Debugger
+  // is not attached" error (or "No tab with id", a tab that does not exist);
+  // and `unknown` for a timeout or any other error. Only `not-attached` is
+  // evidence that a session has ended (the engine forgets on it alone). A probe
+  // is bounded, so a hung or busy page (or one paused by the debugger) yields
+  // `unknown`, which keeps the debugger: harmless. Whether `Runtime.evaluate`
+  // answers on a paused or hidden page was not verified (see the protocol doc).
+  var PROBE_TIMEOUT_MS = 1000;
+  var HELLO_TIMEOUT_MS = 2000;
+
+  function notAttached(error) {
+    var text = String((error && error.message) || error || '');
+    return /Debugger is not attached|No tab with id/.test(text);
+  }
+
+  function probeSession(debuggerApi, tabId) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () { finish('unknown'); }, PROBE_TIMEOUT_MS);
+      function finish(state) {
+        if (done) { return; }
+        done = true;
+        clearTimeout(timer);
+        resolve({ tab: tabId, state: state });
+      }
+      try {
+        debuggerApi.sendCommand({ tabId: tabId }, 'Runtime.evaluate', { expression: '1', returnByValue: true })
+          .then(function () { finish('attached'); }, function (e) { finish(notAttached(e) ? 'not-attached' : 'unknown'); });
+      } catch (e) {
+        finish('unknown');
+      }
+    });
+  }
+
+  // Every tab the target list names, with its state. Never rejects and always
+  // settles within HELLO_TIMEOUT_MS: a tab whose probe has not answered by then
+  // is `unknown`.
+  function sessionStates() {
     var debuggerApi = chrome.debugger;
-    if (!debuggerApi || typeof debuggerApi.getTargets !== 'function') { return Promise.resolve(null); }
+    if (!debuggerApi || typeof debuggerApi.getTargets !== 'function') { return Promise.resolve([]); }
     var listed;
-    try { listed = debuggerApi.getTargets(); } catch (e) { return Promise.resolve(null); }
+    try { listed = Promise.resolve(debuggerApi.getTargets()); } catch (e) { return Promise.resolve([]); }
     return listed.then(function (targets) {
-      var candidates = targets
-        .filter(function (t) { return t.attached && typeof t.tabId === 'number'; })
-        .map(function (t) { return t.tabId; });
-      return Promise.all(candidates.map(function (tabId) {
-        return debuggerApi.sendCommand({ tabId: tabId }, 'Runtime.evaluate', { expression: '1', returnByValue: true })
-          .then(function () { return tabId; }, function () { return null; });
-      })).then(function (answers) {
-        return answers.filter(function (tabId) { return tabId !== null; });
+      var tabs = [];
+      (targets || []).forEach(function (t) {
+        if (typeof t.tabId === 'number' && tabs.indexOf(t.tabId) < 0) { tabs.push(t.tabId); }
       });
-    }, function () { return null; });
+      var timer = null;
+      var limit = new Promise(function (resolve) { timer = setTimeout(function () { resolve(null); }, HELLO_TIMEOUT_MS); });
+      var probes = Promise.all(tabs.map(function (tabId) { return probeSession(debuggerApi, tabId); }));
+      return Promise.race([probes, limit]).then(function (answers) {
+        clearTimeout(timer);
+        return answers || tabs.map(function (tab) { return { tab: tab, state: 'unknown' }; });
+      });
+    }, function () { return []; });
   }
 
   function adopt(newPort) {
@@ -102,11 +138,13 @@
         calls.delete(id);
       });
     });
-    ready = attachedTabs().then(function (attached) {
+    // `ready` never rejects, and settles within HELLO_TIMEOUT_MS, so a call
+    // waits for the hello for a bounded time only.
+    ready = sessionStates().then(function (sessions) {
       if (port !== newPort) { return; }
-      try { newPort.postMessage({ hello: { instance: INSTANCE, attached: attached } }); }
+      try { newPort.postMessage({ hello: { instance: INSTANCE, sessions: sessions } }); }
       catch (ignored) { /* the port went before the hello */ }
-    });
+    }, function () {}).catch(function () {});
   }
 
   // Registered in the first evaluation, so a connect from the relay page

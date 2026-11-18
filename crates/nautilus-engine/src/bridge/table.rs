@@ -12,20 +12,54 @@ use std::collections::HashMap;
 use osmena_core::TabId;
 use serde_json::{Value, json};
 
-/// A worker's `hello` (`bridge.js`): the worker instance it is, and the
-/// Chromium tab ids on which its own debugger session still answers (`None`
-/// when it did not say).
-/// Either is `None` when the hello lacks it.
-pub(crate) fn hello_of(hello: &Value) -> (Option<String>, Option<Vec<i64>>) {
-    let instance = hello
-        .get("instance")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let attached = hello
-        .get("attached")
+use super::policy::Session;
+
+/// A worker's `hello` (`bridge.js`): the worker instance it is, and for each
+/// Chromium tab its own debugger session's state (`sessions`). A tab the hello
+/// does not name, or names with an unknown state, has no such evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Hello {
+    pub instance: String,
+    pub sessions: Vec<(i64, Session)>,
+}
+
+/// Read a worker's hello. `None` when it names no instance (a malformed hello
+/// is treated as no answer). An entry without a tab or a known state is left
+/// out, which is no evidence about its tab.
+pub(crate) fn hello_of(hello: &Value) -> Option<Hello> {
+    let instance = hello.get("instance")?.as_str()?.to_string();
+    let sessions = hello
+        .get("sessions")
         .and_then(Value::as_array)
-        .map(|list| list.iter().filter_map(Value::as_i64).collect());
-    (instance, attached)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let tab = entry.get("tab")?.as_i64()?;
+            let state = match entry.get("state")?.as_str()? {
+                "attached" => Session::Attached,
+                "not-attached" => Session::NotAttached,
+                "unknown" => Session::Unknown,
+                _ => return None,
+            };
+            Some((tab, state))
+        })
+        .collect();
+    Some(Hello { instance, sessions })
+}
+
+/// The target id of `extension`'s worker in the helper's list: the target of
+/// kind `worker` (what `chrome.debugger.getTargets` calls a service worker;
+/// `service_worker` is accepted too) whose URL is inside the extension. The
+/// first such target is taken; an extension has one service worker. `None`
+/// when it is not listed (a stopped worker is not).
+pub(crate) fn worker_target_of(targets: &[Target], extension: &str) -> Option<String> {
+    let prefix = format!("chrome-extension://{extension}/");
+    targets
+        .iter()
+        .find(|t| {
+            matches!(t.kind.as_str(), "worker" | "service_worker") && t.url.starts_with(&prefix)
+        })
+        .map(|t| t.id.clone())
 }
 
 /// One DevTools target as the helper reports it.
@@ -229,19 +263,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_hello_names_the_instance_and_the_attached_tabs() {
-        let hello = json!({"instance": "abc", "attached": [5, 9]});
+    fn a_hello_reports_each_tab_as_attached_not_attached_or_unknown() {
+        let hello = json!({"instance": "abc", "sessions": [
+            {"tab": 5, "state": "attached"},
+            {"tab": 9, "state": "not-attached"},
+            {"tab": 11, "state": "unknown"},
+        ]});
         assert_eq!(
             hello_of(&hello),
-            (Some("abc".to_string()), Some(vec![5, 9]))
+            Some(Hello {
+                instance: "abc".to_string(),
+                sessions: vec![
+                    (5, Session::Attached),
+                    (9, Session::NotAttached),
+                    (11, Session::Unknown),
+                ],
+            })
         );
     }
 
     #[test]
-    fn a_hello_whose_tabs_are_unknown_says_so_with_null() {
-        let hello = json!({"instance": "abc", "attached": null});
-        assert_eq!(hello_of(&hello), (Some("abc".to_string()), None));
-        assert_eq!(hello_of(&json!({})), (None, None), "no instance, no tabs");
+    fn a_hello_without_an_instance_is_no_hello_and_a_tab_without_a_state_is_no_evidence() {
+        assert_eq!(hello_of(&json!({"sessions": []})), None);
+        assert_eq!(
+            hello_of(
+                &json!({"instance": "abc", "sessions": [{"tab": 5}, {"state": "not-attached"}, {"tab": 6, "state": "maybe"}]})
+            ),
+            Some(Hello {
+                instance: "abc".to_string(),
+                sessions: Vec::new(),
+            }),
+            "an entry missing its tab or its state, or with an unknown state, is left out"
+        );
+        assert_eq!(
+            hello_of(&json!({"instance": "abc"})),
+            Some(Hello {
+                instance: "abc".to_string(),
+                sessions: Vec::new(),
+            }),
+            "no sessions at all names no tab"
+        );
+    }
+
+    #[test]
+    fn the_worker_target_is_the_extensions_worker_as_the_helper_lists_it() {
+        // chrome.debugger.getTargets lists an extension's service worker as
+        // "worker" (the shape of the probe, `join` above); DevTools calls it
+        // "service_worker". Either is the worker; the extension's page is not.
+        let targets = parse_targets(&json!([
+            {"id": "PAGE", "tabId": 3, "type": "page", "url": "chrome-extension://ext/popup.html"},
+            {"id": "W1", "type": "worker", "url": "chrome-extension://ext/background/sw.js"},
+            {"id": "W2", "type": "worker", "url": "chrome-extension://other/sw.js"},
+        ]));
+        assert_eq!(worker_target_of(&targets, "ext").as_deref(), Some("W1"));
+        assert_eq!(worker_target_of(&targets, "other").as_deref(), Some("W2"));
+        let devtools = parse_targets(&json!([
+            {"id": "S1", "type": "service_worker", "url": "chrome-extension://ext/background/sw.js"},
+        ]));
+        assert_eq!(worker_target_of(&devtools, "ext").as_deref(), Some("S1"));
+    }
+
+    #[test]
+    fn a_stopped_worker_has_no_target_and_a_page_or_other_is_not_one() {
+        let targets = parse_targets(&json!([
+            {"id": "P", "tabId": 3, "type": "page", "url": "chrome-extension://ext/background/sw.js"},
+            {"id": "R", "type": "other", "url": "chrome-extension://ext/nautilus-bridge/relay.html"},
+        ]));
+        assert_eq!(worker_target_of(&targets, "ext"), None);
+        assert_eq!(
+            worker_target_of(&[], "ext"),
+            None,
+            "an idle worker is not listed"
+        );
     }
 
     fn page(id: &str, tab_id: i64, url: &str) -> Target {

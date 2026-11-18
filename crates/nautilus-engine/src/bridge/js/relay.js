@@ -73,7 +73,7 @@
       return new Promise(function (resolve) { waiter = resolve; flush(); });
     },
 
-    // Which worker instance this relay reaches: {instance, attached} (the
+    // Which worker instance this relay reaches: {instance, sessions} (the
     // worker's hello). A stopped worker is started by the connect. Rejects
     // when the worker does not say within IDENTIFY_TIMEOUT_MS.
     identify: function () {
@@ -93,14 +93,6 @@
           reject(e);
         }
       });
-    },
-
-    // Whether this page's extension context is still live. A reload of the
-    // extension leaves the page open with no port event, and its API calls
-    // throw; the evaluation fails then, and the engine closes the page.
-    alive: function () {
-      if (!chrome.runtime || !chrome.runtime.id) { throw new Error('the extension context is invalidated'); }
-      return !!chrome.runtime.getManifest();
     },
 
     // The engine's answer to call `id` of worker instance `instance`:

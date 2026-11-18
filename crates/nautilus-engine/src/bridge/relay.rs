@@ -33,13 +33,15 @@ use super::debugger::{Change, Debuggers};
 use super::evaluation;
 use super::install::HELPER_ID;
 use super::policy::{
-    ALIVE_INTERVAL, Identity, JobKind, JobTurn, MAX_OPENINGS, Next, Opening, Overflow,
-    after_delivery, check_due, failed_by_loss, identity, is_generation, job_belongs, job_turn,
-    next_opening, overflow, relay_changes, tabs_to_forget,
+    AfterChange, CHANGE_GRACE_REFRESHES, Evidence, Identity, JobKind, JobTurn, MAX_OPENINGS, Next,
+    Opening, Overflow, REFRESH_INTERVAL, Session, WorkerTarget, after_change, after_delivery,
+    check_due, failed_by_loss, forgets, identity, is_generation, job_kept, job_turn, next_opening,
+    overflow, relay_changes, reply_due, session_evidence, tabs_to_forget, worker_target,
 };
 use super::rewrite::BRIDGE_DIR;
 use super::table::{
-    Debuggee, TabTable, debuggee_of, hello_of, parse_targets, query_rows, target_id_of,
+    Debuggee, Hello, TabTable, Target, debuggee_of, hello_of, parse_targets, query_rows,
+    target_id_of, worker_target_of,
 };
 use crate::delegate::{DelegateState, ViewState};
 
@@ -328,8 +330,9 @@ enum Pending {
     Probe,
     /// A relay's `identify()`: which worker instance it reaches.
     Identify { extension: String },
-    /// A relay's `alive()`: whether its extension context still lives.
-    Alive,
+    /// A test control's expression in a relay page, whose value is logged
+    /// as `label` (`inspect_relay`).
+    Inspect { label: String },
     /// A relay's `next()`: the worker's requests, when it has some.
     Poll,
     /// An answer handed to a relay; only a failure is of interest.
@@ -399,11 +402,14 @@ struct Sending {
 }
 
 /// How a hidden page has fared in its openings (`policy::next_opening`):
-/// the openings since its last successful probe, when it was last opened,
-/// and whether the engine has given up on it.
+/// the openings since its last successful probe (`failed`), the openings whose
+/// relay passed its probe and then could not reach its worker (`unreached`,
+/// cleared by a worker's hello), when it was last opened, and whether the
+/// engine has given up on it. The schedule counts both.
 #[derive(Default)]
 struct Opener {
     failed: u32,
+    unreached: u32,
     last: Option<std::time::Instant>,
     given_up: bool,
 }
@@ -434,8 +440,20 @@ struct Inner {
     openers: HashMap<String, Opener>,
     /// The worker instance each extension last reported (`identity`).
     identities: HashMap<String, String>,
-    /// When each relay that holds debuggers was last checked (`check_alive`).
-    alive_checked: HashMap<String, std::time::Instant>,
+    /// The DevTools target id of each extension's worker at the last table
+    /// refresh that listed it (`policy::worker_target`).
+    worker_targets: HashMap<String, String>,
+    /// Refreshes since each extension's worker target changed, while no new
+    /// worker instance has said hello through its relay (`after_change`).
+    changed_waiting: HashMap<String, u32>,
+    /// Extensions whose new worker instance said hello through their relay since
+    /// the last refresh (`worker_hello`, a restarted instance).
+    new_instance_heard: std::collections::HashSet<String>,
+    /// The sessions a hello reported for tabs the table could not yet name, by
+    /// extension; applied by the next join that names them (`apply_pending`).
+    pending_sessions: HashMap<String, Vec<(i64, Session)>>,
+    /// When the table was last refreshed for the relays' sake (`refresh_due`).
+    last_refresh: Option<std::time::Instant>,
     /// Evaluations sent and not yet answered, by page key and the
     /// DevTools message id of that page's browser.
     pending: HashMap<(String, i32), Pending>,
@@ -595,7 +613,21 @@ impl Bridge {
             inner.helper_loaded = helper_loaded;
             let open: Vec<String> = inner.relays.keys().cloned().collect();
             let open: Vec<&str> = open.iter().map(String::as_str).collect();
-            let (_, to_close) = relay_changes(&open, bridged);
+            let (_, mut to_close) = relay_changes(&open, bridged);
+            // Every extension that is off or gone, open relay or not, is no
+            // longer followed: its debuggers, recorded worker and pending
+            // sessions go with it (positive evidence, `ExtensionGone`).
+            for id in previous.iter().filter(|id| !bridged.contains(id)) {
+                if !to_close.contains(id) {
+                    to_close.push(id.clone());
+                }
+            }
+            for id in &to_close {
+                inner.worker_targets.remove(id);
+                inner.changed_waiting.remove(id);
+                inner.new_instance_heard.remove(id);
+                inner.pending_sessions.remove(id);
+            }
             let close_helper = bridged.is_empty() && inner.helper.is_some();
             (close_helper, to_close)
         };
@@ -613,7 +645,7 @@ impl Bridge {
         }
         for id in to_close {
             self.close_relay(&id);
-            self.forget_debuggers(&id);
+            self.forget_debuggers(&id, Evidence::ExtensionGone);
             let stale = self.take_jobs_for(&id);
             self.fail_jobs(stale, "its extension is off or gone");
         }
@@ -626,7 +658,10 @@ impl Bridge {
     /// never from a CEF callback, so a dead relay returns within a turn or
     /// two whatever CEF was doing when it died.
     pub(crate) fn reopen(self: &Rc<Self>) {
-        self.check_alive(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        if self.refresh_due(now) {
+            self.refresh();
+        }
         let (helper_loaded, wanted, helper_open, open) = {
             let inner = self.inner.borrow();
             let open: Vec<String> = inner.relays.keys().cloned().collect();
@@ -640,7 +675,6 @@ impl Bridge {
         if wanted.is_empty() {
             return;
         }
-        let now = std::time::Instant::now();
         let (helper_wanted, relays_wanted) = {
             let open: Vec<&str> = open.iter().map(String::as_str).collect();
             (
@@ -664,45 +698,103 @@ impl Bridge {
         }
     }
 
-    /// Ask each relay that holds debuggers whether its extension context is
-    /// still live, once per `ALIVE_INTERVAL`. A reloaded extension leaves its
-    /// relay open with no event, so this is the only thing that finds it; the
-    /// answer is in `page_result` (`Pending::Alive`).
-    fn check_alive(self: &Rc<Self>, now: std::time::Instant) {
-        let due: Vec<String> = {
+    /// Whether a table refresh is due for the relays' sake (`REFRESH_INTERVAL`)
+    /// while any relay is open. A reloaded worker leaves its relay page alive
+    /// with no event (measured: `run.sh reload`), and the only thing that shows
+    /// it is the target list, which the refresh reads (`check_worker_targets`).
+    /// So a reload is seen within a bounded time, tab activity or not.
+    fn refresh_due(&self, now: std::time::Instant) -> bool {
+        let mut inner = self.inner.borrow_mut();
+        if inner.relays.is_empty() {
+            return false;
+        }
+        let since = inner
+            .last_refresh
+            .map(|at| now.saturating_duration_since(at));
+        if check_due(since, REFRESH_INTERVAL) {
+            inner.last_refresh = Some(now);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Compare each wanted extension's worker target with the one recorded for
+    /// it (`policy::worker_target`). A target that changed means the worker was
+    /// reloaded or started anew. Whether its relay is closed is `policy::after_change`:
+    /// a relay that a new worker instance has said hello through is connected to
+    /// the live worker and kept (a restart after a stop is this case: closing it
+    /// would fail the calls in flight on its port); a relay no new instance
+    /// reaches within `CHANGE_GRACE_REFRESHES` refreshes is a zombie, closed, and
+    /// the next turn opens a fresh one. Debuggers are kept in both cases; the
+    /// fresh relay's hello decides them (`worker_hello`).
+    fn check_worker_targets(&self, targets: &[Target]) {
+        let mut closes = Vec::new();
+        {
             let mut inner = self.inner.borrow_mut();
-            // Only a relay whose probe has succeeded since its last opening
-            // (`failed == 0`) is asked: a page still loading has no `alive`
-            // yet, and would look dead.
-            let debugged: Vec<String> = inner
-                .relays
-                .keys()
-                .filter(|key| {
-                    !inner.debuggers.tabs_of(key).is_empty()
-                        && inner
-                            .openers
-                            .get(*key)
-                            .is_some_and(|opener| opener.failed == 0)
-                })
-                .cloned()
-                .collect();
-            let mut due = Vec::new();
-            for key in debugged {
-                let since = inner
-                    .alive_checked
-                    .get(&key)
-                    .map(|at| now.saturating_duration_since(*at));
-                if check_due(since, ALIVE_INTERVAL) {
-                    inner.alive_checked.insert(key.clone(), now);
-                    due.push(key);
+            for extension in inner.wanted.clone() {
+                // A new instance heard through the relay since the last refresh.
+                let heard = inner.new_instance_heard.remove(&extension);
+                let listed = worker_target_of(targets, &extension);
+                let recorded = inner.worker_targets.get(&extension).cloned();
+                match worker_target(recorded.as_deref(), listed.as_deref()) {
+                    WorkerTarget::First => {
+                        if let Some(listed) = listed {
+                            log::info!("bridge: {extension}'s worker is target {listed}");
+                            inner.worker_targets.insert(extension, listed);
+                        }
+                    }
+                    WorkerTarget::Changed => {
+                        let listed = listed.unwrap_or_default();
+                        log::info!(
+                            "bridge: {extension}'s worker target changed from {} to {listed}: the worker was reloaded or started anew",
+                            recorded.unwrap_or_default()
+                        );
+                        inner.worker_targets.insert(extension.clone(), listed);
+                        inner.changed_waiting.remove(&extension);
+                        match after_change(heard, 0) {
+                            AfterChange::Keep => log::info!(
+                                "bridge: {extension}'s new worker instance already said hello through its relay: the relay is kept"
+                            ),
+                            AfterChange::Wait => {
+                                inner.changed_waiting.insert(extension, 0);
+                            }
+                            AfterChange::Close => closes.push(extension),
+                        }
+                    }
+                    WorkerTarget::Same | WorkerTarget::Absent => {
+                        // A change still waiting for its hello counts this refresh
+                        // (a refresh that lists no worker does not count).
+                        if let (Some(waited), true) = (
+                            inner.changed_waiting.get(&extension).copied(),
+                            listed.is_some(),
+                        ) {
+                            let waited = waited + 1;
+                            match after_change(heard, waited) {
+                                AfterChange::Keep => {
+                                    inner.changed_waiting.remove(&extension);
+                                    log::info!(
+                                        "bridge: {extension}'s new worker instance said hello through its relay: the relay is kept"
+                                    );
+                                }
+                                AfterChange::Wait => {
+                                    inner.changed_waiting.insert(extension, waited);
+                                }
+                                AfterChange::Close => {
+                                    inner.changed_waiting.remove(&extension);
+                                    closes.push(extension);
+                                }
+                            }
+                        }
+                    }
                 }
             }
-            due
-        };
-        for key in due {
-            if !self.evaluate(&key, "nautilusRelay.alive()", Pending::Alive) {
-                log::warn!("bridge: cannot check the relay of {key}");
-            }
+        }
+        for extension in closes {
+            log::info!(
+                "bridge: no new worker instance said hello through {extension}'s relay within {CHANGE_GRACE_REFRESHES} refreshes of its worker target changing: the relay is a zombie; it is closed and opened again (its debuggers are kept)"
+            );
+            self.close_relay(&extension);
         }
     }
 
@@ -719,7 +811,10 @@ impl Bridge {
                 return false;
             }
             let since = opener.last.map(|at| now.saturating_duration_since(at));
-            let turn = next_opening(opener.failed, since);
+            // A relay that passed its probe and then could not reach its worker
+            // is a failed opening too (I12): it counts until its worker says who
+            // it is.
+            let turn = next_opening(opener.failed + opener.unreached, since);
             match turn {
                 Opening::Now => {
                     opener.failed += 1;
@@ -741,10 +836,12 @@ impl Bridge {
     }
 
     /// The page under `key` will not be opened again: it failed every opening
-    /// since its extension last changed. Its debuggers are forgotten (the
-    /// engine can no longer hear its worker, so its tabs are shown again), its
-    /// queued work is failed, and the log says so once. A relay's clicks are
-    /// refused from now on (`click`); the helper's stop every tab list.
+    /// since its extension last changed. Its queued work is failed, and the log
+    /// says so once. Its debuggers are kept: a relay that cannot be opened says
+    /// nothing about its worker's sessions, which may still be live, and a
+    /// hidden tab that is debugged must stay shown (`policy::forgets`). They go
+    /// by the extension's list, a tab's close, or a worker's hello. A relay's
+    /// clicks are refused from now on (`click`); the helper's stop every tab list.
     fn give_up(self: &Rc<Self>, key: &str) {
         if key == HELPER_KEY {
             log::warn!(
@@ -754,9 +851,8 @@ impl Bridge {
             self.fail_jobs(jobs, "the helper's page did not load");
         } else {
             log::warn!(
-                "bridge: {key}'s relay did not load in {MAX_OPENINGS} openings; giving up until its extension changes. Its clicks are refused."
+                "bridge: {key}'s relay did not load in {MAX_OPENINGS} openings; giving up until its extension changes. Its clicks are refused; its debuggers are kept."
             );
-            self.forget_debuggers(key);
             let stale = self.take_jobs_for(key);
             self.fail_jobs(stale, "its relay did not load");
         }
@@ -822,9 +918,13 @@ impl Bridge {
         }
     }
 
-    /// `extension`'s debuggers are gone with its relay: the tabs they
-    /// debugged are shown or hidden accordingly.
-    fn forget_debuggers(&self, extension: &str) {
+    /// `extension` is off or gone (`Evidence::ExtensionGone`): its debuggers
+    /// go, and the tabs they debugged are hidden again when none is left. Any
+    /// other evidence than the rule's positive ones forgets nothing.
+    fn forget_debuggers(&self, extension: &str, evidence: Evidence) {
+        if !forgets(evidence) {
+            return;
+        }
         let freed: Vec<(TabId, Option<TabHandles>)> = {
             let mut inner = self.inner.borrow_mut();
             inner
@@ -839,6 +939,27 @@ impl Bridge {
             if let Some((browser, view)) = handles {
                 set_tab_debugged(&browser, &view, false);
             }
+        }
+    }
+
+    /// The debugger of `extension` on `tab` is forgotten on `evidence`
+    /// (`policy::forgets`); the tab is hidden if no debugger is left on it.
+    fn undebug(&self, extension: &str, tab: TabId, evidence: Evidence) {
+        if !forgets(evidence) {
+            return;
+        }
+        let handles = {
+            let mut inner = self.inner.borrow_mut();
+            if inner.debuggers.detach(extension, tab) != Change::Undebugged {
+                return;
+            }
+            tab_handles(&inner, tab)
+        };
+        log::info!(
+            "bridge: {tab:?} has no debugger left ({extension}, its worker says it has no session on the tab: {evidence:?})"
+        );
+        if let Some((browser, view)) = handles {
+            set_tab_debugged(&browser, &view, false);
         }
     }
 
@@ -1190,6 +1311,9 @@ impl Bridge {
         let (change, handles, chromium) = {
             let mut inner = self.inner.borrow_mut();
             let change = if attach {
+                // A session reported before this attach may be stale: pending
+                // sessions are dropped (a dropped one only keeps a debugger).
+                inner.pending_sessions.remove(extension);
                 inner.debuggers.attach(extension, tab)
             } else {
                 inner.debuggers.detach(extension, tab)
@@ -1229,6 +1353,14 @@ impl Bridge {
     /// Answer call `call` of the worker instance `instance`. The bridge
     /// refuses an answer for another instance, whose call ids it may share.
     fn reply(&self, extension: &str, instance: &str, call: u64, answer: &serde_json::Value) {
+        let current = self.inner.borrow().identities.get(extension).cloned();
+        if !reply_due(instance, current.as_deref()) {
+            log::debug!(
+                "bridge: {extension}: call {call} of its old worker instance {instance} is not answered (the worker is {})",
+                current.unwrap_or_default()
+            );
+            return;
+        }
         let instance = json!(instance);
         let expression = format!("nautilusRelay.reply({call}, {answer}, {instance})");
         if !self.evaluate(extension, &expression, Pending::Reply) {
@@ -1236,33 +1368,31 @@ impl Bridge {
         }
     }
 
-    /// `extension`'s worker reported its identity (a `hello` from the port it
-    /// is on, or the answer to `identify`). `reported` is the instance,
-    /// `None` when the worker could not be reached; `attached` is the Chromium
-    /// tab ids on which the worker's own debugger session still answers, `None`
-    /// when it did not say.
+    /// `extension`'s worker said who it is: its hello, from the port it is on
+    /// or the answer to `identify`. The rule (`policy::forgets`) decides what
+    /// goes: only a tab the hello names as not attached is forgotten; an
+    /// attached or unknown tab, and a tab the hello does not name, keeps its
+    /// debugger.
     ///
-    /// A new instance drops the queued calls of the old one (their answers
-    /// would go to a worker that never made them). Then the tabs the engine
-    /// shows for the extension's debuggers are forgotten where the worker's
-    /// own list says their sessions are gone (`policy::tabs_to_forget`), and
-    /// each one that has no debugger left is hidden again.
-    fn worker_hello(&self, extension: &str, reported: Option<&str>, attached: Option<Vec<i64>>) {
-        let (identity, stale, forget) = {
+    /// A new instance drops the queued tab lists of the old one (their call
+    /// ids belong to it). A queued debugger report of the old instance is kept
+    /// and applied (its session survives a stop), with its answer suppressed
+    /// (`reply_due`). A session for a tab the table cannot name yet is kept
+    /// pending (`apply_pending`).
+    fn worker_hello(&self, extension: &str, hello: &Hello) {
+        let (identity, stale, forget, pending) = {
             let mut inner = self.inner.borrow_mut();
             let seen = inner.identities.get(extension).cloned();
-            let identity = identity(seen.as_deref(), reported);
-            match reported {
-                Some(instance) => {
-                    inner
-                        .identities
-                        .insert(extension.to_string(), instance.to_string());
-                }
-                None => {
-                    inner.identities.remove(extension);
-                }
+            let identity = identity(seen.as_deref(), &hello.instance);
+            if identity == Identity::Restarted {
+                // A new instance reached the engine through this relay: the relay
+                // is connected to the live worker (`check_worker_targets`).
+                inner.new_instance_heard.insert(extension.to_string());
             }
-            let current = reported.unwrap_or_default();
+            inner
+                .identities
+                .insert(extension.to_string(), hello.instance.clone());
+            let current = hello.instance.as_str();
             let (stale, kept): (Vec<Job>, Vec<Job>) = std::mem::take(&mut inner.jobs)
                 .into_iter()
                 .partition(|job| match job {
@@ -1270,60 +1400,111 @@ impl Bridge {
                         extension: e,
                         instance,
                         ..
-                    }
-                    | Job::Debugger {
-                        extension: e,
-                        instance,
-                        ..
-                    } => e.as_str() == extension && !job_belongs(job.kind(), instance, current),
-                    Job::Click { .. } => false,
+                    } => e.as_str() == extension && !job_kept(JobKind::Query, instance, current),
+                    Job::Debugger { .. } | Job::Click { .. } => false,
                 });
             inner.jobs = kept;
+            let mut resolved = Vec::new();
+            let mut pending = Vec::new();
+            for (chromium, state) in &hello.sessions {
+                match inner.table.tab(*chromium) {
+                    Some(tab) => resolved.push((tab, *state)),
+                    None => pending.push((*chromium, *state)),
+                }
+            }
+            if pending.is_empty() {
+                inner.pending_sessions.remove(extension);
+            } else {
+                inner
+                    .pending_sessions
+                    .insert(extension.to_string(), pending);
+            }
             let tracked = inner.debuggers.tabs_of(extension);
-            let attached: Option<Vec<TabId>> = attached.map(|list| {
-                list.iter()
-                    .filter_map(|chromium| inner.table.tab(*chromium))
-                    .collect()
-            });
-            let forget = tabs_to_forget(identity, &tracked, attached.as_deref());
-            (identity, stale, (forget, attached))
+            let forget = tabs_to_forget(&resolved, &tracked);
+            let pending_count = inner.pending_sessions.get(extension).map_or(0, Vec::len);
+            (identity, stale, forget, pending_count)
         };
-        let (forget, attached) = forget;
+        let count = |state: Session| hello.sessions.iter().filter(|(_, s)| *s == state).count();
         if identity == Identity::Restarted {
             log::info!(
-                "bridge: {extension} runs a new worker instance; its debugger sessions still answer on: {:?}",
-                attached.unwrap_or_default()
+                "bridge: {extension} runs a new worker instance; its debugger sessions: {} attached, {} not attached, {} unknown",
+                count(Session::Attached),
+                count(Session::NotAttached),
+                count(Session::Unknown)
+            );
+        } else {
+            log::info!(
+                "bridge: {extension}'s worker says hello: {} attached, {} not attached, {} unknown ({pending} waiting for the table)",
+                count(Session::Attached),
+                count(Session::NotAttached),
+                count(Session::Unknown),
+                pending = pending
             );
         }
-        if identity == Identity::Unreached {
-            log::warn!("bridge: {extension}'s worker could not say who it is");
-        }
         for job in stale {
-            match job {
-                Job::Query { call, .. } => log::warn!(
+            if let Job::Query { call, .. } = job {
+                log::warn!(
                     "bridge: {extension}: the tab list of call {call} is dropped: its worker is gone"
-                ),
-                Job::Debugger { call, debuggee, .. } => log::warn!(
-                    "bridge: {extension}: the debugger report {debuggee:?} (call {call}) is dropped: its worker is gone"
-                ),
-                Job::Click { .. } => {}
+                );
             }
         }
         for tab in forget {
-            let handles = {
-                let mut inner = self.inner.borrow_mut();
-                if inner.debuggers.detach(extension, tab) != Change::Undebugged {
+            self.undebug(extension, tab, session_evidence(Session::NotAttached));
+        }
+    }
+
+    /// Apply the sessions a hello named for tabs the table could not name then,
+    /// now that a join may name them (`worker_hello`). Only a tab the worker
+    /// says is not attached is forgotten, and only if it is still debugged by
+    /// that extension.
+    fn apply_pending(&self) {
+        let mut forget = Vec::new();
+        {
+            let mut inner = self.inner.borrow_mut();
+            let extensions: Vec<String> = inner.pending_sessions.keys().cloned().collect();
+            for extension in extensions {
+                let Some(list) = inner.pending_sessions.remove(&extension) else {
                     continue;
+                };
+                let mut still = Vec::new();
+                for (chromium, state) in list {
+                    match inner.table.tab(chromium) {
+                        Some(tab) => {
+                            if inner.debuggers.tabs_of(&extension).contains(&tab) {
+                                forget.push((extension.clone(), tab, session_evidence(state)));
+                            }
+                        }
+                        None => still.push((chromium, state)),
+                    }
                 }
-                tab_handles(&inner, tab)
-            };
-            log::info!(
-                "bridge: {tab:?} has no debugger left ({extension}, worker {identity:?}: the engine no longer counts its debugger)"
-            );
-            if let Some((browser, view)) = handles {
-                set_tab_debugged(&browser, &view, false);
+                if !still.is_empty() {
+                    inner.pending_sessions.insert(extension, still);
+                }
             }
         }
+        for (extension, tab, evidence) in forget {
+            self.undebug(&extension, tab, evidence);
+        }
+    }
+
+    /// A worker's hello reached the engine: the relay that heard it reaches its
+    /// worker, so its unreached count is cleared (`Opener::unreached`).
+    fn hello_reached(&self, extension: &str) {
+        if let Some(opener) = self.inner.borrow_mut().openers.get_mut(extension) {
+            opener.unreached = 0;
+        }
+    }
+
+    /// A relay passed its probe and then could not reach its worker: the
+    /// opening is a failed one for the schedule (I12). Its relay is closed by
+    /// the caller; its debuggers and queued jobs are kept.
+    fn unreached(&self, extension: &str) {
+        self.inner
+            .borrow_mut()
+            .openers
+            .entry(extension.to_string())
+            .or_default()
+            .unreached += 1;
     }
 
     /// Whether `extension`'s debuggers or queued debugger reports make its
@@ -1340,6 +1521,9 @@ impl Bridge {
     /// Ask `extension`'s relay which worker instance it reaches. The relay
     /// starts the worker if it is stopped, and answers with its `hello`.
     fn identify(&self, extension: &str) {
+        log::info!(
+            "bridge: {extension}: asks its relay which worker it reaches (its debuggers or a queued report need it)"
+        );
         if !self.evaluate(
             extension,
             "nautilusRelay.identify()",
@@ -1509,7 +1693,7 @@ impl Bridge {
         let value = evaluation(success, result);
         match pending {
             Pending::Targets => {
-                {
+                let targets = {
                     let mut inner = self.inner.borrow_mut();
                     inner.refreshing = false;
                     match &value {
@@ -1517,7 +1701,7 @@ impl Bridge {
                             let targets = parse_targets(value);
                             let before = inner.table.rows().to_vec();
                             inner.table.join(&targets);
-                            log::info!(
+                            log::debug!(
                                 "bridge: table has {} tab(s) of {} target(s)",
                                 inner.table.rows().len(),
                                 targets.len()
@@ -1525,6 +1709,11 @@ impl Bridge {
                             // The rows name each tab by both its id and
                             // Chromium's, so a run's log can match them.
                             if before != inner.table.rows() {
+                                log::info!(
+                                    "bridge: table has {} tab(s) of {} target(s)",
+                                    inner.table.rows().len(),
+                                    targets.len()
+                                );
                                 for row in inner.table.rows() {
                                     log::info!(
                                         "bridge: table: {:?} is Chromium tab {} at {}",
@@ -1534,9 +1723,17 @@ impl Bridge {
                                     );
                                 }
                             }
+                            Some(targets)
                         }
-                        Err(e) => log::warn!("bridge: the helper could not list the targets: {e}"),
+                        Err(e) => {
+                            log::warn!("bridge: the helper could not list the targets: {e}");
+                            None
+                        }
                     }
+                };
+                if let Some(targets) = targets {
+                    self.check_worker_targets(&targets);
+                    self.apply_pending();
                 }
                 self.run_jobs();
             }
@@ -1573,40 +1770,52 @@ impl Bridge {
                     self.close_relay(key);
                 }
             },
-            Pending::Identify { extension } => match value {
-                Ok(hello) => {
-                    let (instance, attached) = hello_of(&hello);
-                    self.worker_hello(&extension, instance.as_deref(), attached);
+            Pending::Identify { extension } => match value.map(|hello| hello_of(&hello)) {
+                Ok(Some(hello)) => {
+                    self.hello_reached(&extension);
+                    self.worker_hello(&extension, &hello);
                 }
-                // The relay cannot reach its worker: it is closed, so that the
-                // next turn opens a fresh one, and what it held is forgotten.
+                // The relay cannot reach its worker (or its hello is malformed):
+                // the relay is closed, so the next turn opens a fresh one, and
+                // the opening counts as failed (`unreached`). Nothing is
+                // forgotten: a silent worker says nothing about its sessions.
+                Ok(None) => {
+                    log::warn!(
+                        "bridge: {extension}'s worker sent a hello with no instance; its relay is closed and opened again"
+                    );
+                    self.unreached(&extension);
+                    self.close_relay(&extension);
+                }
                 Err(e) => {
-                    log::warn!("bridge: {extension}'s worker did not say who it is: {e}");
-                    self.worker_hello(&extension, None, None);
+                    log::warn!(
+                        "bridge: {extension}'s worker did not say who it is ({e}); its relay is closed and opened again, and its debuggers are kept"
+                    );
+                    self.unreached(&extension);
                     self.close_relay(&extension);
                 }
             },
-            Pending::Alive => {
-                if let Err(e) = value {
-                    log::warn!(
-                        "bridge: the relay of {key} is not in its extension's context any more ({e}): the extension was reloaded. Its debuggers are forgotten and the relay is opened again."
-                    );
-                    self.worker_hello(key, None, None);
-                    self.close_relay(key);
-                }
-            }
+            Pending::Inspect { label } => match value {
+                Ok(answer) => log::info!("bridge: relay {key} answers {label}: {answer}"),
+                Err(e) => log::info!("bridge: relay {key} answers {label} with an error: {e}"),
+            },
             Pending::Poll => match value {
                 Ok(items) => {
                     for item in items.as_array().into_iter().flatten() {
                         if let Some(hello) = item.get("hello") {
-                            let (instance, attached) = hello_of(hello);
-                            self.worker_hello(key, instance.as_deref(), attached);
-                        } else if item.get("gone").is_some() {
-                            // The worker's port went: it stopped, or was
-                            // reloaded. Its debuggers are checked only if any.
-                            if self.needs_identity(key) {
-                                self.identify(key);
+                            // The worker's own hello, on a port it opened: the
+                            // only way its identity comes unasked (no identify).
+                            if let Some(hello) = hello_of(hello) {
+                                self.hello_reached(key);
+                                self.worker_hello(key, &hello);
                             }
+                        } else if item.get("gone").is_some() {
+                            // The worker's port went: it stopped (an idle stop,
+                            // which keeps its sessions) or was reloaded. Nothing
+                            // is asked: asking would start a stopped worker
+                            // (I15). A reload is seen by the worker target
+                            // (`check_worker_targets`), and the next port's
+                            // hello says the rest.
+                            log::debug!("bridge: {key}'s worker port closed; nothing is asked");
                         } else {
                             self.worker_call(key, item);
                         }
@@ -1667,6 +1876,21 @@ impl Bridge {
                     }
                 }
             },
+        }
+    }
+
+    /// Evaluate `expression` in `extension`'s relay page and log its value as
+    /// `label` (a test control's inspection, `TEST HOOK: relay_eval`). Nothing
+    /// else reads the answer.
+    pub(crate) fn inspect_relay(&self, extension: &str, label: &str, expression: &str) {
+        if !self.evaluate(
+            extension,
+            expression,
+            Pending::Inspect {
+                label: label.to_string(),
+            },
+        ) {
+            log::info!("bridge: relay {extension} has no page to answer {label}");
         }
     }
 
