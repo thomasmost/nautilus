@@ -287,4 +287,111 @@ function pageContext({ bindingsAtChange = true, hasDocument = true }) {
   p.mutate();
   assert.equal(p.sandbox.__nautilusBridge, undefined);
 }
+// The worker's runtime port (bridge.js) against a model of Chromium's ports: a
+// port whose other end has no listener is closed at once with "Receiving end
+// does not exist" (nothing on that end ever sees a message), and a port to a
+// listening page delivers both ways. The worker's own first port is opened
+// when no page listens yet, as a worker started before the relay page does.
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function portEnd(name) {
+  const end = {
+    name,
+    onMessage: nativeEvent(),
+    onDisconnect: nativeEvent(),
+    peer: null,
+    closed: false,
+    postMessage(message) {
+      if (end.closed) { throw new Error('Attempting to use a disconnected port object'); }
+      const copy = JSON.parse(JSON.stringify(message));
+      setTimeout(() => end.peer.receive(copy), 0);
+    },
+    receive(message) { if (!end.closed) { end.onMessage.fire(message); } },
+    disconnect() {
+      if (end.closed) { return; }
+      end.closed = true;
+      end.onDisconnect.fire();
+      if (end.peer && !end.peer.closed) { end.peer.disconnect(); }
+    },
+  };
+  return end;
+}
+
+function workerWorld() {
+  const pages = []; // the onConnect listeners of the extension's pages
+  const served = []; // the methods each page was asked
+  let lastError;
+  const runtime = {
+    onConnect: nativeEvent(),
+    get lastError() { return lastError; },
+    connect({ name }) {
+      const worker = portEnd(name);
+      const page = portEnd(name);
+      worker.peer = page;
+      page.peer = worker;
+      if (pages.length === 0) {
+        setTimeout(() => {
+          lastError = { message: 'Could not establish connection. Receiving end does not exist.' };
+          worker.disconnect();
+          lastError = undefined;
+        }, 0);
+      } else {
+        pages.forEach((listen) => listen(page));
+      }
+      return worker;
+    },
+  };
+  return { runtime, pages, served };
+}
+
+function listeningRelay(served) {
+  return (port) => {
+    port.onMessage.addListener((message) => {
+      if (!message.call) { return; }
+      served.push(message.call.method);
+      port.postMessage({ reply: { id: message.call.id, instance: message.call.instance, result: 'answer to ' + message.call.method } });
+    });
+  };
+}
+
+function loadWorker(runtime) {
+  const sandbox = { chrome: { runtime }, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Date, setTimeout, clearTimeout };
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read('bridge.js'), sandbox);
+  return sandbox;
+}
+
+{
+  // A call made before any relay listens waits for one, and each call is
+  // answered once by the relay that listens.
+  const w = workerWorld();
+  const worker = loadWorker(w.runtime);
+  const outcome = (p) => p.then((value) => value, (e) => 'rejected: ' + e.message);
+  const first = outcome(worker.__bridgeCall('tabs', 'query', [{}]));
+  const second = outcome(worker.__bridgeCall('tabs', 'get', [7]));
+  await wait(20);
+  w.pages.push(listeningRelay(w.served));
+  assert.equal(await first, 'answer to tabs.query');
+  assert.equal(await second, 'answer to tabs.get');
+  assert.deepEqual(w.served.slice().sort(), ['tabs.get', 'tabs.query']);
+}
+{
+  // A call with no relay at all fails with an error within the bridge's
+  // bound, and the relay never sees it.
+  const w = workerWorld();
+  const worker = loadWorker(w.runtime);
+  const started = Date.now();
+  await assert.rejects(worker.__bridgeCall('tabs', 'query', [{}]), /found no listener/);
+  assert.ok(Date.now() - started < 10000, 'the failure is bounded');
+  assert.deepEqual(w.served, []);
+}
+{
+  // A relay that listens from the start answers a call as before.
+  const w = workerWorld();
+  w.pages.push(listeningRelay(w.served));
+  const worker = loadWorker(w.runtime);
+  assert.equal(await worker.__bridgeCall('tabs', 'query', [{}]), 'answer to tabs.query');
+  assert.deepEqual(w.served, ['tabs.query']);
+}
 console.log('bridge scripts: ok');

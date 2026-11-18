@@ -12,6 +12,10 @@
   if (self.__nautilusTransport) { return; }
   var PORT = 'nautilus-bridge-1';
   var CALL_TIMEOUT_MS = 10000;
+  // A call whose port has no listener on the other end waits this long for a
+  // relay to listen, re-sending every RESEND_MS, then fails.
+  var RECEIVER_WAIT_MS = 3000;
+  var RESEND_MS = 100;
   var runtime = chrome.runtime;
 
   function define(object, name, value) {
@@ -135,7 +139,13 @@
     port = newPort;
     newPort.onMessage.addListener(function (message) { onMessage(newPort, message); });
     newPort.onDisconnect.addListener(function () {
-      void runtime.lastError;
+      if (noListener(runtime.lastError)) {
+        // No listener was ever connected, so nothing on the other end saw the
+        // calls sent on this port: they are sent again on a port that has one.
+        if (port === newPort) { port = null; }
+        calls.forEach(function (call) { if (call.on === newPort) { resend(call); } });
+        return;
+      }
       if (port !== newPort) { return; }
       port = null;
       calls.forEach(function (call, id) {
@@ -166,33 +176,78 @@
     return port;
   }
 
+  // Chromium's error for a port whose other end has no listener: the port is
+  // closed at once and nothing on the other end received anything over it.
+  function noListener(error) {
+    return /Receiving end does not exist|Could not establish connection/.test(String((error && error.message) || error || ''));
+  }
+
   function call(method, args) {
     return new Promise(function (resolve, reject) {
       var id = nextCall++;
-      var timer = setTimeout(function () {
+      var entry = { id: id, method: method, args: args, resolve: resolve, reject: reject, timer: null, on: null, nobodyUntil: 0 };
+      entry.timer = setTimeout(function () {
         calls.delete(id);
         reject(new Error('Nautilus: ' + method + ' was not answered.'));
       }, CALL_TIMEOUT_MS);
-      calls.set(id, { resolve: resolve, reject: reject, timer: timer });
-      var sent;
+      calls.set(id, entry);
       try {
-        sent = ensurePort();
+        ensurePort();
       } catch (e) {
-        clearTimeout(timer);
-        calls.delete(id);
-        reject(e);
+        fail(entry, e);
         return;
       }
-      ready.then(function () {
-        try {
-          sent.postMessage({ call: { id: id, method: method, args: args, instance: INSTANCE } });
-        } catch (e) {
-          clearTimeout(timer);
-          calls.delete(id);
-          reject(e);
-        }
-      });
+      send(entry);
     });
+  }
+
+  function fail(entry, error) {
+    if (!calls.has(entry.id)) { return; }
+    calls.delete(entry.id);
+    clearTimeout(entry.timer);
+    entry.reject(error);
+  }
+
+  // Posts a call on the port in use, after that port's hello: a call is always
+  // answered under the identity its port announced. The port is read when the
+  // call is posted, not when it was made, so a call that waited is never posted
+  // on a port that was replaced.
+  function send(entry) {
+    if (!calls.has(entry.id)) { return; }
+    var waited = ready;
+    waited.then(function () {
+      if (!calls.has(entry.id)) { return; }
+      if (ready !== waited) { return send(entry); }
+      if (!port) { return resend(entry); }
+      entry.on = port;
+      try {
+        port.postMessage({ call: { id: entry.id, method: entry.method, args: entry.args, instance: INSTANCE } });
+      } catch (e) {
+        fail(entry, e);
+      }
+    });
+  }
+
+  // A call that found no listener is sent again on a new port, every RESEND_MS,
+  // until RECEIVER_WAIT_MS has passed since the first such port; then it fails.
+  function resend(entry) {
+    if (!calls.has(entry.id)) { return; }
+    var now = Date.now();
+    if (!entry.nobodyUntil) { entry.nobodyUntil = now + RECEIVER_WAIT_MS; }
+    if (now > entry.nobodyUntil) {
+      fail(entry, new Error('Nautilus: ' + entry.method + ' found no listener in the browser.'));
+      return;
+    }
+    setTimeout(function () {
+      if (!calls.has(entry.id)) { return; }
+      try {
+        ensurePort();
+      } catch (e) {
+        fail(entry, e);
+        return;
+      }
+      send(entry);
+    }, RESEND_MS);
   }
 
   function onMessage(from, message) {

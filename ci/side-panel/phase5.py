@@ -121,7 +121,8 @@ def of_kind(kind):
 
 
 def done(suite):
-    return any(r["data"] == suite or str(r["data"]).startswith("failed") for r in of_kind("done"))
+    """The suite ran to its end. A `failed: ...` record is the suite throwing, not finishing."""
+    return any(r["data"] == suite for r in of_kind("done"))
 
 
 def write_command(directory, number, command):
