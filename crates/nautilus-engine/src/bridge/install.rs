@@ -51,7 +51,7 @@ pub(crate) fn write_helper(store_dir: &Path) -> Result<PathBuf, String> {
 /// worker's entry, the manifest pointing at it, and a record of the
 /// original entry in `nautilus-bridge/original.json`. Removing the
 /// loader and that directory and restoring the entry undoes it.
-pub(crate) fn rewrite_in_place(dir: &Path) -> Result<Bridged, String> {
+pub(crate) fn rewrite_in_place(dir: &Path, skipped: &[PathBuf]) -> Result<Bridged, String> {
     let manifest_path = dir.join("manifest.json");
     let text = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("the extension has no manifest: {e}"))?;
@@ -60,6 +60,15 @@ pub(crate) fn rewrite_in_place(dir: &Path) -> Result<Bridged, String> {
     let rewrite = rewrite_manifest(&manifest).map_err(|e| e.to_string())?;
     if rewrite == Rewrite::NoWorker {
         return Ok(Bridged::NoWorker);
+    }
+    // The loader imports the worker's entry: without it the worker cannot
+    // run, so the load fails here rather than leaving a broken copy.
+    if let Rewrite::Wrapped { original, .. } = &rewrite {
+        entry_in_copy(
+            &original.service_worker,
+            dir.join(&original.service_worker).is_file(),
+            skipped,
+        )?;
     }
     let bridge_dir = dir.join(BRIDGE_DIR);
     fs::create_dir_all(&bridge_dir)
@@ -148,8 +157,9 @@ pub(crate) fn copy_and_rewrite(
 /// Copy `source` into `staging`, bridge the copy, and move it to `copy`,
 /// replacing an earlier copy.
 fn stage(source: &Path, staging: &Path, copy: &Path) -> Result<Bridged, String> {
-    copy_dir(source, staging)?;
-    let bridged = rewrite_in_place(staging)?;
+    let mut skipped = Vec::new();
+    copy_dir(source, staging, Path::new(""), &mut skipped)?;
+    let bridged = rewrite_in_place(staging, &skipped)?;
     if copy.exists() {
         fs::remove_dir_all(copy).map_err(|e| format!("clearing {}: {e}", copy.display()))?;
     }
@@ -172,6 +182,24 @@ fn refuse_nested(source: &Path, store: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Whether the copy holds the worker's entry `entry` (relative to the
+/// extension). `is_file` says it is a file in the copy; `skipped` are the
+/// links the copy left out. A copy without its entry cannot run the worker,
+/// and the reason says which of the two it was.
+pub(crate) fn entry_in_copy(entry: &str, is_file: bool, skipped: &[PathBuf]) -> Result<(), String> {
+    if is_file {
+        return Ok(());
+    }
+    if skipped.iter().any(|link| link == Path::new(entry)) {
+        return Err(format!(
+            "the worker's entry {entry} is a symbolic link, and links are not copied: the extension cannot load its worker"
+        ));
+    }
+    Err(format!(
+        "the worker's entry {entry} is missing from the extension: the extension cannot load its worker"
+    ))
 }
 
 /// `relative` joined onto `dir`, if it names a file inside `dir`: no
@@ -200,21 +228,37 @@ fn path_key_text(path: &str, windows: bool) -> String {
     }
 }
 
-fn copy_dir(from: &Path, to: &Path) -> Result<(), String> {
+/// Copy the tree at `from` into `to`. `prefix` is `from`'s place in the
+/// extension (empty at the top), and each link left out is pushed onto
+/// `skipped` by its place, so the load can see whether the worker's entry
+/// was one of them.
+fn copy_dir(
+    from: &Path,
+    to: &Path,
+    prefix: &Path,
+    skipped: &mut Vec<PathBuf>,
+) -> Result<(), String> {
     fs::create_dir_all(to).map_err(|e| format!("creating {}: {e}", to.display()))?;
     let entries = fs::read_dir(from).map_err(|e| format!("reading {}: {e}", from.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("reading {}: {e}", from.display()))?;
-        let (source, target) = (entry.path(), to.join(entry.file_name()));
+        let name = entry.file_name();
+        let (source, target) = (entry.path(), to.join(&name));
+        let place = prefix.join(&name);
         // `symlink_metadata` does not follow a link. A link is skipped:
         // following one can loop back into the tree or leave it, and a
-        // dangling one has nothing to copy.
+        // dangling one has nothing to copy. The skip is logged at warning
+        // level, since the extension may depend on the file.
         let kind = fs::symlink_metadata(&source)
             .map_err(|e| format!("reading {}: {e}", source.display()))?;
         if kind.is_symlink() {
-            log::debug!("bridge: skipping the symbolic link {}", source.display());
+            log::warn!(
+                "bridge: the symbolic link {} is not copied into the extension's copy",
+                source.display()
+            );
+            skipped.push(place);
         } else if kind.is_dir() {
-            copy_dir(&source, &target)?;
+            copy_dir(&source, &target, &place, skipped)?;
         } else {
             fs::copy(&source, &target).map_err(|e| format!("copying {}: {e}", source.display()))?;
         }
@@ -364,7 +408,7 @@ mod tests {
         let manifest = fs::read_to_string(copy.join("manifest.json")).unwrap();
         let record = fs::read_to_string(copy.join("nautilus-bridge/original.json")).unwrap();
         fs::write(copy.join("nautilus-bridge/bridge.js"), "// an older bridge").unwrap();
-        assert_eq!(rewrite_in_place(&copy), Ok(Bridged::Yes));
+        assert_eq!(rewrite_in_place(&copy, &[]), Ok(Bridged::Yes));
         assert_eq!(
             fs::read_to_string(copy.join("manifest.json")).unwrap(),
             manifest
@@ -468,6 +512,61 @@ mod tests {
         assert!(fs::symlink_metadata(copy.join("loop")).is_err());
         assert!(fs::symlink_metadata(copy.join("background/up")).is_err());
         assert!(copy.join("background/sw.js").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_worker_entry_is_checked_present_skipped_or_absent() {
+        assert_eq!(entry_in_copy("background/sw.js", true, &[]), Ok(()));
+        let skipped = [PathBuf::from("background/sw.js")];
+        let linked = entry_in_copy("background/sw.js", false, &skipped).unwrap_err();
+        assert!(linked.contains("symbolic link"), "{linked}");
+        let absent = entry_in_copy("background/sw.js", false, &[]).unwrap_err();
+        assert!(absent.contains("missing"), "{absent}");
+        // A link elsewhere in the copy does not stand in for the entry.
+        let other = [PathBuf::from("lib/other.js")];
+        assert!(
+            entry_in_copy("background/sw.js", false, &other)
+                .unwrap_err()
+                .contains("missing")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_worker_entry_that_is_a_link_fails_the_load_and_leaves_no_copy() {
+        let root = scratch("linked-entry");
+        let source = extension(
+            &root,
+            r#"{"background":{"service_worker":"background/sw.js"}}"#,
+        );
+        fs::remove_file(source.join("background/sw.js")).unwrap();
+        fs::write(
+            source.join("background/real.js"),
+            "importScripts('lib.js');",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            source.join("background/real.js"),
+            source.join("background/sw.js"),
+        )
+        .unwrap();
+        let error = copy_and_rewrite(&source, &root.join("store")).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+        assert!(!root.join("store").join(copy_name(&source)).exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_worker_entry_that_is_absent_fails_the_load() {
+        let root = scratch("absent-entry");
+        let source = extension(
+            &root,
+            r#"{"background":{"service_worker":"background/missing.js"}}"#,
+        );
+        let error = copy_and_rewrite(&source, &root.join("store")).unwrap_err();
+        assert!(error.contains("missing"), "{error}");
+        assert!(!root.join("store").join(copy_name(&source)).exists());
         fs::remove_dir_all(&root).unwrap();
     }
 
