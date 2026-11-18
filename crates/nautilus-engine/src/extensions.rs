@@ -406,6 +406,22 @@ mod native {
         next: u32,
     }
 
+    /// The scripted run's control directory, if `NAUTILUS_TEST_CONTROL`
+    /// names one that may be used. A directory that fails the check is
+    /// logged and the hook stays off.
+    fn test_control(engine_dir: &Path) -> Option<Control> {
+        let dir = PathBuf::from(std::env::var_os("NAUTILUS_TEST_CONTROL")?);
+        if let Some(reason) = super::control_refusal(&dir, engine_dir) {
+            log::warn!(
+                "TEST HOOK refused: {} ({reason}); the hook stays off",
+                dir.display()
+            );
+            return None;
+        }
+        log::info!("TEST HOOK: commands are read from {}", dir.display());
+        Some(Control { dir, next: 1 })
+    }
+
     /// What the manager remembers of an extension beyond the model.
     struct Known {
         id: String,
@@ -504,16 +520,7 @@ mod native {
                     loads: VecDeque::new(),
                     loading: false,
                     helper_requested: false,
-                    control: std::env::var_os("NAUTILUS_TEST_CONTROL").map(|dir| {
-                        log::info!(
-                            "TEST HOOK: commands are read from {}",
-                            Path::new(&dir).display()
-                        );
-                        Control {
-                            dir: PathBuf::from(dir),
-                            next: 1,
-                        }
-                    }),
+                    control: test_control(engine_dir),
                 }),
             });
             let mut client = ManagerClient::new(
@@ -1469,6 +1476,141 @@ mod native {
         }
     }
 }
+/// Why `NAUTILUS_TEST_CONTROL`'s directory must not be used, or `None`
+/// when it may. Unix only: the directory must belong to the user that owns
+/// the profile's engine directory (the browser created it), and no one but
+/// its owner may write to it. Elsewhere there is no check.
+#[cfg(unix)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn control_refusal(dir: &std::path::Path, profile: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = match std::fs::metadata(dir) {
+        Ok(meta) => meta,
+        Err(e) => return Some(format!("it cannot be read: {e}")),
+    };
+    match std::fs::metadata(profile) {
+        Ok(owner) => control_refusal_for(&meta, owner.uid()),
+        Err(e) => Some(format!("the profile directory cannot be read: {e}")),
+    }
+}
+
+#[cfg(not(unix))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn control_refusal(_dir: &std::path::Path, _profile: &std::path::Path) -> Option<String> {
+    None
+}
+
+/// The owner and mode test on the control directory's metadata, against
+/// the uid that owns the profile.
+#[cfg(unix)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn control_refusal_for(meta: &std::fs::Metadata, owner: u32) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    if !meta.is_dir() {
+        return Some("it is not a directory".to_string());
+    }
+    if meta.uid() != owner {
+        return Some(format!(
+            "it belongs to uid {}, not to uid {owner}, which owns the profile",
+            meta.uid()
+        ));
+    }
+    if meta.mode() & 0o022 != 0 {
+        return Some(format!(
+            "it is writable by its group or others (mode {:o})",
+            meta.mode() & 0o777
+        ));
+    }
+    None
+}
+
+/// Control-directory tests (Unix: the owner and mode check).
+#[cfg(all(test, unix))]
+mod control_tests {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::path::PathBuf;
+
+    use super::control_refusal_for;
+
+    /// A directory under the system temp dir with `mode`, removed on drop.
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new(tag: &str, mode: u32) -> Dir {
+            let path =
+                std::env::temp_dir().join(format!("nautilus-control-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            Dir(path)
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_directory_only_its_owner_can_write_is_accepted() {
+        let dir = Dir::new("owner-only", 0o700);
+        let meta = std::fs::metadata(&dir.0).unwrap();
+        assert_eq!(control_refusal_for(&meta, meta.uid()), None);
+    }
+
+    #[test]
+    fn a_directory_readable_but_not_writable_by_others_is_accepted() {
+        let dir = Dir::new("read-only-for-others", 0o755);
+        let meta = std::fs::metadata(&dir.0).unwrap();
+        assert_eq!(control_refusal_for(&meta, meta.uid()), None);
+    }
+
+    #[test]
+    fn a_directory_writable_by_its_group_or_others_is_refused() {
+        for (tag, mode) in [
+            ("group-write", 0o770),
+            ("other-write", 0o702),
+            ("open", 0o777),
+        ] {
+            let dir = Dir::new(tag, mode);
+            let meta = std::fs::metadata(&dir.0).unwrap();
+            let refusal = control_refusal_for(&meta, meta.uid());
+            assert!(
+                refusal
+                    .as_deref()
+                    .is_some_and(|r| r.contains("writable by its group or others")),
+                "mode {mode:o} should be refused, got {refusal:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_directory_owned_by_another_user_is_refused() {
+        let dir = Dir::new("other-owner", 0o700);
+        let meta = std::fs::metadata(&dir.0).unwrap();
+        let refusal = control_refusal_for(&meta, meta.uid().wrapping_add(1));
+        assert!(
+            refusal
+                .as_deref()
+                .is_some_and(|r| r.contains("belongs to uid")),
+            "got {refusal:?}"
+        );
+    }
+
+    #[test]
+    fn something_that_is_not_a_directory_is_refused() {
+        let dir = Dir::new("not-a-dir", 0o700);
+        let file = dir.0.join("plain-file");
+        std::fs::write(&file, b"x").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        assert_eq!(
+            control_refusal_for(&meta, meta.uid()),
+            Some("it is not a directory".to_string())
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CommandFacts, KeyPlatform, manifest_facts, web_store_item_id};

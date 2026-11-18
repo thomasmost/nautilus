@@ -61,7 +61,9 @@ trap 'exit 129' HUP
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/nautilus-side-panel.XXXXXX")
 rm -rf "$profile_dir"
-mkdir -p "$work/ctl-1" "$work/ctl-2"
+# Control directories are private: the engine refuses one that another user
+# owns or that group or others can write (NAUTILUS_TEST_CONTROL).
+mkdir -p -m 700 "$work/ctl-1" "$work/ctl-2"
 
 python3 "$root/ci/side-panel/driver.py" "$mode" "$work" "$root/ci/side-panel/ext" > "$work/driver.log" 2>&1 &
 driver=$!
