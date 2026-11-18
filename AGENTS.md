@@ -510,12 +510,16 @@ What changed:
 Tests and checks on the final tree (exit status in brackets; `review5-*` logs
 where kept):
 
-- `cargo fmt --all --check` [0]; `cargo clippy --workspace --all-targets -- -D warnings` [0];
-  `cargo test --workspace` [0]: 149 + 2 passed (the cycle 4 count was 140 + 2;
-  the nine new tests are the sequence tests); `cargo build --workspace` [0];
-  `cargo xtask bundle-mac` [0]; `sh -n ci/side-panel/run.sh` [0]; the driver's
-  AST and compile check [ok, no `__pycache__`]; `node --check` on `bridge.js`
-  and `relay.js` [0].
+- Kept gate outputs: `cargo fmt --all --check` [0, `review5-fmt2.status`];
+  `cargo clippy --workspace --all-targets -- -D warnings` [0,
+  `review5-clippy2.status`]; `cargo test --workspace` [0, `review5-test2.txt`:
+  149 + 2 passed; the cycle 4 count was 140 + 2, and the nine new tests are the
+  sequence tests]; `cargo build --workspace` [0, `review5-build2.status`];
+  `cargo xtask bundle-mac` [0, `review5-bundle2.status`].
+- Claimed in the session, not kept: `sh -n ci/side-panel/run.sh` [0]; the
+  driver's AST and compile check [ok, no `__pycache__` left in the worktree];
+  `node --check` on `bridge.js` and `relay.js` [0]. The M22 hello check itself is
+  kept (`review5-m22-hello-*`).
 
 Runs (final build; each launch's exit status is in its `.status` file):
 
