@@ -102,27 +102,27 @@
     });
   }
 
-  // Every tab the target list names, with its state. Never rejects and always
-  // settles within HELLO_TIMEOUT_MS: a tab whose probe has not answered by then
-  // is `unknown`.
+  // Every tab the target list names, with its state. Never rejects. The whole
+  // chain, the list included, is raced against HELLO_TIMEOUT_MS: when it has not
+  // settled by then the hello names no session, which forgets nothing. Each probe
+  // is bounded by PROBE_TIMEOUT_MS on its own (a probe that has not answered is
+  // `unknown`), so a chain of answered probes ends well inside the race.
   function sessionStates() {
     var debuggerApi = chrome.debugger;
     if (!debuggerApi || typeof debuggerApi.getTargets !== 'function') { return Promise.resolve([]); }
-    var listed;
-    try { listed = Promise.resolve(debuggerApi.getTargets()); } catch (e) { return Promise.resolve([]); }
-    return listed.then(function (targets) {
+    var timer = null;
+    var limit = new Promise(function (resolve) { timer = setTimeout(function () { resolve([]); }, HELLO_TIMEOUT_MS); });
+    var chain = Promise.resolve().then(function () { return debuggerApi.getTargets(); }).then(function (targets) {
       var tabs = [];
       (targets || []).forEach(function (t) {
         if (typeof t.tabId === 'number' && tabs.indexOf(t.tabId) < 0) { tabs.push(t.tabId); }
       });
-      var timer = null;
-      var limit = new Promise(function (resolve) { timer = setTimeout(function () { resolve(null); }, HELLO_TIMEOUT_MS); });
-      var probes = Promise.all(tabs.map(function (tabId) { return probeSession(debuggerApi, tabId); }));
-      return Promise.race([probes, limit]).then(function (answers) {
-        clearTimeout(timer);
-        return answers || tabs.map(function (tab) { return { tab: tab, state: 'unknown' }; });
-      });
-    }, function () { return []; });
+      return Promise.all(tabs.map(function (tabId) { return probeSession(debuggerApi, tabId); }));
+    });
+    return Promise.race([chain, limit]).then(function (answers) {
+      clearTimeout(timer);
+      return answers;
+    }, function () { clearTimeout(timer); return []; });
   }
 
   function adopt(newPort) {
