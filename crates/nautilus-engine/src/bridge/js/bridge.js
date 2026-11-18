@@ -154,9 +154,16 @@
   // debugger's first command must meet a visible one). The report is best
   // effort: a report that fails or times out does not stop the extension's
   // own call.
+  // The debuggee is Chromium's tab id, or {targetId} for an attach by a
+  // DevTools target id; any other target (an extension's, say) is not
+  // reported. The engine maps either one through its table.
   function report(method, target) {
-    if (!target || typeof target.tabId !== 'number') { return Promise.resolve(); }
-    return call(method, [target.tabId]).then(function () {}, function () {});
+    if (!target) { return Promise.resolve(); }
+    var debuggee;
+    if (typeof target.tabId === 'number') { debuggee = target.tabId; }
+    else if (typeof target.targetId === 'string') { debuggee = { targetId: target.targetId }; }
+    else { return Promise.resolve(); }
+    return call(method, [debuggee]).then(function () {}, function () {});
   }
 
   // A wrapper of Chromium's call that reports `method` for the target after
@@ -190,7 +197,7 @@
     // cancelled the debugger's infobar.
     if (chrome.debugger.onDetach) {
       chrome.debugger.onDetach.addListener(function (source) {
-        if (source) { report('debugger.detached', { tabId: source.tabId }); }
+        if (source) { report('debugger.detached', source); }
       });
     }
   }

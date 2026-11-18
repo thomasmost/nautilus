@@ -3,8 +3,22 @@ importScripts('lib.js'); // relative: resolves beside the worker's own script
 const RUN = Math.random().toString(36).slice(2, 8); // one per worker start
 const ROUNDS = 40;
 
-// The extension's own listeners, registered at startup as any
-// extension's are. The first must never see the bridge's port.
+// M8: what the bridge's wrapping of onConnect answers, probed before this
+// worker adds any listener of its own (the bridge's own listener must not
+// count, and a spy added and removed must come and go).
+(function probeListeners() {
+  const onConnect = chrome.runtime.onConnect;
+  const before = onConnect.hasListeners();
+  const spy = () => {};
+  onConnect.addListener(spy);
+  const withSpy = { hasListeners: onConnect.hasListeners(), hasListener: onConnect.hasListener(spy) };
+  onConnect.removeListener(spy);
+  const removed = onConnect.hasListeners();
+  post('probe', { run: RUN, before, withSpy, removed });
+})();
+
+// The extension's own listener, registered at startup as any extension's is.
+// It must never see the bridge's port (U3).
 chrome.runtime.onConnect.addListener((port) => { post('spy', { run: RUN, port: port.name }); });
 chrome.runtime.onInstalled.addListener((d) => { post('event', { run: RUN, name: 'runtime.onInstalled', reason: d.reason }); });
 chrome.runtime.onStartup.addListener(() => { post('event', { run: RUN, name: 'runtime.onStartup' }); });
@@ -30,15 +44,33 @@ async function checks() {
       chrome.debugger.sendCommand(target, 'Runtime.evaluate', { expression: 'location.href', returnByValue: true }).then((r) => r.result.value), about);
     await timed(RUN, 'debugger.detach', () => chrome.debugger.detach(target).then(() => 'detached'), about);
   }
+  // I8: the attach that names the tab by its DevTools target id, once for
+  // the first tab, with its detach.
+  const first = (query.result || [])[0];
+  if (first) {
+    const targets = await chrome.debugger.getTargets().catch(() => []);
+    const page = targets.find((t) => t.type === 'page' && t.tabId === first.id);
+    if (page) {
+      const byTarget = { targetId: page.id };
+      const about = { tabId: first.id, url: first.url };
+      await timed(RUN, 'debugger.attach({targetId})', () => chrome.debugger.attach(byTarget, '1.3').then(() => 'attached'), about);
+      await timed(RUN, 'debugger.detach({targetId})', () => chrome.debugger.detach(byTarget).then(() => 'detached'), about);
+    }
+  }
   await post('checks-done', { run: RUN, tabs: query.result || [], error: query.error || null });
 }
 
-// The calls that stalled in the probe, one after another, each timed.
-// Uses no bridge: the tab comes from chrome.debugger.getTargets().
+// The calls that stalled in the probe, one after another, each timed. The
+// debugged tab is the BACKGROUND one (not the window's active tab), so the
+// calls go to a tab the renderer is hidden for: the case that stalled.
+// Uses no bridge for the target: it comes from chrome.debugger.getTargets().
 async function latency() {
+  const tabs = await timed(RUN, 'tabs.query({}) for the latency run', () => chrome.tabs.query({}).then((list) => list.map(slim)));
+  const background = (tabs.result || []).find((t) => !t.active);
+  if (!background) { await post('latency-done', { run: RUN, error: 'no background tab: ' + (tabs.error || 'none is inactive') }); return; }
   const targets = await chrome.debugger.getTargets();
-  const page = targets.find((t) => t.type === 'page' && t.tabId !== undefined && /^https?:/.test(t.url));
-  if (!page) { await post('latency-done', { run: RUN, error: 'no page target' }); return; }
+  const page = targets.find((t) => t.type === 'page' && t.tabId === background.id);
+  if (!page) { await post('latency-done', { run: RUN, error: 'no page target for the background tab' }); return; }
   const target = { tabId: page.tabId };
   const ms = [];
   let timeouts = 0;

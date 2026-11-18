@@ -11,6 +11,7 @@ every check passed.
 """
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -141,6 +142,14 @@ def install(ext):
     check('install: the worker script is the loader beside the entry',
           (start or {}).get('script') == '/background/nautilus-loader.js', (start or {}).get('script'))
     check('install: the bridge hides its port (U3)', ((start or {}).get('bridge') or {}).get('portHidden') is True)
+    probe = wait_for(0, 'probe', 20)
+    check('install: onConnect.hasListeners is false before the worker adds a listener (M8)',
+          probe is not None and probe.get('before') is False, probe and probe.get('before'))
+    with_spy = (probe or {}).get('withSpy') or {}
+    check('install: with a spy added, hasListeners and hasListener are true (M8)',
+          with_spy.get('hasListeners') is True and with_spy.get('hasListener') is True, with_spy)
+    check('install: with the spy removed, hasListeners is false again (M8)',
+          probe is not None and probe.get('removed') is False, probe and probe.get('removed'))
     return (start or {}).get('id')
 
 
@@ -163,6 +172,14 @@ def tabs_work(label, mark):
         evaluate = calls.get('debugger.Runtime.evaluate', {})
         check('%s (c): the debugger evaluates in that tab' % label,
               evaluate.get('ok') and evaluate.get('result') == tab['url'], evaluate.get('error') or evaluate.get('result'))
+        if tab is tabs[0]:
+            # I8: the attach and the detach that name the tab by its target id.
+            by_target = calls.get('debugger.attach({targetId})', {})
+            check('%s (I8): debugger.attach({targetId}) accepts the first tab' % label,
+                  by_target.get('ok'), by_target.get('error', 'no call was recorded'))
+            detached = calls.get('debugger.detach({targetId})', {})
+            check('%s (I8): debugger.detach({targetId}) accepts the first tab' % label,
+                  detached.get('ok'), detached.get('error', 'no call was recorded'))
 
 
 def worker_running(control, ext_id):
@@ -203,17 +220,98 @@ def stop_worker(control, ext_id):
     return False
 
 
-def latency_result(label, mark, secs):
+def engine_lines(launch):
+    """The engine's log of one launch (the browser's stderr and stdout)."""
+    try:
+        with open(os.path.join(WORK, 'run-%d.log' % launch), errors='replace') as f:
+            return f.read().splitlines()
+    except OSError:
+        return []
+
+
+def first_index(lines, text, after=-1):
+    for i in range(after + 1, len(lines)):
+        if text in lines[i]:
+            return i
+    return -1
+
+
+def check_debugged_tab(label, launch, chromium):
+    """(I7) The tab the latency run debugged was logged hidden before the
+    attach and shown at it, and hidden again after the detach. The tab is
+    named by Chromium's id, through the table's rows in the same log."""
+    lines = engine_lines(launch)
+    rows = [m for m in (re.search(r'TabId\((\d+)\) is Chromium tab %s ' % chromium, line) for line in lines) if m]
+    if not check(label + ' (I7): the engine log names the debugged tab (Chromium tab %s)' % chromium,
+                 bool(rows), 'run-%d.log has no table row for it' % launch):
+        return
+    tab = 'TabId(%s)' % rows[-1].group(1)
+    hidden_text = '%s: hidden, painting stopped = true' % tab
+    shown = first_index(lines, 'bridge: %s (Chromium tab %s) was hidden; shown for the debugger' % (tab, chromium))
+    hidden_before = [i for i in range(max(shown, 0)) if hidden_text in lines[i]]
+    check(label + ' (I7): %s was logged hidden before the attach (run-%d.log)' % (tab, launch),
+          bool(hidden_before), 'shown at line %d' % shown)
+    check(label + ' (I7): %s was shown at the attach (run-%d.log)' % (tab, launch), shown >= 0, 'no shown line')
+    again = first_index(lines, 'bridge: %s (Chromium tab %s) hidden again' % (tab, chromium), shown)
+    check(label + ' (I7): %s is hidden again after the detach (run-%d.log)' % (tab, launch),
+          shown >= 0 and again > shown, 'hidden-again line %d' % again)
+
+
+def latency_result(label, mark, secs, launch):
     done = wait_for(mark, 'latency-done', secs)
     if not check(label + ' (d): the latency run finished', done is not None and not done.get('error'), done and done.get('error')):
         return
-    print('INFO %s: %d calls, max %d ms, p95 %d ms, %d timeout(s)' % (
-        label, done['count'], done['max'], done['p95'], done['timeouts']), flush=True)
+    print('INFO %s: %d calls, max %d ms, p95 %d ms, %d timeout(s), tab %s' % (
+        label, done['count'], done['max'], done['p95'], done['timeouts'], done.get('tabId')), flush=True)
+    check_debugged_tab(label, launch, done.get('tabId'))
     check(label + ' (d): no API call took a second or more', done['over1s'] == 0 and done['timeouts'] == 0,
           '%d over 1 s, max %d ms' % (done['over1s'], done['max']))
     slow = sorted((r['data'] for r in since(mark, 'call', lambda d: d.get('latency'))), key=lambda d: -d['ms'])[:5]
     for call in slow:
         print('INFO   slowest: %5d ms %s%s' % (call['ms'], call['name'], '' if call['ok'] else ' ' + call['error']), flush=True)
+
+
+def engine_wait_after(launch, after, text, secs):
+    """True once the engine's log has `text` after the first line with `after`."""
+    end = time.time() + secs
+    while time.time() < end:
+        lines = engine_lines(launch)
+        at = first_index(lines, after)
+        if at >= 0 and first_index(lines, text, at) >= 0:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def relay_recovery(control, ext_id, launch):
+    """(I9, M10) A relay page closed underneath (Target.closeTarget through the
+    test control's DevTools channel) is logged gone, opened again by the
+    engine's next turn, and a click after that is delivered to the worker."""
+    answer = control.devtools('Target.getTargets')
+    infos = ((answer or {}).get('result') or {}).get('targetInfos') or []
+    relays = [t for t in infos if t.get('type') == 'page' and ext_id in t.get('url', '') and 'relay.html' in t.get('url', '')]
+    if not check('relay (I9): DevTools lists the relay page', len(relays) == 1, len(relays)):
+        return
+    closed = control.devtools('Target.closeTarget', {'targetId': relays[0]['targetId']}, secs=10)
+    check('relay (I9): Target.closeTarget closed the relay page',
+          ((closed or {}).get('result') or {}).get('success') is True, closed)
+    check('relay (I9): the engine logged the relay gone',
+          wait_text(launch, 'bridge: page %s is gone' % ext_id, 20))
+    check('relay (M10): the next turn opened the relay again and it is ready',
+          engine_wait_after(launch, 'bridge: page %s is gone' % ext_id, 'bridge: page %s ready' % ext_id, 40))
+    mark = count()
+    control.send({'click': ext_id})
+    click = wait_for(mark, 'event', 20, lambda d: d.get('name') == 'action.onClicked')
+    check('relay (M10): a click after the reopening reaches the worker', click is not None)
+
+
+def wait_text(launch, text, secs):
+    end = time.time() + secs
+    while time.time() < end:
+        if first_index(engine_lines(launch), text) >= 0:
+            return True
+        time.sleep(0.5)
+    return False
 
 
 def spike(ext):
@@ -250,12 +348,14 @@ def spike(ext):
     check('the extension\'s own onConnect listener never saw the bridge (U3)', not since(0, 'spy'),
           [r['data'] for r in since(0, 'spy')])
 
+    relay_recovery(control, ext_id, 2)
+
     # (d) the calls that stalled, with the window unfocused.
     with lock:
         cfg['latency'] = True
     mark = count()
     control.send({'click': ext_id})
-    latency_result('unfocused', mark, 150)
+    latency_result('unfocused', mark, 150, 2)
     control.send({'table': True})
 
 
@@ -266,7 +366,7 @@ def pump(ext):
     control = Control(os.path.join(WORK, 'ctl-1'))
     time.sleep(8)  # the two tabs load, so that there is a page target
     control.send({'load': ext})
-    latency_result('pump', 0, 140)
+    latency_result('pump', 0, 140, 1)
 
 
 if __name__ == '__main__':
