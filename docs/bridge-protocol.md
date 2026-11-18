@@ -50,7 +50,12 @@ close are applied as they arrive.
   manifest names as `background.service_worker` and which sits beside
   the original entry file. It sets `self.__nautilusTransport =
   {protocol: 1, portHidden}` (`self.__nautilusBridge` is kept free for
-  the namespaces' object Phase 5 adds).
+  the namespaces' object Phase 5 adds). Since Task 9 it also sets the two
+  functions the namespace scripts are written against,
+  `self.__bridgeCall(ns, method, args)` (a call named `ns.method`, as
+  `call` above) and `self.__bridgeOnEvent(handler)`. The worker's script
+  is this file followed by the namespace scripts (`js/core.js`,
+  `tabs.js`, `windows.js`, `runtime.js`), joined by `worker_script()`.
 - **The relay page** (`nautilus-bridge/relay.html`, `relay.js`): one of
   the extension's own pages, loaded by the engine in a hidden windowless
   browser (`HiddenPage` in `relay.rs`: a 16 by 16 view that nothing
@@ -354,7 +359,10 @@ engine ignores `queryInfo` and returns every Nautilus tab, `windowId`
 is 1 and `index` is the tab's place among the engine's tabs: Phase 5
 answers from the shell's strip and filters. The bridge fetches
 Chromium's own tab object for each id (`chrome.tabs.get`) and lays
-`index`, `windowId`, `active` and `highlighted` over it. Any other
+`index`, `windowId`, `active` and `highlighted` over it. (Task 9 removed
+that fetch from the bridge: `tabs.query` is now sent by name through
+`core.js`, and a forward's `strip` is laid over Chromium's objects there,
+by `patchTabs`.) Any other
 method is answered `{error: "<method> is not supported by Nautilus."}`:
 the bridge fails closed. A `tabs.query` is answered when the helper's
 list of targets arrives, so a query made while the helper's page is
@@ -365,7 +373,18 @@ query is answered with an error at once.
 
 | `event` | Carries | The bridge does | Since |
 |---------|---------|-----------------|-------|
-| `action.onClicked` | `tabId` (Chromium's) | `chrome.action.onClicked.dispatch(await chrome.tabs.get(tabId))` | 1 |
+| `action.onClicked` | `tabId` (Chromium's) | `chrome.action.onClicked.dispatch(await <Chromium's chrome.tabs.get>(tabId))` | 1 |
+
+Since Task 9, any other event is handed to every listener that the
+namespace scripts registered with `__bridgeOnEvent`, as
+`(event, args)`, in the order they were registered. The receipt is posted
+before the listeners run. A listener that throws is logged, and the others
+still run. The delivery is then acknowledged after all of them ran: `done`
+with `ok: true`, or, when any listener threw, `done` with `ok: false` and
+the first error's message. The relay reports that as `received` with a
+failure, which the engine never retries (`policy::after_delivery`). Chromium's
+`tabs.get` for the click is the one `core.js` kept in `native` before it
+replaced the namespace, so a click never reaches the engine.
 
 A click reaches the engine only when osmena's dispatch finds an action
 (`has_action()`: enabled, with an `action_title`, which `on_list` sets for

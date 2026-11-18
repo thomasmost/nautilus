@@ -1,9 +1,12 @@
 // Nautilus bridge, protocol 1. Loaded by nautilus-loader.js ahead of the
-// extension's own service worker, in the worker's first evaluation.
+// extension's own service worker, in the worker's first evaluation. The
+// worker script (`worker_script()` in bridge/mod.rs) is this file followed by
+// the namespace scripts (core.js and the rest), which replace chrome.tabs,
+// chrome.windows and chrome.runtime.onMessage through the two globals below.
 //
-// Phase 1: it takes deliveries from the relay page (a toolbar click),
-// and answers chrome.tabs.query from the engine. Everything goes over a
-// runtime port named PORT, which the extension's own listeners never see.
+// It takes deliveries from the relay page (a toolbar click, and the engine's
+// events), and makes the calls the namespace scripts send. Everything goes over
+// a runtime port named PORT, which the extension's own listeners never see.
 (function () {
   'use strict';
   if (self.__nautilusTransport) { return; }
@@ -61,6 +64,9 @@
   var calls = new Map(); // id -> {resolve, reject, timer}
   var nextCall = 1;
   var taken = new Set(); // delivery ids this worker instance has run
+  // The listeners of the engine's events (`__bridgeOnEvent`), which every
+  // delivery other than a click reaches.
+  var handlers = [];
   // Resolves once the hello of the port in use has been sent: a call waits
   // for it, so the engine has this instance's identity before any call.
   var ready = Promise.resolve();
@@ -220,18 +226,51 @@
     );
   }
 
-  function run(delivery) {
-    if (delivery.event === 'action.onClicked') {
-      if (!chrome.action || !chrome.action.onClicked) {
-        return Promise.reject(new Error('this extension has no action'));
+  // Chromium's own chrome.tabs.get. core.js copies the namespace's original
+  // functions (bound) into `native` before it replaces the namespace, so the
+  // click reaches Chromium and never the engine. Core runs in this same script,
+  // before any delivery can arrive.
+  function nativeTabGet(tabId) {
+    return new Promise(function (resolve, reject) {
+      var core = self.__nautilusBridge;
+      var get = core && core.native && core.native.tabs && core.native.tabs.get;
+      if (typeof get !== 'function') {
+        reject(new Error('chrome.tabs.get is not available in this worker'));
+        return;
       }
-      // Chromium's own tab object, so the listener gets what Chrome
-      // would give it.
-      return chrome.tabs.get(delivery.tabId).then(function (tab) {
-        chrome.action.onClicked.dispatch(tab);
+      get(tabId, function (tab) {
+        var error = runtime.lastError;
+        if (error) { reject(new Error(error.message)); } else { resolve(tab); }
       });
+    });
+  }
+
+  function run(delivery) {
+    if (delivery.event !== 'action.onClicked') {
+      // Every listener of the namespaces gets the event. One that throws is
+      // logged, and the others still run. The receipt was posted before this
+      // runs, so the engine knows the worker took the delivery: a failure is
+      // reported as done with ok false, which the engine reads as received
+      // and never retries (policy::after_delivery).
+      var failure = null;
+      handlers.forEach(function (handler) {
+        try {
+          handler(delivery.event, delivery.args || []);
+        } catch (e) {
+          console.error(e);
+          if (failure === null) { failure = e; }
+        }
+      });
+      return failure === null ? Promise.resolve() : Promise.reject(failure);
     }
-    return Promise.reject(new Error('unknown event ' + delivery.event));
+    if (!chrome.action || !chrome.action.onClicked) {
+      return Promise.reject(new Error('this extension has no action'));
+    }
+    // Chromium's own tab object, so the listener gets what Chrome
+    // would give it.
+    return nativeTabGet(delivery.tabId).then(function (tab) {
+      chrome.action.onClicked.dispatch(tab);
+    });
   }
 
   // ---- chrome.debugger: the engine learns which tabs are debugged.
@@ -289,30 +328,17 @@
     }
   }
 
-  // ---- chrome.tabs.query, answered by the engine
-  if (chrome.tabs) {
-    var nativeGet = chrome.tabs.get.bind(chrome.tabs);
-    define(chrome.tabs, 'query', function (queryInfo, callback) {
-      var answer = call('tabs.query', [queryInfo || {}]).then(function (rows) {
-        return Promise.all(rows.map(function (row) {
-          return nativeGet(row.id).then(function (tab) {
-            tab.index = row.index;
-            tab.windowId = row.windowId;
-            tab.active = row.active;
-            tab.highlighted = row.active;
-            return tab;
-          });
-        }));
-      });
-      if (typeof callback === 'function') {
-        answer.then(callback, function (e) { console.error(e); callback([]); });
-        return undefined;
-      }
-      return answer;
-    });
-  }
+  // The two functions core.js is written against. `__bridgeCall` makes a call
+  // of the engine by its namespaced name; `__bridgeOnEvent` adds a listener of
+  // the events the engine delivers.
+  self.__bridgeCall = function (ns, method, args) {
+    return call(ns + '.' + method, args);
+  };
+  self.__bridgeOnEvent = function (handler) {
+    handlers.push(handler);
+  };
 
   // Not `__nautilusBridge`: that name is the namespaces' object, which
-  // Phase 5's core.js defines after this script has run.
+  // core.js defines after this script has run.
   self.__nautilusTransport = Object.freeze({ protocol: 1, portHidden: hidden });
 })();

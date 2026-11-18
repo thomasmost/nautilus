@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use super::rewrite::{BRIDGE_DIR, Rewrite, rewrite_manifest};
 
-const BRIDGE_JS: &str = include_str!("js/bridge.js");
+pub(crate) const BRIDGE_JS: &str = include_str!("js/bridge.js");
 const RELAY_HTML: &str = include_str!("js/relay.html");
 const RELAY_JS: &str = include_str!("js/relay.js");
 const HELPER_MANIFEST: &str = include_str!("js/helper/manifest.json");
@@ -73,7 +73,10 @@ pub(crate) fn rewrite_in_place(dir: &Path, skipped: &[PathBuf]) -> Result<Bridge
     let bridge_dir = dir.join(BRIDGE_DIR);
     fs::create_dir_all(&bridge_dir)
         .map_err(|e| format!("creating {}: {e}", bridge_dir.display()))?;
-    write(&bridge_dir.join("bridge.js"), BRIDGE_JS)?;
+    write(
+        &bridge_dir.join("bridge.js"),
+        &crate::bridge::worker_script(),
+    )?;
     write(&bridge_dir.join("relay.html"), RELAY_HTML)?;
     write(&bridge_dir.join("relay.js"), RELAY_JS)?;
     if let Rewrite::Wrapped {
@@ -420,7 +423,7 @@ mod tests {
         // The bridge's own files are refreshed.
         assert_eq!(
             fs::read_to_string(copy.join("nautilus-bridge/bridge.js")).unwrap(),
-            BRIDGE_JS
+            crate::bridge::worker_script()
         );
         fs::remove_dir_all(&root).unwrap();
     }

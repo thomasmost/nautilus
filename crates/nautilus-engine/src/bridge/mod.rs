@@ -33,6 +33,24 @@ pub(crate) mod relay;
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) use relay::Bridge;
 
+const CORE_JS: &str = include_str!("js/core.js");
+const TABS_JS: &str = include_str!("js/tabs.js");
+const WINDOWS_JS: &str = include_str!("js/windows.js");
+const RUNTIME_JS: &str = include_str!("js/runtime.js");
+pub(crate) const PAGE_TRANSPORT_JS: &str = include_str!("js/page_transport.js");
+
+/// The replacement of every bridged namespace, for a context whose
+/// transport has already defined `__bridgeCall` and `__bridgeOnEvent`.
+pub(crate) fn namespaces_script() -> String {
+    [CORE_JS, TABS_JS, WINDOWS_JS, RUNTIME_JS].join("\n")
+}
+
+/// The whole script of a bridged service worker, as it is written to
+/// `nautilus-bridge/bridge.js`: the transport, then the namespaces.
+pub(crate) fn worker_script() -> String {
+    [install::BRIDGE_JS, &namespaces_script()].join("\n")
+}
+
 /// The value a `Runtime.evaluate` result carries, or why there is
 /// none: the call failed, or the script threw.
 pub(crate) fn evaluation(success: bool, result: &[u8]) -> Result<serde_json::Value, String> {
@@ -98,5 +116,92 @@ mod tests {
             evaluation(false, b"not json"),
             Err("the DevTools call failed".to_string())
         );
+    }
+
+    use serde_json::Value;
+
+    use super::ids::IdSpace;
+    use super::pattern::Grants;
+    use super::router::{self, Outcome};
+    use super::shape::View;
+    use super::snapshot::Snapshot;
+    use super::transport::{Asker, BridgeCall};
+    use super::{
+        CORE_JS, PAGE_TRANSPORT_JS, RUNTIME_JS, TABS_JS, WINDOWS_JS, namespaces_script,
+        worker_script,
+    };
+
+    /// The names in `key: ['a', 'b']` of a namespace script.
+    fn list(script: &str, key: &str) -> Vec<String> {
+        let opening = format!("{key}: [");
+        let start = script.find(&opening).expect("the list is there") + opening.len();
+        let end = start + script[start..].find(']').expect("the list ends");
+        script[start..end]
+            .split(',')
+            .map(|name| name.trim().trim_matches('\'').to_string())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn every_function_of_a_replaced_namespace_is_ours() {
+        let snapshot = Snapshot::default();
+        let ids = IdSpace::default();
+        let grants = Grants::default();
+        let view = View {
+            snapshot: &snapshot,
+            ids: &ids,
+            grants: &grants,
+            last_focused: None,
+        };
+        // Names the script sends to the engine that the router does not
+        // serve yet: the tab-groups change empties this list.
+        let later = ["group", "ungroup"];
+        for (namespace, script) in [("tabs", TABS_JS), ("windows", WINDOWS_JS)] {
+            for method in list(script, "bridged")
+                .into_iter()
+                .chain(list(script, "optional"))
+            {
+                let call = BridgeCall {
+                    id: 1,
+                    extension: "abcdefghijklmnopabcdefghijklmnop".to_string(),
+                    asker: Asker::Worker,
+                    namespace: namespace.to_string(),
+                    method: method.clone(),
+                    args: Vec::<Value>::new(),
+                };
+                let unrouted = router::route(&call, &view)
+                    == Outcome::Reject(router::unsupported(namespace, &method));
+                assert_eq!(
+                    unrouted,
+                    namespace == "tabs" && later.contains(&method.as_str()),
+                    "{namespace}.{method}"
+                );
+            }
+        }
+        // Only these two are Chromium's own functions, and neither walks
+        // a tab strip.
+        assert_eq!(list(TABS_JS, "direct"), ["sendMessage", "connect"]);
+        assert!(list(WINDOWS_JS, "direct").is_empty());
+        // Whatever else Chromium defines is replaced by a rejection, and
+        // whatever events it has that the engine does not fire are inert.
+        assert!(CORE_JS.contains("target[key] = unsupported(namespace, key);"));
+        assert!(CORE_JS.contains("target[key] = new BridgeEvent(null);"));
+        assert!(CORE_JS.contains("configurable: false, writable: false"));
+        for script in [CORE_JS, TABS_JS, WINDOWS_JS, RUNTIME_JS, PAGE_TRANSPORT_JS] {
+            assert!(script.contains("'use strict';"));
+        }
+    }
+
+    #[test]
+    fn the_worker_script_is_the_transport_then_the_namespaces() {
+        let script = worker_script();
+        assert!(script.starts_with(super::install::BRIDGE_JS));
+        assert!(script.ends_with(&namespaces_script()));
+        // The two globals the namespaces are written against, and no
+        // tabs.query of the transport's own.
+        assert!(super::install::BRIDGE_JS.contains("self.__bridgeCall = function"));
+        assert!(super::install::BRIDGE_JS.contains("self.__bridgeOnEvent = function"));
+        assert!(!super::install::BRIDGE_JS.contains("define(chrome.tabs, 'query'"));
     }
 }
