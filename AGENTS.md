@@ -572,13 +572,16 @@ Not verified in this cycle:
 - A stop and restart repeated in a loop; a reload whose worker target id does not
   change; Windows (nothing ran there).
 - The owner's toolbar click (Task 13 step 5).
-- Observed, not investigated: "hidden again" is logged twice in the same second for
-  the same tab in spike run 1 (`review6-spike-run1-logs/run-2.log` lines 70 and 80;
-  spike run 2 was not checked for it). It is logging only; the tab state is right.
+- "hidden again" is logged twice in the same second for the same tab in spike run 1
+  (`review6-spike-run1-logs/run-2.log` lines 70 and 80; spike run 2 was not checked
+  for it). These are two real show-and-hide cycles, not a repeated log line: the test
+  worker attaches and detaches the tab twice (calls 2 and 3, then 6 and 7 by
+  `targetId`), and each pair shows the tab (lines 67 and 77) and hides it again. The
+  seventh review read the log and found this; the tab state is right.
 
 ## Status and handoff (2026-11-18, review cycle 5 of Phase 1)
 
-_Superseded in review cycle 6: the grace and `policy::after_change` are gone, and a restart's relay is kept by its ask (see review cycle 6 below). The cycle 5 runs and their figures stay as they were measured._
+_Superseded in review cycle 6: the grace and `policy::after_change` are gone, and a restart's relay is kept by its ask (see review cycle 6 above). The cycle 5 runs and their figures stay as they were measured._
 
 The fifth review left I16 (Important) and M16, M20, M21, M22 (Minor). The kept
 logs are `evidence/phase-1/review5-*` (not committed); names below are relative
@@ -630,7 +633,7 @@ What changed:
   hello"; it now says what the code does, and the table test pins it.
 - **M16.** The run named early zombie in this handoff is `review4-zombie-early.out` (the run's output file).
   The evidence names in the docs were checked mechanically
-  (`check_evidence_names.py`, output in the acceptance record): 30 bare stems
+  (`review5-m16-check_evidence_names.py`, output in the acceptance record): 30 bare stems
   that name a run's group were rewritten to the run's `.out` file, two `/`
   shorthands in the acceptance record were corrected (the "pump x2" of cycle 3
   is one kept run), and `review5-*` names are kept by this cycle.

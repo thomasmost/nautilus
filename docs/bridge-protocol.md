@@ -267,10 +267,13 @@ ignored, the second's decides); a change with no relay open; an absence racing
 the ask (no ask, the outstanding one still decides); and a failed ask that closes
 once and is not repeated while the target stays.
 
-**Cost and bounds.** A live relay is closed only when its `identify` fails, that
-is when its worker does not say hello within 5 s of the ask. That is the one case
-of a wrong close: it costs one reopen, and what is in flight on the relay is
-failed (below). The ask is made once per change, and it is not retried: a zombie
+**Cost and bounds.** A live relay is closed only when its `identify` fails. That
+happens in two cases, and each is a wrong close. One: its worker does not say
+hello within 5 s of the ask. Two: the ask reaches a relay whose page is still
+loading (a relay just opened or reopened, when a refresh sees a target change
+before the load ends), where `nautilusRelay` is not defined yet and the
+evaluation fails; this case is reasoned from the code and was not seen in a run.
+Either costs one reopen, and what is in flight on the relay is failed (below). The ask is made once per change, and it is not retried: a zombie
 answers at once, so a retry would repeat the answer, and no run had a worker
 that was slow to say hello (not measured). A failed ask closes at most one relay
 per change. The reopened relay's identify is the only other ask, and it happens
