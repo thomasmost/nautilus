@@ -21,11 +21,15 @@ has no releases yet; `Unreleased` holds everything on `main`.
   a magnifier, its tiles are cards on rows as tall as their tallest
   tile, and Most visited is a shelf of shortcut discs across the
   panel, so the mosaic has no hole.
-- An extension's toolbar action with no popup now shows its button in the toolbar and the puzzle menu; pressing it does nothing until the extension bridge answers it.
+- An extension's toolbar action with no popup now shows its button in
+  the toolbar and the puzzle menu; pressing it does nothing until the
+  extension bridge answers it.
 
 ### Added
 
-- Each profile gets a small helper extension, written into it on start, that the extension bridge uses to find DevTools targets.
+- Each profile gets a small helper extension, written into it on start,
+  that the extension bridge uses to find DevTools targets. It is loaded
+  only while an extension bridged by the bridge is on.
 
 - The Launch Panel's field completes an address ahead of the typist
   (osmena). Before the first space, the most visited page whose
@@ -112,11 +116,20 @@ has no releases yet; `Unreleased` holds everything on `main`.
   Chromium does not ask an embedder for every piece of its work; the
   message pump now also runs that work 30 times a second without being
   asked, as CEF's own sample does.
-- A tab with a debugger attached (DevTools, or an extension's
-  `chrome.debugger`) that was behind another tab stopped answering
-  input and screenshots, so each of the debugger's calls to it waited
-  about five seconds. Such a tab is kept painting while a debugger is
-  attached.
+- Loading an unpacked extension no longer follows symlinks: a symlink
+  inside the extension's folder is skipped, where it was copied as its
+  target, and a folder that links to an ancestor (or that contains the
+  profile's extension store) no longer makes the load recurse forever.
+  A load that fails leaves no partial copy in the profile. A worker path
+  in an extension's manifest that names a drive, a stream or a Windows
+  device name is refused.
+- A tab that an extension is debugging (its `chrome.debugger`) and that
+  was behind another tab stopped answering input and screenshots, so
+  each of the debugger's calls to it waited about five seconds. Such a
+  tab is now kept painting while the extension debugs it, and hidden
+  again when the last debugger goes. The bridge reports each attach and
+  detach, so a background tab that no extension is debugging stays
+  hidden as before.
 
 ### Added
 

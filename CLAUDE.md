@@ -80,7 +80,7 @@ Ninja on `PATH`:
   runs a script in a page when its load finishes. The macOS smoke test
   in CI launches the bundle up to three times on the `ci-smoke`
   profile because a fresh profile's first launch sometimes loads
-  nothing on the Intel runner (C6 in `docs/upstream-issues.md`); `NAUTILUS_TEST_CONTROL=<dir>` makes the engine carry out `cmd-N.json` commands from that directory (`load` an unpacked extension through the bridge's rewrite, `click` an extension's action, a raw `devtools` message through the management browser with its answers in `devtools.log`, `table`); `NAUTILUS_PUMP_LOG=1` reports a message pump that has not spun and `NAUTILUS_PUMP_TICK_MS` sets the pump's fallback interval (0 switches it off). `ci/side-panel/run.sh spike|pump` is the scripted run of the extension bridge on a throwaway profile (macOS; about six minutes; judge it by its exit status, never through a pipe).
+  nothing on the Intel runner (C6 in `docs/upstream-issues.md`); `NAUTILUS_TEST_CONTROL=<dir>` makes the engine carry out `cmd-N.json` commands from that directory (`load` an unpacked extension through the bridge's rewrite, `click` an extension's action, a raw `devtools` message through the management browser with its answers in `devtools.log`, `table`). The hook is for scripted runs only: it is compiled into release builds and is powerful while set (it loads extensions and sends DevTools messages on the management browser's browser-wide channel). On Unix the engine refuses, with a logged warning and the hook off, a directory not owned by the profile's owner or writable by its group or others (use mode 0700); `NAUTILUS_PUMP_LOG=1` reports a message pump that has not spun and `NAUTILUS_PUMP_TICK_MS` sets the pump's fallback interval (0 switches it off). `ci/side-panel/run.sh spike|pump` is the scripted run of the extension bridge on a throwaway profile (macOS; about six minutes; judge it by its exit status, never through a pipe).
 
 ## Conventions
 
@@ -301,6 +301,15 @@ Ninja on `PATH`:
   `execute_dev_tools_method(0, …)` returns. Names in an extension's
   root must not start with `_`. Only what `NAUTILUS_TEST_CONTROL`
   loads is bridged until Phase 5 of the side-panel plan.
+- **A tab a debugger is on is painted.** The bridge reports each
+  extension's `chrome.debugger` attach and detach (`debugger.attached`
+  and `debugger.detached`, `docs/bridge-protocol.md`), and the worker's
+  call waits for the engine to show the tab first. `bridge/debugger.rs`
+  keeps which extension debugs which tab; a hidden tab is shown while any
+  debugs it and hidden again when the last debugger goes. Never key this
+  on CEF's DevTools-agent callbacks: they fire for the engine's own
+  `Target.getTargetInfo` probe and for every tab at creation, so they say
+  nothing about an extension's debugger.
 - **A `cef` binding callback that returns an int defaults to 0.** The
   `wrap_*!` macros install every callback with the trait's default, which
   for an int return is `0`: `CefWindowDelegate::CanClose` then says "no"
@@ -420,6 +429,89 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
+## Status and handoff (2026-11-18, review fixes to Phase 1)
+
+The code review of Phase 1 found 15 issues; all are fixed (commits on
+`extension-side-panel`, one per logical group; the repository's history
+names the issue numbers). The evidence logs for the claims below are in
+`evidence/phase-1/` beside the worktree, not committed.
+
+What changed, by area:
+
+- **The hidden-tab fix was wrong and is replaced (C1).** The 2026-11-17
+  fix keyed "debugged" on CEF's DevTools-agent callbacks. Confirmed by a
+  run before any change: with three tabs on a throwaway profile, every
+  tab logged the attach at creation (`attached TabId(n) hidden=false`,
+  caused by the probe's own `Target.getTargetInfo`) and every hide saw
+  `dev_tools_attached=true`, so `was_hidden(1)` was never called and no
+  tab was hidden. Now `bridge.js` wraps `chrome.debugger.attach`,
+  `detach` and `onDetach` and reports each tab (`debugger.attached` and
+  `debugger.detached`, answered only after the engine has applied the
+  change). `bridge/debugger.rs` (pure, tested) keeps which extension
+  debugs which tab; `Bridge::set_debugged` shows a hidden tab on its
+  first debugger and hides it again on the last. `ViewState::dev_tools_attached`
+  is gone; `ViewState::debugged` and `wants_hidden()` replace it.
+- **Delivery identity and retry (I1).** The click's delivery id is set
+  once and reused. `policy::after_delivery`: an evaluation failure is
+  never retried (its outcome is unknown); a relay that never heard the
+  worker retries once under the same id; a worker that took a delivery
+  and failed is not sent it again. The protocol doc states the guarantee
+  and its limit.
+- **Page lifetime (I2).** `PageLife::on_before_close`, a new
+  `PageRequest` (`on_render_process_terminated`) and the DevTools agent's
+  detach all reach `Bridge::page_gone` or `page_detached`, which drop the
+  page's pending evaluations, reset the helper's `refreshing` flag, fail
+  the jobs that needed the page (a tab-list call gets an error answer, a
+  debugger report its acknowledgement), forget the debuggers of a relay
+  that is gone, and leave the page to be reopened by the next `sync`
+  (not from inside a CEF callback). Each page has a generation so a
+  stale callback cannot touch its successor. The job queue is bounded
+  at 256.
+- **CEF is never called with the bridge's state borrowed.** The
+  pump harness found this, not the unit tests: a run's browser aborted
+  at exit ("RefCell already borrowed", `relay.rs`), with the harness's
+  exit status still 0. `shutdown`, `evaluate`, and the debugger
+  visibility updates now clone out the browser and view first. The
+  harness's status does not show an abort; check the browser's log too.
+- **Decisions are pure and tested (I5, M4).** `policy::relay_changes`,
+  `policy::job_turn` and `policy::after_delivery`; `armed_after_spin`
+  (`engine.rs`). `debugger::Debuggers` has its own tests.
+- **Install and paths (I3, I4, M9).** The worker-path validator refuses
+  `:` and Windows device names on every platform; `join_under` checks the
+  loader's path before it is written. `copy_dir` uses `symlink_metadata`,
+  skips links (a behaviour change: symlinked files are no longer copied),
+  refuses a source that contains, equals or is inside the store, and
+  copies into `<name>.partial` renamed into place.
+- **Minor:** stale module names fixed; `TabTable::tab` is the reverse
+  lookup the debugger report uses (no `allow`); the helper's extension
+  and page load only while a bridged extension is on (M5); a finished
+  load clears the dialog answer (M6); `hasListeners` and the bridge's own
+  listener are hidden from `onConnect` (M8); the test control refuses a
+  directory another user or group can write, on Unix (M3); the harness
+  creates its control directories at 0700.
+
+Verified on the Mac, 2026-11-18 (the bundle from `cargo xtask bundle-mac`
+at HEAD; run exit statuses, not pipes):
+
+- `cargo test --workspace`: 101 passed in `nautilus-engine` and 2 in
+  xtask, 0 failed (74 before the review, with other sessions' tests
+  included in the later count). `cargo clippy --workspace --all-targets
+  -- -D warnings` exit 0; `cargo fmt --all --check` clean.
+- `ci/side-panel/run.sh pump` three times: exit 0 each, `RESULT all
+  checks passed`, no abort in the engine logs. The latency runs: max
+  725 ms (one `Page.captureScreenshot`; the rest of that run max 64 to
+  68 ms), 72 ms and 70 ms, p95 63 to 64 ms, 0 timeouts.
+- `ci/side-panel/run.sh spike` twice: exit 0 each, `RESULT all checks
+  passed`, 34 PASS lines each, unfocused max 165 ms and 88 ms. The
+  engine logs show the debugged tab shown (`debugs TabId(n); the tab
+  stays painted`) and the background tab hidden (`hidden, painting
+  stopped = true`), and the table joined with the helper loaded lazily.
+- Not verified: Windows (everything in the bridge builds there in
+  principle, but nothing ran); the toolbar's own click (Task 13 step 5);
+  DevTools ("Inspect") on a background tab: such a tab is hidden, so an
+  inspection of it is slow (as before the bridge), and it is not
+  measured; a store or "Load unpacked…" extension (still not bridged).
+
 ## Status and handoff (2026-11-17, the extension bridge)
 
 Phase 1 of the side-panel plan (`docs/bridge-protocol.md` has the
@@ -436,9 +528,9 @@ table joins each tab's DevTools target id with the helper's
 through `ExtensionManager::click_action`; the test control
 (`NAUTILUS_TEST_CONTROL`, `poll_control`) and the scripted harness
 (`ci/side-panel/`) drive it; the pump's fallback tick (`PumpScheduler`)
-and the hidden-tab fix (`ViewState::dev_tools_attached`, `hidden`) went
-in with it. Only the test control's `load` bridges an extension in this
-phase.
+and a hidden-tab fix went in with it. That fix was wrong and is replaced
+(see 2026-11-18). Only the test control's `load` bridges an extension in
+this phase.
 
 Verified, scripted: `ci/side-panel/run.sh spike` at the head of
 `extension-side-panel` on 2026-11-17 (the bundle from
@@ -483,13 +575,15 @@ lost wake) was not observed: the wakes stayed below the spins and no
 run had the window focused; F4 was not applied. H5 (a debugger on a
 hidden tab) was seen once with the tick on and before the hidden-tab fix:
 27 `Input.dispatchMouseEvent` calls, each 5001 to 5011 ms, to a tab behind
-another with a debugger attached (`task12/fix-run1`). F5 fixes it: a tab
-with a DevTools agent attached is not hidden, and `track_tab` takes the
-view so the observer can set the flag. Passing `run.sh pump` runs, 202
+another with a debugger attached (`task12/fix-run1`). The F5 fix for it
+(a tab with a DevTools agent attached is not hidden) hid no background
+tab at all, because the agent attached for the probe's own target lookup;
+the figures below from F5 runs were measured on that build, not on an
+intended one (see 2026-11-18). Passing `run.sh pump` runs, 202
 calls each, unfocused: F1 alone, `task12/fix-run2` and `fix-run3` (max 77
-and 68 ms, p95 64 ms); with F5, five runs `task12/f5-run1` to `f5-run5`
-(max 65 to 77 ms, p95 63 to 64 ms). Without F5 one run in three failed
-(`fix-run1`); with F5 none in five. Idle cost of the tick: about 0.5 %
+and 68 ms, p95 64 ms); with F5 (no tab hidden), five runs `task12/f5-run1`
+to `f5-run5` (max 65 to 77 ms, p95 63 to 64 ms). Without F5 one run in
+three failed (`fix-run1`). Idle cost of the tick: about 0.5 %
 CPU and 416 wake-ups, against 0.0 % and 201 without it (sampled in the
 session; no log was kept).
 
@@ -542,7 +636,7 @@ can start from it but needs the tab's render handler.
 For Phase 7: `ManifestFacts::commands` carries each command's name,
 description and this platform's `suggested_key` as written;
 `chrome.commands.onCommand.dispatch` worked in the probe from the worker's
-context; F5 was applied (the hidden-tab fix above).
+context; the hidden-tab fix was replaced on 2026-11-18 (see that section).
 
 ## Status and handoff (2026-11-17, later)
 

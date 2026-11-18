@@ -215,6 +215,16 @@ belongs to one running Nautilus at a time.
   `chrome.tabs.query` and the ids it returns, and that no extension call
   takes a second with the window unfocused. `pump` runs the last part
   alone. Judge it by its exit status, not through a pipe.
+- **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
+  browser read commands from the named directory: `load` an unpacked
+  extension, `click` an action, send a raw DevTools message on the
+  management browser's browser-wide channel (its answers go to
+  `devtools.log`, which records that browser's DevTools traffic), and
+  `table`. The hook is compiled into release builds and is powerful while
+  set, so use it only on a directory only you can write (on Unix the
+  engine refuses one owned by another user or writable by its group or
+  others, with a warning, and the hook stays off). Never set it on a
+  browser you use.
 
 ## Manual checklist
 
@@ -646,7 +656,15 @@ Upstream causes and the features they block are tracked in
   management page, so a popup that acts on "the current tab" acts on
   nothing. An action without a popup shows a button that does nothing yet
   (the bridge that delivers its click reaches only the test extension so
-  far). The Web Store
+  far). Only the test control's `load` is bridged; a store-installed or
+  "Load unpacked…" extension has no bridge yet, and an extension's action
+  click reaches its worker only through the bridge. A tab an extension is
+  debugging is kept painted; a background tab nothing debugs is hidden, so
+  DevTools ("Inspect") on a background tab is slow until it is shown. A
+  symlink in an unpacked extension is not copied (it is skipped, with a
+  debug log line). The bridge builds on Windows but has not run there,
+  and the test control's ownership check is Unix-only.
+  The Web Store
   may show "Switch to Chrome" instead of an install button (install
   through the puzzle menu or Settings then); when it shows "Add to
   Chrome", the button installs through Nautilus but the page reports

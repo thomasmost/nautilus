@@ -262,9 +262,17 @@ every spin). Measured with `ci/side-panel/run.sh pump` (202 extension
 calls each, the window unfocused): with the tick on, eight runs passed,
 max 65 to 90 ms and p95 63 to 64 ms, and one failed (`task12/fix-run1`,
 a hidden-tab stall); with it off, the two runs above failed. The
-hidden-tab stall is a separate issue, fixed in Nautilus (a tab under a
-debugger keeps painting; see the CHANGELOG), not recorded here; no
-upstream report was looked for. `NAUTILUS_PUMP_TICK_MS=0`
+hidden-tab stall is a separate issue and is not upstream's: a tab behind
+another is hidden, and a debugger's call to a hidden renderer waits for
+the renderer's answer. Nautilus keeps a tab painted while an extension
+debugs it: `bridge.js` reports each `chrome.debugger` attach and detach,
+and `bridge/debugger.rs` keeps the set. An earlier version keyed this on
+CEF's DevTools-agent callback, which fires for the engine's own
+`Target.getTargetInfo` probe at every tab's creation, so no tab was ever
+hidden. The run that showed it logged, for each tab, `C1PROBE attached
+TabId(1) hidden=false` and then `hide TabId(1) dev_tools_attached=true
+was_hidden(1)=false` (2026-11-18, three tabs). No upstream report was
+looked for. `NAUTILUS_PUMP_TICK_MS=0`
 switches the tick off to reproduce; `NAUTILUS_PUMP_LOG=1` reports a pump
 that has not spun. The idle cost of the tick was about 0.5 % CPU and
 416 wake-ups against 0.0 % and 201 without it (sampled in the session;
