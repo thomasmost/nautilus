@@ -85,7 +85,7 @@ def wait_file(path, secs):
 
 
 def check(name, ok, detail=''):
-    print(('PASS ' if ok else 'FAIL ') + name + (': ' + str(detail) if detail != '' else ''), flush=True)
+    print(('PASS ' if ok else 'FAIL ') + name + (': ' + str(detail) if detail not in (None, '') else ''), flush=True)
     if not ok:
         failures.append(name)
     return ok
@@ -243,18 +243,19 @@ def check_debugged_tab(label, launch, chromium):
     lines = engine_lines(launch)
     rows = [m for m in (re.search(r'TabId\((\d+)\) is Chromium tab %s ' % chromium, line) for line in lines) if m]
     if not check(label + ' (I7): the engine log names the debugged tab (Chromium tab %s)' % chromium,
-                 bool(rows), 'run-%d.log has no table row for it' % launch):
+                 bool(rows), None if rows else 'run-%d.log has no table row for it' % launch):
         return
     tab = 'TabId(%s)' % rows[-1].group(1)
     hidden_text = '%s: hidden, painting stopped = true' % tab
     shown = first_index(lines, 'bridge: %s (Chromium tab %s) was hidden; shown for the debugger' % (tab, chromium))
     hidden_before = [i for i in range(max(shown, 0)) if hidden_text in lines[i]]
     check(label + ' (I7): %s was logged hidden before the attach (run-%d.log)' % (tab, launch),
-          bool(hidden_before), 'shown at line %d' % shown)
-    check(label + ' (I7): %s was shown at the attach (run-%d.log)' % (tab, launch), shown >= 0, 'no shown line')
+          bool(hidden_before), None if hidden_before else 'no hidden line before line %d' % shown)
+    check(label + ' (I7): %s was shown at the attach (run-%d.log)' % (tab, launch), shown >= 0,
+          None if shown >= 0 else 'no shown line')
     again = first_index(lines, 'bridge: %s (Chromium tab %s) hidden again' % (tab, chromium), shown)
     check(label + ' (I7): %s is hidden again after the detach (run-%d.log)' % (tab, launch),
-          shown >= 0 and again > shown, 'hidden-again line %d' % again)
+          shown >= 0 and again > shown, None if shown >= 0 and again > shown else 'no hidden-again line after line %d' % shown)
 
 
 def latency_result(label, mark, secs, launch):
