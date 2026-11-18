@@ -940,6 +940,9 @@ mod tests {
         }
     }
 
+    // Windows folds the path's case before hashing, so the name differs
+    // there; the fold itself has its own tests.
+    #[cfg(not(windows))]
     #[test]
     fn a_macos_copy_name_is_unchanged() {
         // Pinned from the scheme before the Windows case fold: existing
