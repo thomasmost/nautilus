@@ -176,6 +176,11 @@ impl DelegateState {
         *self.dialog_answer.borrow_mut() = Some(dir);
     }
 
+    /// A load's answer is over: whatever it left unused is dropped.
+    pub(crate) fn clear_dialog_answer(&self) {
+        clear_answer(&self.dialog_answer);
+    }
+
     /// The dialog handler every client of this engine uses: a pending
     /// answer settles the dialog without showing it; otherwise CEF shows
     /// its own, owned by the browser's window.
@@ -372,14 +377,13 @@ pub(crate) struct ViewState {
     /// focus can be told again to a renderer that arrives later
     /// (`on_load_start`).
     pub focused: Cell<bool>,
-    /// Whether a DevTools session is attached to the tab's browser. A
-    /// hidden renderer answers no input, so a tab under a debugger is
-    /// kept painting (`TabProbe::on_dev_tools_agent_attached`, and
-    /// `TabHost::hide` skips the hide while this is set).
-    pub dev_tools_attached: Cell<bool>,
     /// Whether the window has the tab behind another (`TabHost::hide`
-    /// until `TabHost::show`), so that a debugger's detach can hide it.
+    /// until `TabHost::show`).
     pub hidden: Cell<bool>,
+    /// Whether an extension is debugging the tab, as the bridge reports
+    /// it (`bridge::debugger`). A hidden renderer answers no input, so a
+    /// debugged tab keeps painting even while it is hidden.
+    pub debugged: Cell<bool>,
     /// The drag the page is carrying out, while it is.
     pub drag: RefCell<Option<DragSession>>,
     /// The cursor the page last asked for, to put back after a drag
@@ -394,6 +398,12 @@ pub(crate) struct ViewState {
 }
 
 impl ViewState {
+    /// Whether the tab's renderer should be told it is hidden: it is
+    /// behind another tab and no extension is debugging it.
+    pub(crate) fn wants_hidden(&self) -> bool {
+        self.hidden.get() && !self.debugged.get()
+    }
+
     /// Report an event that names no tab.
     fn push(&self, event: EngineEvent) {
         self.delegate.push(event);
@@ -422,8 +432,8 @@ impl ViewState {
             closing: Cell::new(false),
             context_menu: RefCell::new(None),
             focused: Cell::new(false),
-            dev_tools_attached: Cell::new(false),
             hidden: Cell::new(false),
+            debugged: Cell::new(false),
             drag: RefCell::new(None),
             cursor: Cell::new(Cursor::Default),
             media_requests: RefCell::new(HashMap::new()),
@@ -539,6 +549,31 @@ struct TabHandlers {
     keyboard: KeyboardHandler,
     dialog: DialogHandler,
     view: Rc<ViewState>,
+}
+
+/// Empty the folder a pending load left for the next file dialog.
+pub(crate) fn clear_answer(slot: &RefCell<Option<PathBuf>>) {
+    slot.borrow_mut().take();
+}
+
+#[cfg(test)]
+mod dialog_answer_tests {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    use super::clear_answer;
+
+    #[test]
+    fn a_load_that_never_opened_its_dialog_leaves_no_answer_for_the_next_one() {
+        // A load queued a folder and failed before `loadUnpacked` opened
+        // its dialog; the answer must not reach the next file dialog.
+        let slot = RefCell::new(Some(PathBuf::from("/extensions/left-over")));
+        clear_answer(&slot);
+        assert_eq!(*slot.borrow(), None);
+        // Clearing an empty slot is harmless.
+        clear_answer(&slot);
+        assert_eq!(*slot.borrow(), None);
+    }
 }
 
 wrap_dialog_handler! {

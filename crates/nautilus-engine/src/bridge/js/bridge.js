@@ -45,7 +45,12 @@
       return nativeRemove(wrapper || listener);
     }) &&
     define(onConnect, 'hasListener', function (listener) {
+      if (listener === bridgeListener) { return false; }
       return nativeHas(wrappers.get(listener) || listener);
+    }) &&
+    define(onConnect, 'hasListeners', function () {
+      // Only the extension's own listeners count; the bridge's is always there.
+      return wrappers.size > 0;
     });
 
   // ---- the port to the relay page
@@ -70,10 +75,12 @@
   }
 
   // Registered in the first evaluation, so a connect from the relay page
-  // starts a stopped worker and lands here.
-  nativeAdd(function (newPort) {
+  // starts a stopped worker and lands here. Kept as a named function so
+  // hasListener can recognise it.
+  var bridgeListener = function (newPort) {
     if (newPort.name === PORT) { adopt(newPort); }
-  });
+  };
+  nativeAdd(bridgeListener);
 
   function ensurePort() {
     if (!port) { adopt(runtime.connect({ name: PORT })); }
@@ -138,6 +145,54 @@
       });
     }
     return Promise.reject(new Error('unknown event ' + delivery.event));
+  }
+
+  // ---- chrome.debugger: the engine learns which tabs are debugged.
+  // An attach is reported after Chromium has made it, and a detach after it
+  // has been made; the call waits for the engine's answer, which comes once
+  // the engine has shown the tab (a hidden renderer answers no input, so the
+  // debugger's first command must meet a visible one). The report is best
+  // effort: a report that fails or times out does not stop the extension's
+  // own call.
+  function report(method, target) {
+    if (!target || typeof target.tabId !== 'number') { return Promise.resolve(); }
+    return call(method, [target.tabId]).then(function () {}, function () {});
+  }
+
+  // A wrapper of Chromium's call that reports `method` for the target after
+  // the call succeeded, with the callback or promise style the caller used.
+  function reporting(native, owner, method) {
+    return function (target) {
+      var args = Array.prototype.slice.call(arguments);
+      var last = args[args.length - 1];
+      if (typeof last === 'function') {
+        args[args.length - 1] = function () {
+          var failed = !!runtime.lastError;
+          var self = this;
+          var values = arguments;
+          if (failed) { return last.apply(self, values); }
+          report(method, target).then(function () { last.apply(self, values); });
+        };
+        return native.apply(owner, args);
+      }
+      return native.apply(owner, args).then(function (result) {
+        return report(method, target).then(function () { return result; });
+      });
+    };
+  }
+
+  if (chrome.debugger) {
+    var nativeAttach = chrome.debugger.attach;
+    var nativeDetach = chrome.debugger.detach;
+    define(chrome.debugger, 'attach', reporting(nativeAttach, chrome.debugger, 'debugger.attached'));
+    define(chrome.debugger, 'detach', reporting(nativeDetach, chrome.debugger, 'debugger.detached'));
+    // A detach the extension did not make: its tab closed, or the user
+    // cancelled the debugger's infobar.
+    if (chrome.debugger.onDetach) {
+      chrome.debugger.onDetach.addListener(function (source) {
+        if (source) { report('debugger.detached', { tabId: source.tabId }); }
+      });
+    }
   }
 
   // ---- chrome.tabs.query, answered by the engine

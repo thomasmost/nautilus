@@ -7,10 +7,12 @@
 //! relay page, one of the extension's own pages, in a hidden browser:
 //! `docs/bridge-protocol.md` has the messages.
 //!
-//! `rewrite` and `table` are pure. `relay` and `native` hold the CEF
-//! side.
+//! `rewrite`, `table`, `debugger` and `policy` are pure. `relay` holds
+//! the CEF side.
 
+pub(crate) mod debugger;
 pub(crate) mod install;
+pub(crate) mod policy;
 pub(crate) mod rewrite;
 pub(crate) mod table;
 

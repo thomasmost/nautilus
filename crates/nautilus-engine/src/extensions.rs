@@ -916,6 +916,9 @@ mod native {
             let was_load = self.inner.borrow().pending.get(&message_id) == Some(&Request::Load);
             self.handle_result(message_id, success, result);
             if was_load {
+                // Answered or failed, the load is over: an answer it never
+                // used must not settle the next file dialog of any page.
+                self.delegate.clear_dialog_answer();
                 self.inner.borrow_mut().loading = false;
                 self.next_load();
             }
@@ -1100,10 +1103,14 @@ mod native {
                 .filter(|k| k.bridged && k.enabled)
                 .map(|k| k.id.clone())
                 .collect();
+            // The helper and its hidden page are needed only while a
+            // bridged extension is on: nothing else talks to them.
             let load_helper = {
                 let mut inner = self.inner.borrow_mut();
                 inner.known = known;
-                !helper_loaded && !std::mem::replace(&mut inner.helper_requested, true)
+                !bridged.is_empty()
+                    && !helper_loaded
+                    && !std::mem::replace(&mut inner.helper_requested, true)
             };
             if load_helper {
                 log::info!("loading the helper extension");

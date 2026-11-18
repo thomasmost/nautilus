@@ -463,17 +463,17 @@ impl TabHostApi for TabHost {
         });
     }
 
-    /// The tab is behind another: stop painting it, unless a debugger is
-    /// attached to it (a hidden renderer answers no input, and DevTools
-    /// waits on that answer; see `TabProbe`).
+    /// The tab is behind another: stop painting it, unless an extension is
+    /// debugging it (a hidden renderer answers no input, and the debugger
+    /// waits on that answer; `bridge::debugger` decides).
     fn hide(&self, tab: TabId) {
         let Some(entry) = self.tabs.get(&tab) else {
             return;
         };
         entry.view.hidden.set(true);
-        if !entry.view.dev_tools_attached.get() {
-            self.with_host(tab, |host| host.was_hidden(1));
-        }
+        let hidden = entry.view.wants_hidden();
+        log::debug!("tab {tab:?}: hidden, painting stopped = {hidden}");
+        self.with_host(tab, |host| host.was_hidden(i32::from(hidden)));
     }
 
     fn set_focused(&self, tab: TabId, focused: bool) {

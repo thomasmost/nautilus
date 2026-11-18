@@ -5,7 +5,7 @@
 //! id (`Target.getTargetInfo`), and the helper extension's
 //! `chrome.debugger.getTargets()` lists every target with Chromium's
 //! tab id beside the same target id. The join of the two is the table.
-//! Pure: the CEF calls that feed it are in `native`.
+//! Pure: the CEF calls that feed it are in `relay`.
 
 use std::collections::HashMap;
 
@@ -139,9 +139,8 @@ impl TabTable {
             .map(|row| row.chromium)
     }
 
-    /// The Nautilus tab Chromium calls `chromium`. Only tests ask for it
-    /// so far.
-    #[allow(dead_code)]
+    /// The Nautilus tab Chromium calls `chromium`, as of the last join
+    /// (the reverse of `chromium`; a debugger report names the tab so).
     pub(crate) fn tab(&self, chromium: i64) -> Option<TabId> {
         self.rows
             .iter()
