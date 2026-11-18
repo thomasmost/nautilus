@@ -1015,3 +1015,79 @@ is not determined by these runs. The owner's toolbar click, real popups and
 Windows were not run. The helper extension's page is not bridged: not observed,
 since the run has no way to evaluate in it.
 
+
+## Phase 5 handoff (2026-11-18)
+
+Built: `chrome.tabs` and `chrome.windows` over the bridge (`bridge/ids.rs`,
+`snapshot.rs`, `pattern.rs`, `shape.rs`, `router.rs`, `differ.rs`, `state.rs`,
+`hub.rs`, `pages.rs`, `transport.rs`, `debugger.rs`, `table.rs`; `install.rs`
+extended with the marker and the dot-file-free copy; `js/core.js`, `tabs.js`,
+`windows.js`, `runtime.js`, `page_transport.js`, `page_defer.js`). Branch taken
+for extension pages: B, the process-message lane (`bridge/pages.rs`, the
+`nautilus-bridge-call` message). Adaptations: the reconciliation's rows 1 to 4,
+6, 7, 9 to 12 carry the changes listed under "Adaptations carried by later
+tasks"; rows 5 and 8 held as assumed.
+
+Decisions taken in the build:
+- Extension pages are bridged by branch B; the transport goes in at context
+  creation and the namespaces at the document's first change (the deferred
+  install, `js/page_defer.js`), because Chromium defines `chrome` only after the
+  context is created.
+- A page's call for a tab the published strip does not hold yet is held until
+  the strip publishes or for `PUBLISH_WAIT`; a call of an extension the hub does
+  not serve yet is held until it is served or for the same bound, then refused
+  with `the extension is not bridged.`
+- A worker's call that finds no listener is sent again on a new port every
+  100 ms for up to 3 s from the first close, then fails with `found no listener
+  in the browser` (`bridge.js` `resend`).
+- Owner's acceptance of 2026-11-18, for now, to be revisited: a delivered tab or
+  window event starts a stopped worker that listens for it; `tabs.query` from a
+  worker before the first strip publish answers an empty list.
+
+Verified by unit tests: the id spaces, the router's method table, the differ's
+order, the publish hold, `tabs.create` resolving after the publish, and the
+marker and copy in `install.rs`. The last recorded gate (2026-11-18, the
+page-call holds): `cargo fmt --all --check`, `cargo clippy --workspace
+--all-targets -- -D warnings`, `cargo test --workspace` (219 and 2 passing),
+`node ci/side-panel/bridge_check.mjs`, all exit 0.
+
+Verified in the running browser (`ci/side-panel/phase5.py`, macOS, 2026-11-18,
+an ordinary bundle, the test extension loaded through `NAUTILUS_TEST_CONTROL`):
+two passes, each 71 PASS and 1 FAIL (exit 1). The one FAIL in both is
+`sender.tab carries the strip's fields` (below); the PASS lines are in the kept
+files `evidence/phase-5/task13e-final-p5-run1.out` and `...-run2.out`, not
+copied here. The regression modes, each judged by its exit status, all exit 0:
+`spike` (54 PASS), `pump` (7), `reload` (7), `zombie` (21), `stop` (17), `idle`
+(9), `broken` (14), none with a FAIL line (`task13e-final-mode-*.out.status`).
+- Window counts over the run: not recorded by the script's output.
+- "Chromium asked for a default client" count: 0.
+- Whether Chromium's bindings were on `chrome` when the page bridge went in
+  (the `native` flag): not recorded by the output.
+- `captureVisibleTab` answers a JPEG data URL (PASS); its refusal text as a real
+  extension sees it: not exercised.
+
+Not verified:
+- An action popup's calls: needs a click on the toolbar button, which cannot be
+  scripted on this Mac. Open: pin the test extension's action if it has a popup,
+  open it, and check that `chrome.tabs.query({active: true, currentWindow: true})`
+  in the popup's console returns the tab under it.
+- Events for changes the user makes by hand (closing a tab with the mouse,
+  dragging a tab, a second window): the differ is unit-tested and the scripted run
+  covers the same events caused through the API.
+- Manifest V2 extensions (callback-only contexts, `tabs.executeScript`).
+- Real clicks on the toolbar; anything on Windows (nothing was run there
+  locally; CI builds and tests on Windows).
+- Open, measured, not fixed: `sender.tab` for an extension page shown as a tab
+  lacks the strip's fields (`windowId` and `index` are -1), because the engine
+  has no Chromium tab id for it (see "The sender's tab"; a decision is pending).
+- Intermittent, not explained: the page's own `getCurrent` answering `null` in
+  some runs (three page checks), `AC3.3` and `AC3.4` failing once in two passes,
+  and `Failed to create API on Chrome object` in the restore launch.
+- Whether CEF answers `Target.getTargetInfo` inside the probe's call (the basis
+  of the reservation in the reconciliation's B8).
+
+For the next phase: the protocol and the method tables above are the contract;
+a namespace is added as "How a later phase adds a namespace" describes. The
+`sender.tab` decision (options in "The sender's tab") changes a message format
+and needs the owner's choice first. The release (a merge to `main`) needs the
+owner's yes; the draft pull requests are osmena #2 and nautilus #1.
