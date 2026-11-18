@@ -59,8 +59,8 @@ mod native {
         Browser, BrowserSettings, CefString, Client, DisplayHandler, Frame, ImplBrowser,
         ImplBrowserHost, ImplClient, ImplDisplayHandler, ImplFrame, ImplKeyboardHandler,
         ImplLifeSpanHandler, ImplLoadHandler, KeyEvent, KeyEventType, KeyboardHandler,
-        LifeSpanHandler, LoadHandler, LogSeverity, WrapClient, WrapDisplayHandler,
-        WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, wrap_client,
+        LifeSpanHandler, LoadHandler, LogSeverity, ProcessId, ProcessMessage, WrapClient,
+        WrapDisplayHandler, WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, wrap_client,
         wrap_display_handler, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
     };
     use osmena_core::TabId;
@@ -191,6 +191,7 @@ mod native {
                 PopupLoad::new(),
                 PopupDisplay::new(self.inner.clone()),
                 PopupKeys::new(),
+                self.delegate.clone(),
             );
             let settings = BrowserSettings {
                 background_color: 0xFFFF_FFFF,
@@ -288,11 +289,29 @@ mod native {
             load: LoadHandler,
             display: DisplayHandler,
             keys: KeyboardHandler,
+            delegate: Rc<DelegateState>,
         }
 
         impl Client {
             fn life_span_handler(&self) -> Option<LifeSpanHandler> {
                 Some(self.life.clone())
+            }
+
+            // A bridge call from the popup's page (bridge/pages.rs).
+            fn on_process_message_received(
+                &self,
+                browser: Option<&mut Browser>,
+                frame: Option<&mut Frame>,
+                _source_process: ProcessId,
+                message: Option<&mut ProcessMessage>,
+            ) -> ::std::os::raw::c_int {
+                let (Some(browser), Some(frame), Some(message)) = (browser, frame, message) else {
+                    return 0;
+                };
+                match self.delegate.page_lane() {
+                    Some(lane) if lane.receive(&self.delegate, browser, frame, message) => 1,
+                    _ => 0,
+                }
             }
 
             fn load_handler(&self) -> Option<LoadHandler> {

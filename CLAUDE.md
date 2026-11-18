@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-18 (review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-18 (Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -302,6 +302,12 @@ Ninja on `PATH`:
   root must not start with `_`. Every extension is bridged when it loads
   (store install, "Load unpacked…", `NAUTILUS_TEST_CONTROL`'s `load`:
   `ExtensionManager::load_bridged`), from Phase 5 of the side-panel plan on.
+  Extension pages are bridged too (`bridge/pages.rs`): the render handler in
+  `store.rs` puts `pages::install` into each extension page's context before
+  its scripts run (not the relay page, not the helper's pages), and the page's
+  calls come back over the page lane (`PageLane`, a process message the
+  browser process answers from the calling frame's own address; `Hub::serves`
+  refuses a page of an extension the bridge does not serve).
 - **A tab a debugger is on is painted.** The bridge reports each
   bridged extension's `chrome.debugger` attach and detach, by tab id or
   by `{targetId}` (`debugger.attached` and `debugger.detached`,
@@ -310,7 +316,8 @@ Ninja on `PATH`:
   debugs which tab, and `table::TabTable::resolve` maps the debuggee; a
   hidden tab is shown while any debugs it and hidden again when the last
   debugger goes. Only the test extension is bridged in this build, and
-  `chrome.debugger` from an extension page is not reported until Phase 5.
+  `chrome.debugger` from an extension page is not reported (only the worker's
+  bridge makes the reports).
   A worker's hello (`worker_hello`) gives each tab's session as attached,
   not-attached or unknown (`policy::tabs_to_forget`); only not-attached
   forgets a debugger, and `policy::forgets` is the one gate (review cycle 4:

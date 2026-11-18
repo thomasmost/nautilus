@@ -110,6 +110,12 @@ impl BridgeState {
         self.held.is_some() || !self.waiting.is_empty()
     }
 
+    /// Whether `extension` is one the bridge serves: the page lane drops
+    /// a page's call from any other.
+    pub(crate) fn serves(&self, extension: &str) -> bool {
+        self.grants.contains_key(extension)
+    }
+
     /// The bridged extensions and what each may see. Returns a wake for
     /// each one not known before.
     pub(crate) fn set_extensions(&mut self, extensions: Vec<(String, Grants)>) -> Vec<Effect> {
@@ -761,5 +767,13 @@ mod tests {
             now,
         );
         assert_eq!(current(&mut state), 102);
+    }
+
+    #[test]
+    fn only_a_bridged_extension_is_served() {
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all())]);
+        assert!(state.serves(EXT));
+        assert!(!state.serves("bcdefghijklmnopabcdefghijklmnopa"));
     }
 }

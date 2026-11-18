@@ -28,6 +28,8 @@ pub(crate) mod transport;
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod hub;
 #[cfg(any(windows, target_os = "macos"))]
+pub(crate) mod pages;
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod relay;
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -37,9 +39,8 @@ const CORE_JS: &str = include_str!("js/core.js");
 const TABS_JS: &str = include_str!("js/tabs.js");
 const WINDOWS_JS: &str = include_str!("js/windows.js");
 const RUNTIME_JS: &str = include_str!("js/runtime.js");
-// The page lane's transport script, which Task 12 (the extension pages' bridge) injects;
-// nothing uses it before then.
-#[allow(dead_code)]
+// The page lane's transport script, which `pages::page_script` puts first in an
+// extension page's context.
 pub(crate) const PAGE_TRANSPORT_JS: &str = include_str!("js/page_transport.js");
 
 /// The replacement of every bridged namespace, for a context whose

@@ -35,9 +35,7 @@ use crate::delegate::DelegateState;
 pub(crate) enum Lane {
     /// The relay: a service worker.
     Worker,
-    /// A process message from an extension page (Task 12's page lane).
-    // Constructed only by the page lane, which Task 12 adds.
-    #[allow(dead_code)]
+    /// A process message from an extension page (`pages::PageLane`).
     Page,
 }
 
@@ -146,6 +144,12 @@ impl Hub {
     pub(crate) fn set_extensions(self: &Rc<Self>, extensions: Vec<(String, Grants)>) {
         let effects = self.state.borrow_mut().set_extensions(extensions);
         self.run(effects);
+    }
+
+    /// Whether the bridge serves `extension` (its page lane asks before it
+    /// takes a page's call).
+    pub(crate) fn serves(&self, extension: &str) -> bool {
+        self.state.borrow().serves(extension)
     }
 
     /// Called on every spin of the engine.

@@ -452,13 +452,20 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   protocol 1 history. `windowId` and `index` are the strip's, not Chromium's.
 - Only the methods in the table above are answered; everything else is
   refused, never passed to Chromium.
-- Extension pages (the relay page included) receive the bridge's port,
-  because the wrapper is in the worker only. Phase 5 puts the bridge into
-  extension pages and hides the port there too.
+- Extension pages get the bridge from Phase 5 on, when their context is
+  created (`bridge/pages.rs`): an extension's popup, its options page and
+  any page shown as a tab. The relay page and the helper extension's pages
+  get none. A page's calls go up through its own lane (the process message
+  under "Messages Phase 5 adds"); an event reaches the pages that have
+  called, at most once, and an event for a page that is gone is dropped.
+- Extension pages still receive the bridge's port (`nautilus-bridge-1`).
+  The wrapper that hides it is in the worker's script (`bridge.js`), and the
+  page script does not hide it, so a page with its own `runtime.onConnect`
+  listener sees the port.
 - `chrome.debugger` called from an extension page (a popup, the options
-  page, the side panel) is not reported: the bridge is in the worker only.
-  Such a debugger's tab is not kept painted until Phase 5 bridges the
-  pages.
+  page, the side panel) is not reported: the reports are made by the
+  worker's bridge only, and the page lane makes none. Such a debugger's tab
+  is not kept painted.
 - An unbridged extension's debugger is not reported. From Phase 5 on every
   installed extension is bridged when it is loaded: a store install
   (`unpack_crx`), "Load unpacked…" and the test control's `load` all go
@@ -652,9 +659,11 @@ forwards, or refuses), `tabs.stripOf(id)` (the seven strip fields or
 the script on the first `addListener` of an event, so the engine fires
 only events someone listens to).
 
-For branch B (Task 12), extension pages have their own lane: a process
+Extension pages have their own lane (`bridge/pages.rs`): a process
 message `nautilus-bridge-call` with one string argument
 `{"id", "ns", "method", "args"}`, answered by evaluating
 `self.__nautilusBridgeDeliver("<json>")` in the frame with `{"id", "ok"}`,
-`{"id", "error"}` or `{"event", "args"}`.
+`{"id", "error"}` or `{"event", "args"}`. The browser process takes the
+extension from the calling frame's own address, never from the message,
+and drops a call from a frame that is not a bridged extension's page.
 

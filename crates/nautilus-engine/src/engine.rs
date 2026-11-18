@@ -30,6 +30,7 @@ use url::Url;
 
 #[cfg(any(windows, target_os = "macos"))]
 use crate::bridge::hub::Hub;
+use crate::bridge::pages::PageLane;
 #[cfg(any(windows, target_os = "macos"))]
 use crate::bridge::transport::BridgeTransport;
 use crate::delegate::DelegateState;
@@ -235,10 +236,14 @@ impl Engine {
                 let pump = pump.clone();
                 Box::new(move || pump.schedule(50))
             };
+            // Extension pages call the bridge on their own lane (`pages.rs`);
+            // the delegate holds it too, for the tabs' process messages.
+            let page_lane = Rc::new(PageLane::default());
+            delegate.set_page_lane(&page_lane);
             let hub = Hub::new(
                 &delegate,
                 bridge.clone() as Rc<dyn BridgeTransport>,
-                None,
+                Some(page_lane.clone() as Rc<dyn BridgeTransport>),
                 table,
                 nudge,
             );
@@ -386,7 +391,12 @@ impl Drop for Engine {
     /// after a moment).
     fn drop(&mut self) {
         #[cfg(any(windows, target_os = "macos"))]
-        self.hub.shutdown();
+        {
+            self.hub.shutdown();
+            if let Some(lane) = self.delegate.page_lane() {
+                lane.clear();
+            }
+        }
         // A recent extension change is still only in memory; see
         // `ExtensionManager::settle_deadline`.
         if let Some(settle) = self.extensions.settle_deadline() {

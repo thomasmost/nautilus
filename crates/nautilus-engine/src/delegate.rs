@@ -103,11 +103,12 @@ pub(crate) struct DelegateState {
     blocked: RefCell<BlockedSites>,
     /// The id of the next request for the microphone or the camera.
     next_media_request: Cell<u64>,
-    /// Each tab's browser, by the model's id: for the screenshot
-    /// `tabs.captureVisibleTab` takes, and to tell which view a page that
-    /// calls the bridge is in.
+    /// Each tab's browser, by the model's id, with CEF's identifier for it
+    /// (kept so a page's browser can be matched without asking CEF under
+    /// the borrow): for the screenshot `tabs.captureVisibleTab` takes, and
+    /// to tell which view a page that calls the bridge is in.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-    views: RefCell<HashMap<TabId, Browser>>,
+    views: RefCell<HashMap<TabId, (std::os::raw::c_int, Browser)>>,
     /// Each open action popup's browser, by CEF's identifier, with the tab
     /// that was active when it opened (which names its window).
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
@@ -115,6 +116,9 @@ pub(crate) struct DelegateState {
     /// The bridge's hub; the engine owns it, hence weak.
     #[cfg(any(windows, target_os = "macos"))]
     hub: RefCell<Weak<crate::bridge::hub::Hub>>,
+    /// The lane extension pages call the bridge on (`bridge/pages.rs`).
+    #[cfg(any(windows, target_os = "macos"))]
+    page_lane: RefCell<Option<Rc<crate::bridge::pages::PageLane>>>,
 }
 
 impl DelegateState {
@@ -136,7 +140,8 @@ impl DelegateState {
 
     pub(crate) fn set_last_focused(&self, tab: TabId, browser: &Browser) {
         self.last_focused.set(Some(tab));
-        *self.focused_browser.borrow_mut() = Some(browser.clone());
+        let displaced = self.focused_browser.borrow_mut().replace(browser.clone());
+        drop(displaced);
     }
 
     /// The tab focused last, which is the tab an extension's action
@@ -153,53 +158,64 @@ impl DelegateState {
     }
 
     pub(crate) fn forget_browser(&self, browser: &Browser) {
-        {
-            let mut focused = self.focused_browser.borrow_mut();
-            if focused
-                .as_ref()
-                .is_some_and(|f| f.identifier() == browser.identifier())
-            {
-                *focused = None;
-            }
-        }
         let id = browser.identifier();
-        self.views
-            .borrow_mut()
-            .retain(|_, known| known.identifier() != id);
+        // Each removed value is let go of after its borrow is released.
+        let focused = self.focused_browser.borrow().clone();
+        if focused.as_ref().is_some_and(|f| f.identifier() == id) {
+            let taken = self.focused_browser.borrow_mut().take();
+            drop(taken);
+        }
+        drop(focused);
+        let views: Vec<(TabId, (std::os::raw::c_int, Browser))> = {
+            let mut views = self.views.borrow_mut();
+            let tabs: Vec<TabId> = views
+                .iter()
+                .filter(|(_, (known, _))| *known == id)
+                .map(|(tab, _)| *tab)
+                .collect();
+            tabs.into_iter()
+                .filter_map(|tab| views.remove(&tab).map(|view| (tab, view)))
+                .collect()
+        };
+        drop(views);
         self.popups_over.borrow_mut().remove(&id);
     }
 
     /// A tab's view was created: its browser is `browser`.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     pub(crate) fn register_view(&self, tab: TabId, browser: &Browser) {
-        self.views.borrow_mut().insert(tab, browser.clone());
+        let id = browser.identifier();
+        let displaced = self.views.borrow_mut().insert(tab, (id, browser.clone()));
+        drop(displaced);
     }
 
     /// A tab's view is gone (`TabHost::close_tab`, or the host dropped).
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     pub(crate) fn unregister_view(&self, tab: TabId) {
-        self.views.borrow_mut().remove(&tab);
+        let removed = self.views.borrow_mut().remove(&tab);
+        drop(removed);
     }
 
     /// The browser showing the view `tab`.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     pub(crate) fn browser_of(&self, tab: TabId) -> Option<Browser> {
-        self.views.borrow().get(&tab).cloned()
+        self.views
+            .borrow()
+            .get(&tab)
+            .map(|(_, browser)| browser.clone())
     }
 
     /// An action popup opened over `over`: its browser, by CEF's id.
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     pub(crate) fn register_popup(&self, browser: &Browser, over: TabId) {
-        self.popups_over
-            .borrow_mut()
-            .insert(browser.identifier(), over);
+        let id = browser.identifier();
+        self.popups_over.borrow_mut().insert(id, over);
     }
 
     /// Who is asking, for a bridge call from a page in `browser`: the view it
     /// is, the popup it is, or (any other browser) nobody with a window, like
     /// a worker. Used by the extension pages' lane (Task 12).
-    // Called only by the page lane, which Task 12 adds.
-    #[allow(dead_code)]
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn asker_of(&self, browser: &Browser) -> crate::bridge::transport::Asker {
         use crate::bridge::transport::Asker;
         let id = browser.identifier();
@@ -207,7 +223,7 @@ impl DelegateState {
             .views
             .borrow()
             .iter()
-            .find(|(_, known)| known.identifier() == id)
+            .find(|(_, (known, _))| *known == id)
             .map(|(tab, _)| *tab);
         if let Some(tab) = view {
             return Asker::View(tab);
@@ -216,6 +232,19 @@ impl DelegateState {
             Some(over) => Asker::Popup { over: *over },
             None => Asker::Worker,
         }
+    }
+
+    /// The lane extension pages call the bridge on, once the engine has
+    /// made it (`engine.rs`). The lane holds no reference back here.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn set_page_lane(&self, lane: &Rc<crate::bridge::pages::PageLane>) {
+        *self.page_lane.borrow_mut() = Some(lane.clone());
+    }
+
+    /// The page lane, while the engine is alive.
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) fn page_lane(&self) -> Option<Rc<crate::bridge::pages::PageLane>> {
+        self.page_lane.borrow().clone()
     }
 
     /// The bridge's hub, once the engine has made it.
@@ -740,7 +769,7 @@ wrap_client! {
         /// The store shim's request (`store.rs`).
         fn on_process_message_received(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             frame: Option<&mut CefFrame>,
             _source_process: ProcessId,
             message: Option<&mut ProcessMessage>,
@@ -748,6 +777,19 @@ wrap_client! {
             let (Some(frame), Some(message)) = (frame, message) else {
                 return 0;
             };
+            // A bridge call from an extension page shown as this tab
+            // (bridge/pages.rs), or the store shim's request (store.rs).
+            #[cfg(any(windows, target_os = "macos"))]
+            {
+                let delegate = &self.handlers.view.delegate;
+                if let (Some(lane), Some(browser)) = (delegate.page_lane(), browser.as_deref())
+                    && lane.receive(delegate, browser, frame, message)
+                {
+                    return 1;
+                }
+            }
+            #[cfg(not(any(windows, target_os = "macos")))]
+            let _ = browser;
             let Some(request) = crate::store::request_from_message(frame, message) else {
                 return 0;
             };
