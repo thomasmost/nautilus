@@ -238,7 +238,7 @@ belongs to one running Nautilus at a time.
   its windows are not counted. **Status:** on 2026-11-18, after the page's
   namespaces were installed at its first document change, the browser no longer
   traps, the extension page is bridged, and its calls are held for their tab and
-  extension. The two passes exit 1, with 64 and 66 checks passing and 5 and 3
+  extension. Both passes exit 1, with 66 checks passing and 3
   failing: the page's own tab has no Chromium id in the table (`sender.tab`), and
   the restored worker's first call never reaches the engine (the restore suite).
   Not a pass; the

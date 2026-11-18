@@ -776,11 +776,13 @@ the page was not bridged, and the browser process trapped. What was measured
   (`BridgeState::page_call`, `Hold`, `settle`). The page lane no longer drops
   such a call (`pages.rs` `receive`), so a page always gets a reply. A worker's
   calls are unchanged.
-- **The run after the page-call holds.** Two passes on that commit's tree (the
-  docs commit changes no code): pass 1 exit 1, 64 PASS, 5 FAIL
-  (`task13d-p5-run1.out`); pass 2 exit 1, 66 PASS, 3 FAIL (`task13d-p5-run2.out`).
-  The browser does not trap and exits cleanly in both, and the page is bridged.
-  The failures that remain:
+- **The run after the page-call holds.** On the final tree (commit `ef21a61`; the
+  docs commit changes no code): pass 1 exit 1, 66 PASS, 3 FAIL
+  (`task13d-final-p5-run1.out`); pass 2 exit 1, 66 PASS, 3 FAIL
+  (`task13d-final-p5-run2.out`); the same three lines in both. Before that, on the
+  same code's working tree, one pass failed 5 (`task13d-p5-run1.out`, with
+  `AC3.3` and `AC3.4`) and another 3 (`task13d-p5-run2.out`). The browser does not
+  trap and exits cleanly in all of them, and the page is bridged. The failures that remain:
   - `sender.tab carries the strip's fields` (both passes). The page's own tab
     never gets a Chromium id in the table: the log has `TabId(5) is DevTools
     target …` for it and no `is Chromium tab` line (`task13c-final-p5-run1-logs/main.log`).
@@ -792,8 +794,9 @@ the page was not bridged, and the browser process trapped. What was measured
     below. Not fixed.
   - `AC3.3` (a created tab still `loading`) and `AC3.4` (two ids above
     `SYNTHETIC_BASE`, 2 000 000 000, so the strip published them without
-    Chromium's ids) failed once, in pass 1, and passed in pass 2. The strip's
-    publish wait ended before the table named those tabs. Not explained.
+    Chromium's ids) failed once in the working-tree passes and not in the final
+    ones. The strip's publish wait ended before the table named those tabs.
+    Not explained.
 - **The restore suite (measured).** The restore launch restores three tabs, and
   the worker's wait for a discarded tab never sees one. The harness's `done`
   record for `restore` is `failed: Nautilus: the browser stopped listening.`
@@ -812,8 +815,8 @@ the page was not bridged, and the browser process trapped. What was measured
   launch's log (`restore.log` lines 23 and 26) and never in the main launch. Its
   API is not identified.
 - **The regression modes** on the same tree, each judged by its exit status
-  (`task13d-mode-*.out.status`): `spike` 0 (54 PASS), `pump` 0 (7 PASS), `reload` 0
-  (7 PASS), `zombie` 0 (21 PASS), `stop` 0 (14 PASS), `idle` 0 (9 PASS), and
+  (`task13d-final-mode-*.out.status`): `spike` 0 (54 PASS), `pump` 0 (7 PASS), `reload` 0
+  (7 PASS), `zombie` 0 (21 PASS), `stop` 0 (17 PASS), `idle` 0 (9 PASS), and
   `broken` 0 (14 PASS), none with a FAIL line.
 
 Passing checks (before the deferred install and after it): every tab listed in strip order
