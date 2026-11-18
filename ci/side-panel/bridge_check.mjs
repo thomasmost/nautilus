@@ -186,4 +186,105 @@ for (const viaPage of [false, true]) {
   await tick();
   assert.equal(responses[3], 'promised');
 }
+// An extension page's context, as pages.rs composes it: the transport when
+// the context is created, the namespaces (page_defer.js around them) at the
+// first change of the document. Chromium's `chrome` appears between the two,
+// as the render process measures it, so it is set at the change. The
+// observer is a stand-in that delivers only while it is connected.
+function pageContext({ bindingsAtChange = true, hasDocument = true }) {
+  const observers = [];
+  const errors = [];
+  const sent = [];
+  const reached = []; // Chromium's own functions that were really called
+  const chrome = {
+    runtime: {
+      id: 'abcdefghijklmnopabcdefghijklmnop',
+      onConnect: nativeEvent(),
+      onMessage: nativeEvent(),
+      sendMessage() {},
+      connect() { return { name: '', onMessage: nativeEvent(), onDisconnect: nativeEvent(), postMessage() {} }; },
+    },
+    tabs: {
+      TAB_ID_NONE: -1,
+      query(...args) {
+        reached.push('tabs.query');
+        const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+        if (callback) callback([]);
+        return Promise.resolve([]);
+      },
+      sendMessage() {},
+      connect() {},
+      onCreated: nativeEvent(),
+    },
+    windows: { WINDOW_ID_CURRENT: -2 },
+  };
+  const sandbox = {
+    console: { error: (...a) => errors.push(a.map(String).join(' ')), log() {} },
+    Promise, Map, Set, JSON, Object, Array, Error, String, Math, Date,
+    __nautilusBridgeSend: (text) => sent.push(JSON.parse(text)),
+  };
+  sandbox.self = sandbox;
+  if (hasDocument) sandbox.document = {};
+  sandbox.MutationObserver = class {
+    constructor(callback) { this.callback = callback; this.connected = true; observers.push(this); }
+    observe(target, options) { this.target = target; this.options = options; }
+    disconnect() { this.connected = false; }
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(read('page_transport.js'), sandbox);
+  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js'].map(read).join('\n');
+  vm.runInContext(
+    `(function (root, install) {\n${read('page_defer.js')}\n})(self, function () {\ntry {\n${namespaces}\n} catch (e) { console.error('nautilus-bridge: ' + e); }\n});`,
+    sandbox,
+  );
+  const mutate = () => {
+    if (bindingsAtChange) sandbox.chrome = chrome;
+    for (const observer of observers) {
+      if (observer.connected) observer.callback([{ type: 'childList' }]);
+    }
+  };
+  return { sandbox, observers, errors, sent, reached, mutate };
+}
+
+{
+  // Before the first change: no namespace is replaced and nothing is asked.
+  const p = pageContext({});
+  assert.equal(p.sandbox.__nautilusBridge, undefined);
+  assert.equal(p.observers.length, 1);
+  assert.equal(p.observers[0].target, p.sandbox.document);
+  // Copied out of the sandbox's realm first, so the prototypes compare equal.
+  assert.deepEqual(JSON.parse(JSON.stringify(p.observers[0].options)), { childList: true, subtree: true });
+  assert.deepEqual(p.errors, []);
+  // The first change: the namespaces are replaced, and the page's own
+  // calls go to the engine, not to Chromium.
+  p.mutate();
+  assert.equal(p.observers[0].connected, false);
+  assert.ok(p.sandbox.__nautilusBridge, 'the namespaces are installed at the first change');
+  assert.deepEqual(p.errors, []);
+  p.sandbox.chrome.tabs.query({});
+  assert.deepEqual(p.reached, []);
+  assert.deepEqual(p.sent.map((m) => [m.ns, m.method]), [['tabs', 'query']]);
+  // A later change installs nothing again: the observer is gone, and a
+  // second install would have failed on the replaced namespaces.
+  p.mutate();
+  assert.deepEqual(p.errors, []);
+  assert.equal(p.sent.length, 1);
+}
+{
+  // No chrome at the first change: the existing message, once, and no
+  // namespace replaced (the page's calls stay refused, not native).
+  const p = pageContext({ bindingsAtChange: false });
+  p.mutate();
+  p.mutate();
+  assert.deepEqual(p.errors, ['nautilus-bridge: no transport or no chrome in this context']);
+  assert.equal(p.sandbox.__nautilusBridge, undefined);
+}
+{
+  // No document at creation: an error, and nothing waits for it.
+  const p = pageContext({ hasDocument: false });
+  assert.deepEqual(p.errors, ['nautilus-bridge: no document to wait for in this context']);
+  assert.equal(p.observers.length, 0);
+  p.mutate();
+  assert.equal(p.sandbox.__nautilusBridge, undefined);
+}
 console.log('bridge scripts: ok');

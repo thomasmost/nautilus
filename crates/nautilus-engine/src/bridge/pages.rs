@@ -1,7 +1,9 @@
 //! Extension pages: action popups and pages shown as tabs (the side
-//! panel's page later). The bridge is evaluated in each of their frames
-//! when its script context is created, before any of the page's own
-//! scripts; their calls travel to the browser process as process
+//! panel's page later). The transport is evaluated in each of their frames
+//! when its script context is created; the namespaces replace Chromium's
+//! at the first change to the document, which the parser makes before any
+//! of the page's own scripts run (`deferred_namespaces`). Their calls
+//! travel to the browser process as process
 //! messages and the answers come back as a script evaluated in the frame.
 //!
 //! Trust: the render process is not believed about who it is. The
@@ -27,6 +29,10 @@ use super::install::HELPER_ID;
 use super::relay::RELAY_PATH;
 use super::transport::{BridgeCall, BridgeTransport, CallId};
 use super::{PAGE_TRANSPORT_JS, namespaces_script};
+
+/// The deferred install's observer (`js/page_defer.js`), which
+/// `deferred_namespaces` wraps around the namespaces.
+const DEFER_JS: &str = include_str!("js/page_defer.js");
 use crate::crx;
 use crate::delegate::DelegateState;
 
@@ -78,13 +84,23 @@ pub(crate) fn parse_call(text: &str) -> Option<PageCall> {
     })
 }
 
-/// What is evaluated in an extension page's context: the page transport,
-/// then the namespaces. A failure is reported through the console, which
-/// the browser process logs.
+/// What is evaluated in an extension page's context when it is created: the
+/// page transport, then the namespaces, deferred to the first change of the
+/// document (`deferred_namespaces`). A failure is reported through the
+/// console, which the browser process logs.
 pub(crate) fn page_script() -> String {
     format!(
-        "try {{\n{PAGE_TRANSPORT_JS}\n{}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}",
-        namespaces_script()
+        "try {{\n{PAGE_TRANSPORT_JS}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}\n{}",
+        deferred_namespaces(&namespaces_script())
+    )
+}
+
+/// The namespaces as a function run once, at the first change to the
+/// page's document (`DEFER_JS`): `chrome` does not exist yet when the
+/// context is created, and it does before the page's first script.
+pub(crate) fn deferred_namespaces(namespaces: &str) -> String {
+    format!(
+        "(function (root, install) {{\n{DEFER_JS}\n}})(self, function () {{\ntry {{\n{namespaces}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}\n}});"
     )
 }
 
@@ -382,13 +398,34 @@ mod tests {
     }
 
     #[test]
-    fn the_page_script_defines_the_transport_before_the_namespaces() {
+    fn the_page_script_defines_the_transport_then_defers_the_namespaces() {
         let script = page_script();
         let transport = script.find("__nautilusBridgeSend").unwrap();
+        // The observer's callback (which calls install) is written before
+        // the observe call; the namespaces follow both.
+        let install = script.find("install();").unwrap();
+        let observe = script.find("observer.observe(root.document").unwrap();
         let core = script.find("'__nautilusBridge'").unwrap();
         let tabs = script.find("bridge.define('tabs'").unwrap();
-        assert!(transport < core && core < tabs);
+        assert!(transport < install && install < observe && observe < core && core < tabs);
         assert!(script.starts_with("try {"));
+        // The namespaces sit inside the function the observer calls.
+        assert!(script.find("function () {\ntry {\n").unwrap() < core);
+    }
+
+    #[test]
+    fn the_namespaces_run_once_at_the_first_change_of_the_document() {
+        let script = deferred_namespaces("NAMESPACES");
+        assert!(script.starts_with("(function (root, install) {\n"));
+        assert!(script.contains("new root.MutationObserver("));
+        assert!(
+            script.contains("observer.observe(root.document, { childList: true, subtree: true });")
+        );
+        assert!(script.contains("observer.disconnect();"));
+        assert!(script.contains("no document to wait for in this context"));
+        assert!(script.ends_with(
+            "(self, function () {\ntry {\nNAMESPACES\n} catch (e) { console.error('nautilus-bridge: ' + e); }\n});"
+        ));
     }
 
     #[test]
