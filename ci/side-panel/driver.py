@@ -249,7 +249,11 @@ def check_debugged_tab(label, launch, chromium):
         return
     tab = 'TabId(%s)' % rows[-1].group(1)
     hidden_text = '%s: hidden, painting stopped = true' % tab
-    shown = first_index(lines, 'bridge: %s (Chromium tab %s) was hidden; shown for the debugger' % (tab, chromium))
+    # The latency run's attach is the launch's last one (its checks ran
+    # first, and nothing attaches after it), so the last shown line is its.
+    shown_text = 'bridge: %s (Chromium tab %s) was hidden; shown for the debugger' % (tab, chromium)
+    shown_at = [i for i, line in enumerate(lines) if shown_text in line]
+    shown = shown_at[-1] if shown_at else -1
     hidden_before = [i for i in range(max(shown, 0)) if hidden_text in lines[i]]
     check(label + ' (I7): %s was logged hidden before the attach (run-%d.log)' % (tab, launch),
           bool(hidden_before), None if hidden_before else 'no hidden line before line %d' % shown)
