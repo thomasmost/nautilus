@@ -120,6 +120,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
   inside the extension's folder is skipped, where it was copied as its
   target, and a folder that links to an ancestor (or that contains the
   profile's extension store) no longer makes the load recurse forever.
+  A link skipped that way is logged as a warning that names it, and an
+  extension whose worker's entry is itself a link, or is missing, fails
+  to load with a message saying so (before, the worker simply failed).
   A load that fails leaves no partial copy in the profile. A worker path
   in an extension's manifest that names a drive, a stream or a Windows
   device name is refused.
@@ -127,9 +130,16 @@ has no releases yet; `Unreleased` holds everything on `main`.
   was behind another tab stopped answering input and screenshots, so
   each of the debugger's calls to it waited about five seconds. Such a
   tab is now kept painting while the extension debugs it, and hidden
-  again when the last debugger goes. The bridge reports each attach and
-  detach, so a background tab that no extension is debugging stays
-  hidden as before.
+  again when the last debugger goes. For an extension the bridge reaches,
+  the bridge reports each attach and detach, by tab id or by target id
+  (`attach({targetId})`). In this build the bridge reaches the scripted
+  test extension only: a store-installed or "Load unpacked…" extension's
+  debugger is not reported yet, nor one called from an extension page.
+  A background tab that no reported debugger is on stays hidden as before.
+- On Windows the scripted-run control directory (`NAUTILUS_TEST_CONTROL`,
+  for test runs only) must lie inside the user's profile folder; any
+  other directory, or one that cannot be found, is refused with a warning
+  and the hook stays off.
 
 ### Added
 

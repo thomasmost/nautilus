@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-17 (the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-18 (review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -80,7 +80,7 @@ Ninja on `PATH`:
   runs a script in a page when its load finishes. The macOS smoke test
   in CI launches the bundle up to three times on the `ci-smoke`
   profile because a fresh profile's first launch sometimes loads
-  nothing on the Intel runner (C6 in `docs/upstream-issues.md`); `NAUTILUS_TEST_CONTROL=<dir>` makes the engine carry out `cmd-N.json` commands from that directory (`load` an unpacked extension through the bridge's rewrite, `click` an extension's action, a raw `devtools` message through the management browser with its answers in `devtools.log`, `table`). The hook is for scripted runs only: it is compiled into release builds and is powerful while set (it loads extensions and sends DevTools messages on the management browser's browser-wide channel). On Unix the engine refuses, with a logged warning and the hook off, a directory not owned by the profile's owner or writable by its group or others (use mode 0700); `NAUTILUS_PUMP_LOG=1` reports a message pump that has not spun and `NAUTILUS_PUMP_TICK_MS` sets the pump's fallback interval (0 switches it off). `ci/side-panel/run.sh spike|pump` is the scripted run of the extension bridge on a throwaway profile (macOS; about six minutes; judge it by its exit status, never through a pipe).
+  nothing on the Intel runner (C6 in `docs/upstream-issues.md`); `NAUTILUS_TEST_CONTROL=<dir>` makes the engine carry out `cmd-N.json` commands from that directory (`load` an unpacked extension through the bridge's rewrite, `click` an extension's action, a raw `devtools` message through the management browser with its answers in `devtools.log`, `table`). The hook is for scripted runs only: it is compiled into release builds and is powerful while set (it loads extensions and sends DevTools messages on the management browser's browser-wide channel). On Unix the engine refuses, with a logged warning and the hook off, a directory not owned by the profile's owner or writable by its group or others (use mode 0700); on Windows it refuses a directory that is not inside the user's own profile tree (the canonical `%USERPROFILE%`, with `%TEMP%` normally inside it, compared part by part and case-insensitively: `extensions.rs` `outside_profile`), and any platform without a rule refuses; `NAUTILUS_PUMP_LOG=1` reports a message pump that has not spun and `NAUTILUS_PUMP_TICK_MS` sets the pump's fallback interval (0 switches it off). `ci/side-panel/run.sh spike|pump` is the scripted run of the extension bridge on a throwaway profile (macOS; about six minutes; judge it by its exit status, never through a pipe). A launch that exits non-zero or by a signal, is still up 120 s after its `--exit-after` (the script kills it), or logs a panic, a fatal runtime error, a RefCell borrowed twice, or browsers still open at shutdown fails the run.
 
 ## Conventions
 
@@ -302,14 +302,26 @@ Ninja on `PATH`:
   root must not start with `_`. Only what `NAUTILUS_TEST_CONTROL`
   loads is bridged until Phase 5 of the side-panel plan.
 - **A tab a debugger is on is painted.** The bridge reports each
-  extension's `chrome.debugger` attach and detach (`debugger.attached`
-  and `debugger.detached`, `docs/bridge-protocol.md`), and the worker's
-  call waits for the engine to show the tab first. `bridge/debugger.rs`
-  keeps which extension debugs which tab; a hidden tab is shown while any
-  debugs it and hidden again when the last debugger goes. Never key this
+  bridged extension's `chrome.debugger` attach and detach, by tab id or
+  by `{targetId}` (`debugger.attached` and `debugger.detached`,
+  `docs/bridge-protocol.md`), and the worker's call waits for the engine
+  to show the tab first. `bridge/debugger.rs` keeps which extension
+  debugs which tab, and `table::TabTable::resolve` maps the debuggee; a
+  hidden tab is shown while any debugs it and hidden again when the last
+  debugger goes. Only the test extension is bridged in this build, and
+  `chrome.debugger` from an extension page is not reported until Phase 5.
+  Never key this
   on CEF's DevTools-agent callbacks: they fire for the engine's own
   `Target.getTargetInfo` probe and for every tab at creation, so they say
   nothing about an extension's debugger.
+- **Relays are opened on the engine's turn, never in a callback.**
+  `Bridge::sync` records what is wanted and closes what is gone;
+  `Bridge::reopen` (`ExtensionManager::poll_bridge`, called from `spin`)
+  opens what is wanted and not open, at most once per 250 ms
+  (`REOPEN_GAP`). A relay whose evaluation fails, or whose DevTools
+  session ends, is closed in its callback and opened by the next turn. A
+  debugger report is never failed by a page's loss (`policy::failed_by_loss`);
+  a full queue of them applies its oldest against the table instead.
 - **A `cef` binding callback that returns an int defaults to 0.** The
   `wrap_*!` macros install every callback with the trait's default, which
   for an int return is `0`: `CefWindowDelegate::CanClose` then says "no"
@@ -429,6 +441,194 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
+## Status and handoff (2026-11-18, review cycle 2 of Phase 1)
+
+The second review of Phase 1 left ten issues open: I6 to I9, M3, M7, M8,
+and M10 to M12. All ten are addressed. The commits after `8cbeafe` name
+the issue numbers (`git log 8cbeafe..HEAD`). The kept logs are in
+`evidence/phase-1/` as `review2-*` (not committed); file names below are
+relative to it.
+
+What changed:
+
+- **The harness judges each launch (I6).** `ci/side-panel/run.sh` fails
+  a run when a browser launch exits non-zero or by a signal; when a
+  launch is still up 120 s after its `--exit-after` (a watchdog kills it
+  and marks the launch `hung`: a browser that ends by itself is never
+  killed); or when its log has `panicked at`, `fatal runtime error`,
+  `already borrowed` or `browser(s) still open at shutdown`. A failed
+  launch ends the driver and skips the next launch. The stub trees (a
+  crash, a logged panic, a healthy exit, a hang) are `review2-stub-*`
+  and `review2-stub-statuses.txt`: the old script exited 0 for the crash
+  stub (`review2-stub-old-crash.out`); the new script exits 1 for the
+  crash, the panic and the hang (its FAIL line names the kill), and 0 for
+  the healthy stub. `337af91`.
+- **The debugged tab is the background one (I7).** The latency run
+  debugs the tab the window is not showing (`tabs.query`), not the first
+  page target. The engine logs `was hidden; shown for the debugger of …`
+  when a debugged tab that was behind another is shown and `hidden
+  again: no debugger is left on it` when its last debugger leaves, both
+  with the Chromium id; the table logs its rows (`TabId(n) is Chromium
+  tab m`) when they change. The driver requires, in the latency launch's
+  log, the tab logged hidden before the attach, shown at it (the launch's
+  last shown line is the latency run's own attach), and hidden again
+  after the detach. `fd58965`, `53134d2`.
+- **Debugger reports by target id (I8).** `bridge.js` reports
+  `attach({targetId})` and `detach({targetId})`, and `onDetach` reports
+  its source as given. The engine maps a debuggee through the table
+  (`table::TabTable::resolve`, tested for a Nautilus tab, a target that
+  is not one, and a tab the table has not joined yet). The worker attaches
+  and detaches the first tab by target id and the driver checks both
+  calls. `docs/bridge-protocol.md` "Limits in protocol 1" names the two
+  unreported cases (extension pages; unbridged extensions). `699c5d4`.
+- **Page loss and queueing are pure and tested (I9).**
+  `policy::failed_by_loss`, `overflow`, `is_generation` and
+  `job_turn(page, wanted)` decide which jobs fail when a page is gone,
+  what the bounded queue drops, which page a callback belongs to, and
+  when a job waits. A debugger report is never failed by a page's loss
+  (it waits for the next table). A full queue of debugger reports applies
+  its oldest against the table instead of dropping it. `Bridge::trim`
+  keeps the queue within 256 after every push and every requeue. The
+  debuggers of a relay that is gone are kept (only `sync`, when the
+  extension is no longer wanted, forgets them): its worker may still be
+  debugging, and forgetting them would show a debugged tab as hidden.
+  `699c5d4`.
+- **Relays are opened on the engine's turn (M10).** `sync` records what
+  is wanted and closes what is gone; `Bridge::reopen`, called from `spin`
+  by `ExtensionManager::poll_bridge` on every turn, opens the helper page
+  and each missing wanted relay, at most once per 250 ms (`REOPEN_GAP`,
+  which bounds a relay that dies at once). A relay whose evaluation
+  fails, a retry, and an abandoned delivery close the relay and leave
+  the reopening to the next turn. A click for a wanted relay that is
+  between pages waits for it (`job_turn`). `699c5d4`, `b9d7911`.
+- **A page whose DevTools session ends is gone (M10; found by the
+  harness).** The relay-recovery check (below) closed a relay with
+  `Target.closeTarget`. The old `page_detached` polled the relay again
+  from inside its callback. CEF reported the session end to that call at
+  once, and the loop ran until the browser had logged 22,561,827 lines in
+  about two minutes (counted in the session before the 3.9 GB file was cut
+  to its head; `review2-hung-loop-engine-launch2.head.log` keeps its first
+  300 lines, which show the loop and CEF's reentrancy check); the browser
+  did not exit and the watchdog ended it.
+  `page_detached` now closes and removes the page as `page_gone` does,
+  and the next turn reopens it. The loop was in the code before this
+  cycle (the old `page_detached` polled too); no earlier run had closed
+  a relay. `3683955`.
+- **Pending evaluations are reserved before CEF is called (M11).**
+  `evaluate` reserves its pending entry (`Sending`, `reserve`) before
+  `execute_dev_tools_method` and settles it after (`settle`); an answer
+  CEF gives inside the call is matched to the reservation in `page_result`.
+  `refresh` sets `refreshing` before its call and clears it if the call
+  fails. No borrow is held across the call. `699c5d4`.
+- **Windows control directory (M3).** On Windows `control_refusal`
+  canonicalises the directory and requires it to be inside the canonical
+  `%USERPROFILE%` (`outside_profile`: a pure containment rule over path
+  components, case-insensitive on Windows, tested on every platform). A
+  directory that cannot be canonicalised, or no profile folder, is
+  refused with a warning and the hook off; any platform without a rule
+  refuses. Documented in the README and here. `2fe2469`.
+- **The test extension probes its wrapper (M8).** `sw.js` reports
+  `hasListeners()` before it adds a listener, with a spy added (both
+  `hasListeners()` and `hasListener(spy)`) and after the spy is removed;
+  the driver asserts false, true and true, then false. The U3 spy (the
+  extension's own `onConnect` listener that must never see the port) is
+  added after the probe, so it is still present for the U3 check.
+  `fd58965`.
+- **A skipped link and a missing worker entry (M12).** `install::copy_dir`
+  logs each skipped symbolic link at warning level with its path.
+  `install::entry_in_copy` makes the load fail with a message when the
+  loader's entry is missing from the copy, or was one of the skipped
+  links (tested for present, skipped and absent). A failed load leaves no
+  copy in the store. `0add58b`.
+- **Driver output.** Check details print only on failure (`1061e78`,
+  `acd7415`); the relay check finds the relay by its URL, because DevTools
+  lists a relay as type `other` (`812a0e7`).
+
+Verification, final build (exit statuses are in `review2-*.status`):
+
+- `cargo fmt --all --check`: exit 0. `cargo clippy --workspace
+  --all-targets -- -D warnings`: exit 0. `cargo build --workspace`: exit 0.
+  `cargo xtask bundle-mac`: exit 0. `sh -n ci/side-panel/run.sh`,
+  `python3 -m py_compile ci/side-panel/driver.py` and `node --check` on
+  `sw.js`, `lib.js` and `bridge.js`: exit 0.
+- `cargo test --workspace`: `nautilus-engine` 120 passed (101 before this
+  cycle; 19 new: the policy, table, install and containment tests), xtask
+  2 passed, 0 failed (`review2-cargo-test-workspace.log`). The static checks
+  and the clippy, build, fmt and bundle logs are `review2-static-checks.log`,
+  `review2-cargo-clippy-workspace.log`, `review2-cargo-build-workspace.log`,
+  `review2-cargo-fmt-check.log` and `review2-bundle-mac.log`.
+- Mutation check of the loss rule (`review2-mutation-policy-fail.log`):
+  removing the debugger-report exemption from `policy::failed_by_loss`
+  made `a_page_loss_fails_its_queries_and_clicks_and_never_a_debugger_report`
+  fail; restored, the policy tests passed (`review2-mutation-policy-restored.log`,
+  13 of 13).
+- Runs of `ci/side-panel/run.sh` on the final bundle (`review2-*.out`
+  driver output, `review2-*.status` exit status, engine logs
+  `review2-*-engine-launch<n>.log`, per-call records `review2-*-results.jsonl`):
+  - spike, run 1: exit 0; 50 PASS, 0 FAIL; unfocused latency max 71 ms,
+    p95 64 ms, 0 timeouts; the relay recovery passed (below).
+  - spike, run 2: exit 0; 50 PASS, 0 FAIL; unfocused max 68 ms, p95 63 ms.
+  - pump, runs 1, 2 and 3: exit 0 each; 7 PASS, 0 FAIL each; latency max
+    75, 92 and 87 ms; p95 63 to 64 ms; 0 timeouts; no call of a second.
+  - control, not a pass (see the measurement): exit 1; the driver's one
+    FAIL is the latency check; `review2-control-pump1*`.
+  - Superseded and not cited: a shakedown pump (`review2-shakedown-pump*`,
+    before the driver's detail fix); a first official round, which used
+    the earlier I7 check (the first shown line of the launch; it was
+    replaced by the last shown line, `53134d2`); a spike run that finished
+    with the relay-lookup FAIL (its type test; fixed in `812a0e7`); and a
+    spike run stopped by hand while the loop above kept its browser up
+    (the loop's head is kept).
+- Relay recovery (I9, M10), spike run 1 (`review2-spike1-engine-launch2.log`):
+  the driver closes the relay page with `Target.closeTarget` through the
+  control's DevTools channel (`review2-spike1.out`: `relay (I9): Target.closeTarget
+  closed the relay page`); the engine logs `bridge: page <relay> is gone
+  (its DevTools session ended)` at line 100 and `ready` at line 108; a click
+  after the reopening reaches the worker (`relay (M10): a click after the
+  reopening reaches the worker`). The same check passes in spike run 2.
+
+Measured (I7, the question the issue asked; `review2-*-results.jsonl`,
+the latency run's calls): the background tab's `Input.dispatchMouseEvent`
+took at most 11 ms in each of the five official runs (40 calls each,
+minimum 0 ms). The control, the same tab with un-hiding disabled (a
+temporary, reverted edit to `relay.rs` `set_tab_debugged`, never committed,
+its engine log `review2-control-pump1-engine-launch1.log` with the hidden
+line at line 13 and no shown line), took 5001 to 5015 ms per call, 27 of
+them, all over one second; the latency run did not finish within the
+driver's 140 s wait. The H5 stall therefore returns without the
+un-hiding and does not return with it, on the same tab, aimed by the same
+rule (the background tab). Nothing about it is left to investigate in
+this cycle.
+
+Not verified in this cycle:
+
+- Windows: nothing ran there. Only the Windows build exercises the
+  `cfg(windows)` branch of `control_refusal` (canonicalisation and
+  `USERPROFILE` on real paths); the containment rule `outside_profile`
+  itself is tested on every platform with synthetic paths, and the
+  bridge's CEF paths are the same code as macOS.
+- The reopen gate (`REOPEN_GAP`) is not unit-tested: it reads the clock
+  inside the engine's turn. The runs show a relay that died long after
+  its opening coming back within one turn, not the gate's bound.
+- Lifetime paths not provoked in a run: render-process termination
+  (`on_render_process_terminated`); the helper's page closing while
+  debugger reports wait for a table; the queue's bound (256) and the
+  overflow's apply path; the relay's retry and abandon paths (`Next::Retry`,
+  `Next::Abandon`) with their closing; a page closed while an evaluation
+  is in flight. The policy functions for these are unit-tested; the wiring
+  was reasoned from the cef crate's handler signatures. The relay's
+  closure by a DevTools session end (`Target.closeTarget`) and its reopening
+  were provoked and are in the driver. This is the caveat the acceptance
+  record carries for the same paths.
+- The toolbar's own click (Task 13 step 5): still not done.
+- DevTools ("Inspect") on a background tab (hidden, so slow, not
+  measured); store-installed and "Load unpacked…" extensions (not
+  bridged); `chrome.debugger` called from an extension page (not reported).
+- The Intel build and macOS 26: not run.
+
+Verified by the cycle-1 claims (rewritten from the kept logs in cycle 2)
+are in the next section.
+
 ## Status and handoff (2026-11-18, review fixes to Phase 1)
 
 The code review of Phase 1 found 15 issues; all are fixed (commits on
@@ -461,16 +661,20 @@ What changed, by area:
   `PageRequest` (`on_render_process_terminated`) and the DevTools agent's
   detach all reach `Bridge::page_gone` or `page_detached`, which drop the
   page's pending evaluations, reset the helper's `refreshing` flag, fail
-  the jobs that needed the page (a tab-list call gets an error answer, a
-  debugger report its acknowledgement), forget the debuggers of a relay
-  that is gone, and leave the page to be reopened by the next `sync`
-  (not from inside a CEF callback). Each page has a generation so a
+  the jobs that needed the page (a tab-list call gets an error answer;
+  a debugger report waits for the table, see review cycle 2). Cycle 2
+  changed the rest: a relay that is gone keeps its debuggers, and the
+  next turn reopens it, never the callback (`Bridge::reopen`). Each page
+  has a generation so a
   stale callback cannot touch its successor. The job queue is bounded
   at 256.
 - **CEF is never called with the bridge's state borrowed.** The
-  pump harness found this, not the unit tests: a run's browser aborted
-  at exit ("RefCell already borrowed", `relay.rs`), with the harness's
-  exit status still 0. `shutdown`, `evaluate`, and the debugger
+  pump harness found this, not the unit tests: two cycle-1 runs' browsers
+  aborted at exit ("RefCell already borrowed", `relay.rs:696`; the engine
+  logs `review-pump-run1-engine.log` and `review-pump-run2-engine.log`,
+  lines 82 to 85), and each harness output still printed `RESULT all
+  checks passed` (`review-pump-run1.out` and `review-pump-run2.out`,
+  line 12). `shutdown`, `evaluate`, and the debugger
   visibility updates now clone out the browser and view first. The
   harness's status does not show an abort; check the browser's log too.
 - **Decisions are pure and tested (I5, M4).** `policy::relay_changes`,
@@ -490,22 +694,32 @@ What changed, by area:
   directory another user or group can write, on Unix (M3); the harness
   creates its control directories at 0700.
 
-Verified on the Mac, 2026-11-18 (the bundle from `cargo xtask bundle-mac`
-at HEAD; run exit statuses, not pipes):
+Verified on the Mac in cycle 1 (2026-11-18; each claim names its
+kept file under `evidence/phase-1/`; "claimed in the session" marks a
+claim no file keeps):
 
 - `cargo test --workspace`: 101 passed in `nautilus-engine` and 2 in
-  xtask, 0 failed (74 before the review, with other sessions' tests
-  included in the later count). `cargo clippy --workspace --all-targets
-  -- -D warnings` exit 0; `cargo fmt --all --check` clean.
-- `ci/side-panel/run.sh pump` three times: exit 0 each, `RESULT all
-  checks passed`, no abort in the engine logs. The latency runs: max
-  725 ms (one `Page.captureScreenshot`; the rest of that run max 64 to
-  68 ms), 72 ms and 70 ms, p95 63 to 64 ms, 0 timeouts.
-- `ci/side-panel/run.sh spike` twice: exit 0 each, `RESULT all checks
-  passed`, 34 PASS lines each, unfocused max 165 ms and 88 ms. The
-  engine logs show the debugged tab shown (`debugs TabId(n); the tab
-  stays painted`) and the background tab hidden (`hidden, painting
-  stopped = true`), and the table joined with the helper loaded lazily.
+  xtask, 0 failed; clippy and fmt clean (claimed in the session; no test
+  output was kept).
+- `ci/side-panel/run.sh pump`, three runs. Run 1 (`review-pump-final-run1.out`,
+  line 10: `RESULT all checks passed`) has an engine log
+  (`review-pump-final-run1-engine.log`) with no panic, abort or shutdown
+  line. Runs 2 and 3 (`review-pump-final-run2.out` and `-run3.out`, line
+  10: `RESULT all checks passed`) have no engine log kept, so no abort is
+  shown for them. Exit statuses were not kept (claimed in the session:
+  0). Latency (INFO lines): max 725 ms in run 1 (one
+  `Page.captureScreenshot`; the rest of that run max 65 to 68 ms), 72 ms
+  and 70 ms; p95 63 to 64 ms; 0 timeouts.
+- `ci/side-panel/run.sh spike`, two runs: `review-spike-run1.out` and
+  `review-spike-run2.out` each have `RESULT all checks passed` (line 42)
+  and 34 PASS lines; unfocused max 165 ms and 88 ms. The engine log of
+  spike run 1 (`review-spike-run1-engine.log`, line 13) shows the
+  background tab hidden (`hidden, painting stopped = true`). The claim
+  that the debugged tab was shown is not backed: that log has no shown
+  line, and spike run 2 has no engine log (claimed in the session).
+- The two cycle-1 pump runs whose browsers aborted exited with `run 1
+  exited with status 134` (`review-pump-run1.out` and `review-pump-run2.out`,
+  line 2); the harness reported them as passed (see the abort bullet above).
 - Not verified: Windows (everything in the bridge builds there in
   principle, but nothing ran); the toolbar's own click (Task 13 step 5);
   DevTools ("Inspect") on a background tab: such a tab is hidden, so an
@@ -535,8 +749,9 @@ this phase.
 Verified, scripted: `ci/side-panel/run.sh spike` at the head of
 `extension-side-panel` on 2026-11-17 (the bundle from
 `cargo xtask bundle-mac`), three runs, each exiting 0 with
-`RESULT all checks passed` and 34 PASS lines. Run A was before the
-driver fix (4ea16f8); B and C were after it.
+`RESULT all checks passed` and 34 PASS lines (`task13-run-A-before.out`,
+`task13-run-B-after.out`, `task13-run-C-after.out`; exit statuses were not
+kept). Run A was before the driver fix (4ea16f8); B and C were after it.
 - Install: the worker runs the loader beside its entry
   (`/background/nautilus-loader.js`) and the bridge is in it
   (`{'protocol': 1, 'portHidden': True}`).
@@ -563,19 +778,23 @@ driver fix (4ea16f8); B and C were after it.
 The pump. Task 11 confirmed H1: CEF had work it did not ask for. With
 the tick off on the instrumented build the pump logged `no spin for
 137354 ms; CEF asked 0 time(s) since it ended; timer pending: false`
-and the latency run did not finish (`task11/pump-tick0-run1`); a second
+(claimed in the session; no engine log was kept) and the latency run did
+not finish (`task11-pump-tick0-run1.out`, a FAIL); a second
 tick-off run, on the fix build, failed the same way
 (`task12/tick0-control`). With a 33 ms tick the run passed
 (`task11/pump-tick33-run1`: max 90 ms, p95 63 ms). H2 (a lost delayed
 request) is ruled out: with the replace rule and a 600000 ms interval,
 the timer pending and nothing asking sooner, the run still stalled, two
-calls taking 20005 and 20010 ms (`task11/pump-tick600000-run1`). H3 (a
+calls taking 20005 and 20010 ms (claimed in the session;
+`task11-pump-tick600000-run1.out` records only the failed latency check). H3 (a
 lost wake) was not observed: the wakes stayed below the spins and no
 `sample` was taken; F3 was not applied. H4 (App Nap) was not tested: no
 run had the window focused; F4 was not applied. H5 (a debugger on a
 hidden tab) was seen once with the tick on and before the hidden-tab fix:
 27 `Input.dispatchMouseEvent` calls, each 5001 to 5011 ms, to a tab behind
-another with a debugger attached (`task12/fix-run1`). The F5 fix for it
+another with a debugger attached (claimed in the session; `task12-fix-run1.out`
+records the failed latency check only; review cycle 2 reproduced the stall,
+see below). The F5 fix for it
 (a tab with a DevTools agent attached is not hidden) hid no background
 tab at all, because the agent attached for the probe's own target lookup;
 the figures below from F5 runs were measured on that build, not on an

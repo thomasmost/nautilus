@@ -105,12 +105,19 @@ its first attempt.
 | `method` | `args` | `result` | Since |
 |----------|--------|----------|-------|
 | `tabs.query` | `[queryInfo]` | `[{id, index, windowId, active, url, title}]` | 1 |
-| `debugger.attached` | `[tabId]` | `null` | 1 |
-| `debugger.detached` | `[tabId]` | `null` | 1 |
+| `debugger.attached` | `[debuggee]` | `null` | 1 |
+| `debugger.detached` | `[debuggee]` | `null` | 1 |
+
+`debuggee` is Chromium's tab id (a number) for an attach or detach by
+`tabId`, or `{"targetId": "<id>"}` for one by `targetId` (the id
+`chrome.debugger.getTargets()` lists). The engine maps either form through
+its table (`table::TabTable::resolve`): a target that is a Nautilus tab
+resolves to it once the tab has reported its own target id, a target that
+is no Nautilus tab (a worker, an extension page, the management page)
+resolves to nothing and is logged as untracked.
 
 `debugger.attached` and `debugger.detached` report that an extension
-attached or detached a `chrome.debugger` session on a tab (`tabId` is
-Chromium's). The bridge sends them after Chromium has made the change,
+attached or detached a `chrome.debugger` session on a tab. The bridge sends them after Chromium has made the change,
 and the call (the wrapped `chrome.debugger.attach`/`detach`) resolves
 only when the engine has answered. The engine answers once the tab's
 state is applied: a tab that is hidden is shown while any extension
@@ -118,7 +125,8 @@ debugs it, and hidden again when the last debugger goes (`bridge/debugger.rs`).
 So a debugger's first command meets a visible renderer. A report for a
 tab the table does not know waits for a table refresh first. A detach
 that Chromium makes without the extension (the tab closed, or the user
-cancelled the infobar) comes through `chrome.debugger.onDetach`. The
+cancelled the infobar) comes through `chrome.debugger.onDetach`, with
+the source it names (`tabId` or `targetId`), and is reported the same way. The
 bridge treats any failure or timeout of a report as no answer and lets
 the extension's own call go on, so a report never blocks a debugger it
 cannot track.
@@ -177,6 +185,14 @@ routes them through it.
 - Extension pages (the relay page included) receive the bridge's port,
   because the wrapper is in the worker only. Phase 5 puts the bridge into
   extension pages and hides the port there too.
+- `chrome.debugger` called from an extension page (a popup, the options
+  page, the side panel) is not reported: the bridge is in the worker only.
+  Such a debugger's tab is not kept painted until Phase 5 bridges the
+  pages.
+- An unbridged extension's debugger is not reported. In this phase that
+  is every store-installed and every "Load unpacked…" extension; only the
+  test control's `load` is bridged, so only the test extension's debugger
+  keeps its tab painted.
 - A module worker (`"type": "module"`) gets a loader of two static
   imports, which is unit-tested as text only; no module-worker extension
   has run.

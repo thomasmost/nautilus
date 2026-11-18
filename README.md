@@ -214,7 +214,10 @@ belongs to one running Nautilus at a time.
   not the toolbar's button) delivered once to a stopped worker,
   `chrome.tabs.query` and the ids it returns, and that no extension call
   takes a second with the window unfocused. `pump` runs the last part
-  alone. Judge it by its exit status, not through a pipe.
+  alone. Judge it by its exit status, not through a pipe: a browser launch
+  that exits non-zero or by a signal, is still up 120 s after its
+  `--exit-after`, or logs a panic, a fatal runtime error, a RefCell
+  borrowed twice, or browsers still open at shutdown fails the run.
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
   browser read commands from the named directory: `load` an unpacked
   extension, `click` an action, send a raw DevTools message on the
@@ -223,8 +226,12 @@ belongs to one running Nautilus at a time.
   `table`. The hook is compiled into release builds and is powerful while
   set, so use it only on a directory only you can write (on Unix the
   engine refuses one owned by another user or writable by its group or
-  others, with a warning, and the hook stays off). Never set it on a
-  browser you use.
+  others, with a warning, and the hook stays off). On Windows the
+  directory must lie inside your profile folder (`%USERPROFILE%`; `%TEMP%`
+  is normally inside it): the path is canonicalised and compared by name, part by
+  part and case-insensitively, so `C:\Users\you2` is not inside
+  `C:\Users\you`; a directory elsewhere, or one that cannot be found, is
+  refused the same way. Never set it on a browser you use.
 
 ## Manual checklist
 
@@ -659,11 +666,18 @@ Upstream causes and the features they block are tracked in
   far). Only the test control's `load` is bridged; a store-installed or
   "Load unpacked…" extension has no bridge yet, and an extension's action
   click reaches its worker only through the bridge. A tab an extension is
-  debugging is kept painted; a background tab nothing debugs is hidden, so
-  DevTools ("Inspect") on a background tab is slow until it is shown. A
-  symlink in an unpacked extension is not copied (it is skipped, with a
-  debug log line). The bridge builds on Windows but has not run there,
-  and the test control's ownership check is Unix-only.
+  debugging is kept painted, for an extension the bridge reaches (in this
+  build, the scripted test extension only); a background tab nothing
+  reported as debugged is hidden, so DevTools ("Inspect") on a background
+  tab is slow until it is shown. A debugger attached by `targetId`, a
+  debugger called from an extension page (popup, options, side panel), and
+  an unbridged extension's debugger are not reported until Phase 5 (see
+  `docs/bridge-protocol.md`, "Limits in protocol 1"). A symlink in an
+  unpacked extension is not copied: it is skipped with a warning that
+  names it, and a worker entry that is a link or missing fails the load.
+  The bridge builds on Windows but has not run there; the test control's
+  Unix owner-and-mode rule and its Windows profile-folder rule are not run
+  there either.
   The Web Store
   may show "Switch to Chrome" instead of an install button (install
   through the puzzle menu or Settings then); when it shows "Add to
