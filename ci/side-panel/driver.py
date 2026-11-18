@@ -517,13 +517,13 @@ def reload_provocation(ext, zombie=False):
     print('INFO debugger.onDetach reports from any worker: %d %s' % (
         len(detaches), [d['data'].get('reason') for d in detaches]), flush=True)
     print('INFO the engine logged the page loss after the reload: %s' % any('is gone' in line for line in after), flush=True)
-    # Two lines say a tab is hidden again: "hidden again" when the last
-    # debugger's detach is reported, "has no debugger left" when the engine
-    # forgets the extension's debuggers (by the list, `sync`, or by a hello that
-    # says the session is not attached, `hello`).
+    # The tab is hidden again when the engine logs "hidden again", on the last
+    # debugger's detach or when it forgets the extension's debuggers (by the
+    # list, `sync`, or by a hello that says the session is not attached,
+    # `hello`). M20: "has no debugger left" alone does not say the tab was hidden;
+    # only the "hidden again" line does (logged when set_tab_debugged hid it).
     hidden_again = 'bridge: TabId(%s) (Chromium tab %s) hidden again: no debugger is left on it' % (tab, chromium)
-    left = 'bridge: TabId(%s) has no debugger left' % tab
-    hidden = any(hidden_again in line or left in line for line in after)
+    hidden = any(hidden_again in line for line in after)
     path = classify_forget(after, (start or {}).get('id') or '', 'TabId(%s)' % tab)
     detectors = detector_lines(after, (start or {}).get('id') or '')
     print('INFO the path that saw the reload: worker target %s; forgotten by %s'
@@ -537,7 +537,7 @@ def reload_provocation(ext, zombie=False):
               'the tab was hidden although the session answers')
     else:
         check('reload (I10): the session ended with the reload, so the tab is hidden again', hidden,
-              'no "%s" or "%s" line after the reload' % (hidden_again, left))
+              'no "%s" line after the reload' % hidden_again)
     if zombie:
         zombie_checks(after, start, tab, chromium, lines_at_reload)
 
@@ -580,8 +580,11 @@ def zombie_checks(after, start, tab, chromium, lines_at_reload):
     forgot = first_index(log_all, '%s has no debugger left (%s, its worker says' % ('TabId(%s)' % tab, ext_id), at)
     check('zombie: the hello said the tab has no session, and the engine forgot its debugger', forgot >= 0,
           'no "its worker says" line for TabId(%s) after the detector' % tab)
+    # M20: the line the detach path logs when it hides the tab (set_tab_debugged
+    # said it was behind another tab). "has no debugger left" alone is not it.
     hidden = first_index(log_all, 'bridge: TabId(%s) (Chromium tab %s) hidden again' % (tab, chromium), at)
-    check('zombie: the tab is hidden again', hidden >= 0 or forgot >= 0)
+    check('zombie: the tab is hidden again (its "hidden again" line)', hidden >= 0,
+          'no "hidden again" line for TabId(%s) after the detector' % tab)
     path = classify_forget(log_all[lines_at_reload:], ext_id, 'TabId(%s)' % tab)
     check('zombie: the reload was forgotten by the hello, not by the list', path == 'hello', path)
     for line in log_all[lines_at_reload:]:
@@ -793,10 +796,13 @@ def stop_provocation(ext):
     check('stop (identity): the engine learned that the worker was started again', restarted)
     tab_name = re.search(r'TabId\((\d+)\)', shown[-1]).group(0) if shown else 'TabId(?)'
     left = any(tab_name + ' has no debugger left' in line for line in after_lines)
+    # M20: "hidden again" is the line that says the tab was hidden.
+    again = any('hidden again' in line and tab_name in line for line in after_lines)
     if after.get('ok'):
-        check('stop: the session survived the stop, so the engine keeps the tab painted', not left)
+        check('stop: the session survived the stop, so the engine keeps the tab painted', not left and not again)
     else:
-        check('stop: the session ended with the stop, so the engine hid the tab again', left)
+        check('stop: the session ended with the stop, so the engine hid the tab again (its "hidden again" line)', again,
+              'no "hidden again" line for %s after the restart' % tab_name)
 
 
 if __name__ == '__main__':
