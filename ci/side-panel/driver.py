@@ -290,7 +290,9 @@ def relay_recovery(control, ext_id, launch):
     engine's next turn, and a click after that is delivered to the worker."""
     answer = control.devtools('Target.getTargets')
     infos = ((answer or {}).get('result') or {}).get('targetInfos') or []
-    relays = [t for t in infos if t.get('type') == 'page' and ext_id in t.get('url', '') and 'relay.html' in t.get('url', '')]
+    # A relay is an extension's own page in a hidden browser; DevTools lists
+    # it as type "other", so the type is not tested, only its URL.
+    relays = [t for t in infos if ext_id in t.get('url', '') and 'relay.html' in t.get('url', '')]
     if not check('relay (I9): DevTools lists the relay page', len(relays) == 1, len(relays)):
         return
     closed = control.devtools('Target.closeTarget', {'targetId': relays[0]['targetId']}, secs=10)
