@@ -468,7 +468,7 @@ What changed:
   sequence is a test, `policy::tests::a_restart_then_a_reload_in_one_window_closes_the_zombie_relay`,
   with its neighbours (two reloads in a row, a hello on a freshly reopened
   relay, a same-instance hello, a restart whose hello comes after the change).
-  Red first: with the cycle 4 semantics, `a_restart_whose_hello_came_before_the_change_is_observed_is_not_kept_by_that_hello`,
+  Red first (`review5-i16-policy-tests-red.txt`, status 101): with the cycle 4 semantics, `a_restart_whose_hello_came_before_the_change_is_observed_is_not_kept_by_that_hello`,
   `a_restart_then_a_reload_in_one_window_closes_the_zombie_relay` and
   `two_reloads_in_a_row_keep_nothing_and_each_change_waits_for_its_own_hello`
   failed with `Keep` where `Wait` is required. Green after the change (149
