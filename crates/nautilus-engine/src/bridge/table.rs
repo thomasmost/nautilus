@@ -147,6 +147,43 @@ impl TabTable {
             .find(|row| row.chromium == chromium)
             .map(|row| row.tab)
     }
+
+    /// The Nautilus tab a debuggee is, or `None` when it is not one or is
+    /// not known yet. A tab id needs the last join (its row); a target id
+    /// needs only the tab's own report of its target, which comes at the
+    /// tab's creation, so a debugger on a new tab resolves before the join.
+    pub(crate) fn resolve(&self, debuggee: &Debuggee) -> Option<TabId> {
+        match debuggee {
+            Debuggee::Tab(chromium) => self.tab(*chromium),
+            Debuggee::Target(id) => self
+                .targets
+                .iter()
+                .find(|(_, target)| target.as_str() == id)
+                .map(|(tab, _)| *tab),
+        }
+    }
+}
+
+/// What a `chrome.debugger` report names: a tab by Chromium's id (an
+/// attach or detach with `{tabId}`), or a DevTools target by its id (with
+/// `{targetId}`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Debuggee {
+    Tab(i64),
+    Target(String),
+}
+
+/// The debuggee in a report's first argument: a number, or an object with
+/// a string `targetId`. Anything else names no debuggee.
+pub(crate) fn debuggee_of(arg: Option<&Value>) -> Option<Debuggee> {
+    match arg? {
+        Value::Number(number) => number.as_i64().map(Debuggee::Tab),
+        Value::Object(object) => object
+            .get("targetId")?
+            .as_str()
+            .map(|id| Debuggee::Target(id.to_string())),
+        _ => None,
+    }
 }
 
 /// The answer to the bridge's `tabs.query` in Phase 1: every row, in
@@ -277,6 +314,57 @@ mod tests {
         // A later join does not bring it back.
         table.join(&parse_targets(&probe_targets()));
         assert_eq!(table.rows().len(), 1);
+    }
+
+    #[test]
+    fn a_debugger_report_names_a_tab_by_id_or_a_target_by_its_id() {
+        assert_eq!(debuggee_of(Some(&json!(41))), Some(Debuggee::Tab(41)));
+        assert_eq!(
+            debuggee_of(Some(&json!({"targetId": "D2C9E333"}))),
+            Some(Debuggee::Target("D2C9E333".to_string()))
+        );
+        assert_eq!(debuggee_of(Some(&json!({"extensionId": "x"}))), None);
+        assert_eq!(debuggee_of(Some(&json!("41"))), None);
+        assert_eq!(debuggee_of(None), None);
+    }
+
+    #[test]
+    fn a_target_that_is_a_nautilus_tab_resolves_to_it_and_one_that_is_not_does_not() {
+        let mut table = TabTable::default();
+        table.set_target(TabId(2), "D2C9E333".to_string());
+        // A Nautilus tab: its own report of the target id is enough.
+        assert_eq!(
+            table.resolve(&Debuggee::Target("D2C9E333".to_string())),
+            Some(TabId(2))
+        );
+        // The worker and the management page are no tab of the table.
+        assert_eq!(
+            table.resolve(&Debuggee::Target("77511F4D".to_string())),
+            None
+        );
+        assert_eq!(table.resolve(&Debuggee::Tab(982885539)), None);
+    }
+
+    #[test]
+    fn a_tab_id_the_table_has_not_joined_yet_resolves_to_nothing_until_the_join() {
+        let mut table = TabTable::default();
+        table.set_target(TabId(2), "D2C9E333".to_string());
+        assert_eq!(
+            table.resolve(&Debuggee::Tab(982885541)),
+            None,
+            "a Chromium id is known only through the helper's list"
+        );
+        table.join(&parse_targets(&probe_targets()));
+        assert_eq!(table.resolve(&Debuggee::Tab(982885541)), Some(TabId(2)));
+    }
+
+    #[test]
+    fn a_target_whose_tab_has_not_reported_its_id_is_not_a_tab_yet() {
+        let table = TabTable::default();
+        assert_eq!(
+            table.resolve(&Debuggee::Target("D2C9E333".to_string())),
+            None
+        );
     }
 
     #[test]

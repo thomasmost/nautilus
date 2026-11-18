@@ -244,6 +244,9 @@ impl osmena_engine::Engine for Engine {
         self.extensions.poll_unpacked();
         // A scripted run's next command, if NAUTILUS_TEST_CONTROL is set.
         self.extensions.poll_control();
+        // The bridge's relay pages that closed underneath are opened again
+        // here, never from a CEF callback.
+        self.extensions.poll_bridge();
         let started = Instant::now();
         cef::do_message_loop_work();
         self.pump.after_spin(started.elapsed());

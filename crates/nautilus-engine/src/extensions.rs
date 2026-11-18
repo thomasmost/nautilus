@@ -289,6 +289,8 @@ mod stub {
 
         pub(crate) fn poll_control(&self) {}
 
+        pub(crate) fn poll_bridge(&self) {}
+
         pub(crate) fn click_action(&self, _id: &str, _tab: osmena_core::TabId) -> bool {
             false
         }
@@ -660,6 +662,12 @@ mod native {
                     source.display()
                 )),
             }
+        }
+
+        /// Open the bridge's relays and helper page that are wanted and not
+        /// open (`Bridge::reopen`). The engine calls this on its turn.
+        pub(crate) fn poll_bridge(&self) {
+            self.bridge.reopen();
         }
 
         pub(crate) fn track_tab(
