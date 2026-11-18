@@ -1492,9 +1492,12 @@ mod native {
     }
 }
 /// Why `NAUTILUS_TEST_CONTROL`'s directory must not be used, or `None`
-/// when it may. Unix only: the directory must belong to the user that owns
-/// the profile's engine directory (the browser created it), and no one but
-/// its owner may write to it. Elsewhere there is no check.
+/// when it may. Unix: the directory must belong to the user that owns the
+/// profile's engine directory (the browser created it), and no one but its
+/// owner may write to it (`control_refusal_for`). Windows: the directory,
+/// canonicalised, must lie inside the user's own profile tree (the canonical
+/// `%USERPROFILE%`, which holds `%TEMP%`), by `outside_profile`. Any other
+/// platform refuses, since it has no rule.
 #[cfg(unix)]
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 fn control_refusal(dir: &std::path::Path, profile: &std::path::Path) -> Option<String> {
@@ -1509,10 +1512,62 @@ fn control_refusal(dir: &std::path::Path, profile: &std::path::Path) -> Option<S
     }
 }
 
-#[cfg(not(unix))]
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+#[cfg(windows)]
+fn control_refusal(dir: &std::path::Path, _profile: &std::path::Path) -> Option<String> {
+    let dir = match std::fs::canonicalize(dir) {
+        Ok(dir) => dir,
+        Err(e) => return Some(format!("it cannot be canonicalised: {e}")),
+    };
+    if !dir.is_dir() {
+        return Some("it is not a directory".to_string());
+    }
+    let Some(home) = std::env::var_os("USERPROFILE") else {
+        return Some("USERPROFILE is not set, so the profile tree is unknown".to_string());
+    };
+    match std::fs::canonicalize(&home) {
+        Ok(home) => outside_profile(&dir, &home, true),
+        Err(e) => Some(format!(
+            "the user's profile folder cannot be canonicalised: {e}"
+        )),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn control_refusal(_dir: &std::path::Path, _profile: &std::path::Path) -> Option<String> {
-    None
+    Some("this platform has no rule for the control directory".to_string())
+}
+
+/// The Windows containment rule, as a pure function over canonical paths so
+/// that it is tested on every platform: `dir` must be `root` or inside it,
+/// compared component by component (`C:\Users\Thomas2` is not inside
+/// `C:\Users\Thomas`), with each name compared case-insensitively when
+/// `fold_case` (Windows' file system). `None` when `dir` may be used.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn outside_profile(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    fold_case: bool,
+) -> Option<String> {
+    let names = |path: &std::path::Path| -> Vec<String> {
+        path.components()
+            .map(|part| {
+                let name = part.as_os_str().to_string_lossy().into_owned();
+                if fold_case { name.to_lowercase() } else { name }
+            })
+            .collect()
+    };
+    let (dir_names, root_names) = (names(dir), names(root));
+    let inside = !root_names.is_empty()
+        && dir_names.len() >= root_names.len()
+        && dir_names[..root_names.len()] == root_names[..];
+    if inside {
+        None
+    } else {
+        Some(format!(
+            "it is not inside your profile folder {}",
+            root.display()
+        ))
+    }
 }
 
 /// The owner and mode test on the control directory's metadata, against
@@ -1537,6 +1592,63 @@ fn control_refusal_for(meta: &std::fs::Metadata, owner: u32) -> Option<String> {
         ));
     }
     None
+}
+
+/// Control-directory tests. The containment rule runs on every platform; the
+/// owner and mode check on Unix.
+#[cfg(test)]
+mod containment_tests {
+    use std::path::Path;
+
+    use super::outside_profile;
+
+    const HOME: &str = "C:/Users/Thomas";
+
+    #[test]
+    fn a_directory_inside_the_profile_tree_is_accepted() {
+        let home = Path::new(HOME);
+        assert_eq!(
+            outside_profile(
+                Path::new("C:/Users/Thomas/AppData/Local/Temp/ctl-1"),
+                home,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            outside_profile(home, home, true),
+            None,
+            "the profile folder itself"
+        );
+    }
+
+    #[test]
+    fn a_name_that_only_starts_like_the_profile_is_not_inside_it() {
+        let home = Path::new(HOME);
+        assert!(outside_profile(Path::new("C:/Users/Thomas2/ctl"), home, true).is_some());
+        assert!(outside_profile(Path::new("C:/Users/ThomasX"), home, true).is_some());
+    }
+
+    #[test]
+    fn a_directory_elsewhere_or_above_the_profile_is_refused() {
+        let home = Path::new(HOME);
+        assert!(outside_profile(Path::new("D:/work/ctl"), home, true).is_some());
+        assert!(outside_profile(Path::new("C:/Users"), home, true).is_some());
+        assert!(outside_profile(Path::new("C:/Temp/ctl"), home, true).is_some());
+    }
+
+    #[test]
+    fn names_are_compared_case_insensitively_on_windows_only() {
+        let home = Path::new(HOME);
+        let spelled = Path::new("c:/users/THOMAS/ctl");
+        assert_eq!(outside_profile(spelled, home, true), None);
+        assert!(outside_profile(spelled, home, false).is_some());
+    }
+
+    #[test]
+    fn an_empty_profile_path_refuses_everything() {
+        assert!(outside_profile(Path::new("C:/Users/Thomas/ctl"), Path::new(""), true).is_some());
+    }
 }
 
 /// Control-directory tests (Unix: the owner and mode check).
