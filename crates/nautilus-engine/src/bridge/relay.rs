@@ -110,8 +110,8 @@ impl HiddenPage {
 
     /// Evaluate `expression` (a promise is awaited, the value returned
     /// by value); the DevTools message id the answer will carry.
-    fn evaluate(&self, expression: &str) -> Option<i32> {
-        let host = self.browser.host()?;
+    fn evaluate(browser: &Browser, expression: &str) -> Option<i32> {
+        let host = browser.host()?;
         let mut params = cef::dictionary_value_create()?;
         params.set_string(
             Some(&"expression".into()),
@@ -423,19 +423,28 @@ fn take_page(inner: &mut Inner, key: &str, generation: u64) -> Option<HiddenPage
     }
 }
 
-/// Make `tab`'s view show it or hide it (it is painted only when it is
-/// not hidden or a debugger is on it), and set the flag the renderer
-/// reads. Only a tab that is hidden needs telling.
-fn set_tab_debugged(inner: &Inner, tab: TabId, debugged: bool) {
-    let Some(record) = inner.tabs.get(&tab) else {
-        return;
-    };
-    record.view.debugged.set(debugged);
-    if !record.view.hidden.get() {
+/// The browser and view of a tracked tab.
+type TabHandles = (Browser, Rc<ViewState>);
+
+/// The browser and view of a tracked tab, cloned out so that CEF can be
+/// called once the bridge's state is no longer borrowed.
+fn tab_handles(inner: &Inner, tab: TabId) -> Option<TabHandles> {
+    inner
+        .tabs
+        .get(&tab)
+        .map(|record| (record.browser.clone(), record.view.clone()))
+}
+
+/// Set whether an extension debugs the tab, and show or hide its
+/// renderer when it is behind another tab: hidden, it is painted only
+/// while a debugger is on it. Call without the bridge's state borrowed.
+fn set_tab_debugged(browser: &Browser, view: &ViewState, debugged: bool) {
+    view.debugged.set(debugged);
+    if !view.hidden.get() {
         return;
     }
-    if let Some(host) = record.browser.host() {
-        host.was_hidden(i32::from(record.view.wants_hidden()));
+    if let Some(host) = browser.host() {
+        host.was_hidden(i32::from(view.wants_hidden()));
         if debugged {
             host.invalidate(cef::PaintElementType::VIEW);
         }
@@ -601,34 +610,59 @@ impl Bridge {
     /// `extension`'s debuggers are gone with its relay: the tabs they
     /// debugged are shown or hidden accordingly.
     fn forget_debuggers(&self, extension: &str) {
-        let mut inner = self.inner.borrow_mut();
-        for tab in inner.debuggers.forget_extension(extension) {
+        let freed: Vec<(TabId, Option<TabHandles>)> = {
+            let mut inner = self.inner.borrow_mut();
+            inner
+                .debuggers
+                .forget_extension(extension)
+                .into_iter()
+                .map(|tab| (tab, tab_handles(&inner, tab)))
+                .collect()
+        };
+        for (tab, handles) in freed {
             log::info!("bridge: {tab:?} has no debugger left ({extension} is gone)");
-            set_tab_debugged(&inner, tab, false);
+            if let Some((browser, view)) = handles {
+                set_tab_debugged(&browser, &view, false);
+            }
         }
     }
 
     /// Close every hidden page; the engine pumps until they are gone.
     pub(crate) fn shutdown(&self) {
-        let mut inner = self.inner.borrow_mut();
-        inner.tabs.clear();
-        inner.pending.clear();
-        inner.jobs.clear();
-        inner.wanted.clear();
-        if let Some(page) = inner.helper.take() {
-            page.close();
-        }
-        for (_, page) in inner.relays.drain() {
+        // The pages are taken out before they are closed: closing one can
+        // call back into this bridge (its DevTools session ends), which
+        // must find the state free.
+        let pages: Vec<HiddenPage> = {
+            let mut guard = self.inner.borrow_mut();
+            let inner = &mut *guard;
+            inner.tabs.clear();
+            inner.pending.clear();
+            inner.jobs.clear();
+            inner.wanted.clear();
+            let mut pages: Vec<HiddenPage> = inner.helper.take().into_iter().collect();
+            pages.extend(inner.relays.drain().map(|(_, page)| page));
+            pages
+        };
+        for page in pages {
             page.close();
         }
     }
 
     fn evaluate(&self, key: &str, expression: &str, pending: Pending) -> bool {
-        let mut inner = self.inner.borrow_mut();
-        let Some(id) = page_ref(&inner, key).and_then(|page| page.evaluate(expression)) else {
+        // The browser is cloned out so that CEF is not called with the
+        // state borrowed: a call can answer or end a session at once.
+        let browser = {
+            let inner = self.inner.borrow();
+            page_ref(&inner, key).map(|page| page.browser.clone())
+        };
+        let Some(id) = browser.and_then(|browser| HiddenPage::evaluate(&browser, expression))
+        else {
             return false;
         };
-        inner.pending.insert((key.to_string(), id), pending);
+        self.inner
+            .borrow_mut()
+            .pending
+            .insert((key.to_string(), id), pending);
         true
     }
 
@@ -841,11 +875,14 @@ impl Bridge {
     /// Apply one attach or detach to the set of debuggers, and show or
     /// hide the tab when its debugged state changed.
     fn set_debugged(&self, extension: &str, tab: TabId, attach: bool) {
-        let mut inner = self.inner.borrow_mut();
-        let change = if attach {
-            inner.debuggers.attach(extension, tab)
-        } else {
-            inner.debuggers.detach(extension, tab)
+        let (change, handles) = {
+            let mut inner = self.inner.borrow_mut();
+            let change = if attach {
+                inner.debuggers.attach(extension, tab)
+            } else {
+                inner.debuggers.detach(extension, tab)
+            };
+            (change, tab_handles(&inner, tab))
         };
         match change {
             Change::Unchanged => {
@@ -853,11 +890,15 @@ impl Bridge {
             }
             Change::Debugged => {
                 log::info!("bridge: {extension} debugs {tab:?}; the tab stays painted");
-                set_tab_debugged(&inner, tab, true);
+                if let Some((browser, view)) = handles {
+                    set_tab_debugged(&browser, &view, true);
+                }
             }
             Change::Undebugged => {
                 log::info!("bridge: {extension} no longer debugs {tab:?}");
-                set_tab_debugged(&inner, tab, false);
+                if let Some((browser, view)) = handles {
+                    set_tab_debugged(&browser, &view, false);
+                }
             }
         }
     }
