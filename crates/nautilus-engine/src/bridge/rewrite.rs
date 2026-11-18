@@ -131,8 +131,25 @@ pub(crate) fn loader_source(original: &Original) -> String {
     }
 }
 
+/// Whether `part` names a Windows device (`CON`, `PRN`, `AUX`, `NUL`,
+/// `COM1`-`COM9`, `LPT1`-`LPT9`), with or without an extension, in any
+/// case. Windows ignores trailing spaces and dots in a name, so `nul .js`
+/// and `CON.` are the same devices. Checked on every platform: the rule
+/// is about the manifest, which may come from any host.
+fn is_windows_device(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or("");
+    let stem = stem.trim_end_matches(' ').to_ascii_uppercase();
+    let numbered = |prefix: &str| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|n| matches!(n.as_bytes(), [b'1'..=b'9']))
+    };
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT")
+}
+
 /// A manifest path as a relative one with forward slashes and no
-/// leading `./` or `/`.
+/// leading `./` or `/`. Refused: `..`, `\`, `?`, `#`, a `:` anywhere (a
+/// drive letter or an alternate data stream on Windows), and a Windows
+/// device name in any component.
 fn normalise(path: &str) -> Result<String, RewriteError> {
     let bad = || RewriteError::BadWorkerPath(path.to_string());
     let mut rest = path.trim();
@@ -143,10 +160,10 @@ fn normalise(path: &str) -> Result<String, RewriteError> {
     if rest.is_empty()
         || rest.ends_with('/')
         || rest.contains('\\')
-        || rest.contains(['?', '#'])
+        || rest.contains([':', '?', '#'])
         || rest
             .split('/')
-            .any(|part| part.is_empty() || part == "." || part == "..")
+            .any(|part| part.is_empty() || part == "." || part == ".." || is_windows_device(part))
     {
         return Err(bad());
     }
@@ -286,11 +303,41 @@ mod tests {
             "a\\b.js",
             "sw.js?x",
             "a//b.js",
+            // Windows: a drive or a stream name in a component.
+            "C:/Users/x/nautilus-loader.js",
+            "C:sw.js",
+            "sw.js:stream",
+            "background/a:b.js",
+            // Windows: device names, with or without an extension, in any case.
+            "CON",
+            "con.js",
+            "background/NUL.txt",
+            "Aux/sw.js",
+            "COM1.js",
+            "lpt9",
+            "nul .js",
         ] {
             let manifest = json!({"background": {"service_worker": path}});
             assert_eq!(
                 rewrite_manifest(&manifest),
                 Err(RewriteError::BadWorkerPath(path.to_string())),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_that_only_look_like_device_names_are_allowed() {
+        for path in [
+            "com10.js",
+            "console.js",
+            "lpt0.js",
+            "nulx.js",
+            "background/aux2.js",
+        ] {
+            let manifest = json!({"background": {"service_worker": path}});
+            assert!(
+                matches!(rewrite_manifest(&manifest), Ok(Rewrite::Wrapped { .. })),
                 "{path}"
             );
         }
