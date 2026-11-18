@@ -135,6 +135,18 @@ a `call` as it came, a `hello` as `{hello}`, and the port's end as
 `{gone: true}` (the worker stopped, or the extension was reloaded; the
 relay learns of it only if the port reports it).
 
+**A port with no listener.** The worker may open its own port before the relay
+page listens (a worker started before the engine has opened the relay). Chromium
+closes such a port at once with "Could not establish connection. Receiving end
+does not exist.", and nothing on the other end ever received a message over it.
+The bridge does not take that close for a lost relay: a call sent on that port is
+sent again on the next port, every 100 ms for up to 3 s from the first close, and
+fails after that with "found no listener in the browser" (`bridge.js`,
+`noListener`, `resend`). Any other close of the port in use still fails the
+pending calls with "the browser stopped listening". A call is posted on the port
+in use at the time it is posted, after that port's hello (`send`), so no call is
+posted on a port that was replaced.
+
 A session's state is decided by asking, not by `chrome.debugger.getTargets()`
 alone: `getTargets` marks a tab attached when any client is, the engine's
 own DevTools probe included. So each tab the list names is asked with
@@ -177,6 +189,10 @@ What is guaranteed, and what is not:
   is replaced.
 - A worker that took a delivery and then failed (`received: true`,
   `ok: false`) is never sent it again.
+- A call from a worker is sent again only when Chromium closed the port it was
+  sent on with "Receiving end does not exist" (see "A port with no listener"):
+  no listener received that port, so nothing ran the call. A call that reached a
+  listener is not sent again by the bridge.
 
 Not guaranteed: a worker instance that stops after it has received a
 delivery but before the relay has heard `received` can be replaced by a
@@ -783,37 +799,86 @@ the page was not bridged, and the browser process trapped. What was measured
   same code's working tree, one pass failed 5 (`task13d-p5-run1.out`, with
   `AC3.3` and `AC3.4`) and another 3 (`task13d-p5-run2.out`). The browser does not
   trap and exits cleanly in all of them, and the page is bridged. The failures that remain:
-  - `sender.tab carries the strip's fields` (both passes). The page's own tab
-    never gets a Chromium id in the table: the log has `TabId(5) is DevTools
-    target …` for it and no `is Chromium tab` line (`task13c-final-p5-run1-logs/main.log`).
-    So the sender's id does not map to a strip entry and `windowId` is `-1`. The
-    page's calls are held now, so this is the table's join for an extension
-    page's tab, not the publish hold. Not fixed.
-  - `restore-list` and `restore-show` (both passes). The restored worker's
-    first `tabs.query({})` never reaches the engine; see "The restore suite"
-    below. Not fixed.
+  - `sender.tab carries the strip's fields` (every pass, the last one included).
+    The page's own tab never gets a Chromium id in the table. The helper lists
+    the page's target as `type other` with no tab id: `TabId(5)` is a DevTools
+    target whose `tabId` is `null`, so `table::join` (which takes only `page`
+    targets that have a tab id) matches nothing. The lines are in
+    `task13e-e2-target-lines.txt` (`TASK13E target …` for `p5page.html`, each
+    `type other tab None`). Chromium's own id for the tab (433682305 in one run) is
+    what `sender.tab` carries, so `windowId` and `index` are `-1`. No listing the
+    bridge reads gives that id for this tab. Not fixed; see "The sender's tab"
+    below for the options.
+  - `restore-list` and `restore-show`: fixed in this cycle (below, "The restored
+    worker's port"); both pass in the final runs.
   - `AC3.3` (a created tab still `loading`) and `AC3.4` (two ids above
     `SYNTHETIC_BASE`, 2 000 000 000, so the strip published them without
     Chromium's ids) failed once in the working-tree passes and not in the final
     ones. The strip's publish wait ended before the table named those tabs.
     Not explained.
-- **The restore suite (measured).** The restore launch restores three tabs, and
-  the worker's wait for a discarded tab never sees one. The harness's `done`
-  record for `restore` is `failed: Nautilus: the browser stopped listening.`
-  (`task13d-diag-p5.out`, the `DIAG` line); the check "the suite finished" passes
-  on a `failed:` record, so it does not show this. The worker starts, says hello
-  (`task13d-e9-logs/restore.log` line 51), and reads the `restore` suite. Its
-  first `tabs.query({})` finds the worker's `port` null (`call tabs.query port=0`
-  in the worker's own markers), so it opens a new port. No call from the worker
-  reaches the relay after the hello (the relay's page-side log has the hello and no
-  call; the engine's `nautilusRelay.next()` returns nothing when asked). The idle
-  worker stops about 30 s later, and the call fails. The worker sees its earlier
-  port close while the relay sees no close until then. A worker that reconnects
-  after its port closes silently is the bridge's fault to fix; that needs a
-  decision on how the worker's port is re-established, so it is not fixed here.
-- **`Failed to create API on Chrome object`** appears twice in the restore
-  launch's log (`restore.log` lines 23 and 26) and never in the main launch. Its
-  API is not identified.
+- **The restored worker's port (fixed, measured).** The restore launch's
+  worker starts before the engine has its relay page listening. Its first call
+  (the restore suite's `tabs.query({})`, which the suite starts at once) opens the
+  worker's own port, and Chromium closes that port with "Could not establish
+  connection. Receiving end does not exist.", since nothing listens yet. The
+  bridge read the close as the port in use closing: it cleared `port` and
+  rejected every pending call with "the browser stopped listening", so the
+  suite's first call failed. The relay page was still opening in the same second
+  (`task13e-e1-logs/restore.log` lines 37 and 44). The trace is
+  `task13e-e1-restore-trace.txt`: the first call is sent on the worker's own
+  port `p1`; `disconnect p1 current=true err=Could not establish connection.
+  Receiving end does not exist.`; then `adopt p2` with no call sent on `p2`
+  before the failure. The earlier reading, "the first call never reaches the
+  engine and fails about 30 s later", is not what this trace shows: the failure
+  is at the first close.
+  The fix (`bridge.js`, `noListener`, `send`, `resend`): a call whose port closed
+  with that error, and which no listener received, is sent again on the next
+  port every `RESEND_MS` (100 ms) for up to `RECEIVER_WAIT_MS` (3 s) from the
+  first such close, then fails with "found no listener in the browser". A call is
+  posted on the port in use when it is posted, after that port's hello, so it is
+  never posted on a port that was replaced. Measured after the fix:
+  `restore-list` and `restore-show` pass in both final passes
+  (`task13e-final-p5-run1.out`, `task13e-final-p5-run2.out`). The node check of
+  the port (`ci/side-panel/bridge_check.mjs`, the last block) was red first
+  (`task13e-port-red.txt`: the first call rejected with "the browser stopped
+  listening") and is green (`task13e-port-green.txt`). The harness's "the suite
+  finished" check passed on a `failed:` record before this cycle; it does not now
+  (`done` in `phase5.py`, `task13e-done-red.txt` and `task13e-done-green.txt`).
+  The cause of the worker's early start is not measured. The test extension
+  listens for `runtime.onStartup`, which may be why Chromium wakes it at the
+  profile's start; that is a guess.
+- **`Failed to create API on Chrome object`** appears in the restore launch only:
+  six times in the restored extension page's context and twice at the management
+  page's first `Init` (`task13e-e1-logs/restore.log` lines 20 to 30); none in
+  `task13e-e1-logs/main.log`. The log does not name the API. The bridge's page
+  transport is installed in both launches' pages, so the transport alone does not
+  explain the difference. Not identified and not the cause of a failure here.
+- **The sender's tab (not fixed; a design decision).** The join for an extension
+  page's tab needs a Chromium tab id that no listing the bridge reads has for it.
+  The options, none built: (a) the page transport reports its own id, which the
+  page reads natively with `chrome.tabs.getCurrent()` before it replaces the
+  namespace (the id is Chromium's, per the Phase 5 measurements above), as a new
+  page-lane message the engine turns into a table row; (b) the helper lists
+  `chrome.tabs.query({})` with the URLs (it needs the `tabs` permission) and the
+  engine joins an extension page's target to a tab by URL, when that URL is
+  unique; (c) leave the fields off `sender.tab` for an extension page. (a) and (b)
+  change a message format, so they wait for a decision.
+- **A page's `getCurrent` answered `null` once (not in the final passes).** In the
+  run `task13e-e2-p5.out` (the same code as the restore fix, with a temporary
+  log), `chrome.tabs.getCurrent()` in the page answered nothing, so the page's
+  own `tabs.group` call threw and three page checks failed ("the page is bridged
+  before its scripts run", "a page's current window", "a page's tabs.group
+  rejects too"). The page lane's answer for a view is `null` when the published
+  snapshot does not locate the page's tab (`router.rs`, `getCurrent`), and
+  `page_call` holds a call only while a strip publish is pending (`state.rs`).
+  So a page call that arrives after its tab exists, with no publish pending and
+  the snapshot not yet holding the tab, is answered `null`. This is a reading of
+  the code and matches the run; it is not reproduced on demand. The same three
+  checks failed in two earlier runs too (`task13d-e9-p5.out`, `task13d-diag-p5.out`)
+  and passed in the final runs of `task13d` and in both passes of this cycle. In
+  the kept logs, three of the full passes since the page-call holds show it
+  (`task13d-diag-p5.out`, `task13d-e9-p5.out`, `task13e-e2-p5.out`); the failure
+  is intermittent.
 - **The regression modes** on the same tree, each judged by its exit status
   (`task13d-final-mode-*.out.status`): `spike` 0 (54 PASS), `pump` 0 (7 PASS), `reload` 0
   (7 PASS), `zombie` 0 (21 PASS), `stop` 0 (17 PASS), `idle` 0 (9 PASS), and
@@ -842,6 +907,18 @@ The event deliveries before the stop are each sent once and taken once:
 `windows.onFocusChanged`. The requests reach the model: `OpenTab` (line 117,
 and token 5 `CloseTabs`), `ActivateTab(TabId(3))` (line 159), `MoveTab` (line
 173), `CloseTabs([TabId(4)])` (line 259).
+
+**The run after the restored worker's port (2026-11-18).** On the tree with the
+port fix and the `done` check (the code commit of this cycle): `phase5.py` pass 1
+exit 1, 71 PASS, 1 FAIL (`task13e-final-p5-run1.out`); pass 2 exit 1, 71 PASS,
+1 FAIL (`task13e-final-p5-run2.out`). The one FAIL in both is `sender.tab carries
+the strip's fields` (above). The restore checks pass in both. The regression
+modes, each judged by its exit status (`task13e-final-mode-*.out.status`): `spike`
+0 (54 PASS), `pump` 0 (7 PASS), `reload` 0 (7 PASS), `zombie` 0 (21 PASS), `stop`
+0 (17 PASS), `idle` 0 (9 PASS), and `broken` 0 (14 PASS), none with a FAIL line.
+One pass before the final two (`task13e-e2-p5.out`, with the port fix and a
+temporary log of the helper's targets, since reverted) had 68 PASS and 4 FAIL:
+the three page checks above and `sender.tab`.
 
 **Still open.** Whether CEF answers `Target.getTargetInfo` inside the call (B8)
 is not determined by these runs. The owner's toolbar click, real popups and

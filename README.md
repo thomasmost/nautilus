@@ -238,11 +238,12 @@ belongs to one running Nautilus at a time.
   its windows are not counted. **Status:** on 2026-11-18, after the page's
   namespaces were installed at its first document change, the browser no longer
   traps, the extension page is bridged, and its calls are held for their tab and
-  extension. Both passes exit 1, with 66 checks passing and 3
-  failing: the page's own tab has no Chromium id in the table (`sender.tab`), and
-  the restored worker's first call never reaches the engine (the restore suite).
-  Not a pass; the
-  failures are described in `docs/bridge-protocol.md`, "The scripted run (phase5.py)".
+  extension. Both passes exit 1, with 71 checks passing and 1 failing: the
+  page's own tab has no Chromium id in the table (`sender.tab`). The restored
+  worker's first call is sent again once a relay listens, so the restore suite
+  passes. Not a pass. The page's own checks fail in some runs, intermittently;
+  both failures are described in `docs/bridge-protocol.md`, "The scripted run
+  (phase5.py)".
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
   browser read commands from the named directory: `load` an unpacked
   extension, `click` an action, send a raw DevTools message on the
