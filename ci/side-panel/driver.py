@@ -174,12 +174,14 @@ def tabs_work(label, mark):
               evaluate.get('ok') and evaluate.get('result') == tab['url'], evaluate.get('error') or evaluate.get('result'))
         if tab is tabs[0]:
             # I8: the attach and the detach that name the tab by its target id.
-            by_target = calls.get('debugger.attach({targetId})', {})
+            by_target = calls.get('debugger.attach({targetId})')
             check('%s (I8): debugger.attach({targetId}) accepts the first tab' % label,
-                  by_target.get('ok'), by_target.get('error', 'no call was recorded'))
-            detached = calls.get('debugger.detach({targetId})', {})
+                  bool(by_target and by_target.get('ok')),
+                  None if by_target and by_target.get('ok') else (by_target or {}).get('error', 'no call was recorded'))
+            detached = calls.get('debugger.detach({targetId})')
             check('%s (I8): debugger.detach({targetId}) accepts the first tab' % label,
-                  detached.get('ok'), detached.get('error', 'no call was recorded'))
+                  bool(detached and detached.get('ok')),
+                  None if detached and detached.get('ok') else (detached or {}).get('error', 'no call was recorded'))
 
 
 def worker_running(control, ext_id):
