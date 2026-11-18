@@ -464,6 +464,12 @@ mod native {
         helper_requested: bool,
         /// The scripted run's command directory, if one was named.
         control: Option<Control>,
+        /// A scripted run's hold on the extension list (`hold_list`): until
+        /// this instant, a listing's answer is not read (sync sees no list).
+        list_hold: Option<Instant>,
+        /// A listing's answer came during the hold; it is read again when the
+        /// hold ends, so that the list the engine acts on is the one after it.
+        list_held: bool,
     }
 
     /// The management browser (never shown) and what it learnt. One per
@@ -523,6 +529,8 @@ mod native {
                     loading: false,
                     helper_requested: false,
                     control: test_control(engine_dir),
+                    list_hold: None,
+                    list_held: false,
                 }),
             });
             let mut client = ManagerClient::new(
@@ -802,6 +810,22 @@ mod native {
         /// waiting. Called by the engine on every spin; does nothing
         /// unless `NAUTILUS_TEST_CONTROL` was set.
         pub(crate) fn poll_control(self: &Rc<Self>) {
+            // A hold that ended with a listing held reads the list again, so the
+            // engine acts on the list as it is after the hold.
+            let again = {
+                let mut inner = self.inner.borrow_mut();
+                match inner.list_hold {
+                    Some(until) if Instant::now() >= until => {
+                        inner.list_hold = None;
+                        std::mem::take(&mut inner.list_held)
+                    }
+                    _ => false,
+                }
+            };
+            if again {
+                log::info!("TEST HOOK: the list hold ended; the extension list is read again");
+                self.list();
+            }
             let (number, text) = {
                 let mut inner = self.inner.borrow_mut();
                 let Some(control) = inner.control.as_mut() else {
@@ -856,6 +880,28 @@ mod native {
             } else if command.get("table").is_some() {
                 log::info!("TEST HOOK: command {number}: table");
                 self.bridge.log_table();
+            } else if let Some(seconds) = command.get("hold_list").and_then(|v| v.as_u64()) {
+                // I10 (b): the extension list is not read for this long, so the
+                // engine's sync sees no change while the extension reloads.
+                log::info!("TEST HOOK: command {number}: hold_list {seconds} s");
+                self.inner.borrow_mut().list_hold =
+                    Some(Instant::now() + std::time::Duration::from_secs(seconds));
+            } else if let Some(relay) = command.get("relay_eval") {
+                // I10 (b): the relay page's own answer to an expression, logged.
+                let extension = relay
+                    .get("extension")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let label = relay
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("the expression");
+                let expression = relay
+                    .get("expression")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                log::info!("TEST HOOK: command {number}: relay_eval {label} on {extension}");
+                self.bridge.inspect_relay(extension, label, expression);
             } else {
                 log::warn!("TEST HOOK: command {number} is not understood: {command}");
             }
@@ -1039,6 +1085,20 @@ mod native {
 
         /// The current list: remember the popups, report the model's view.
         fn on_list(&self, items: &[serde_json::Value]) {
+            {
+                // A scripted run's hold (`hold_list`): the listing is not read,
+                // so sync sees no change while the hold lasts.
+                let mut inner = self.inner.borrow_mut();
+                if let Some(until) = inner.list_hold
+                    && Instant::now() < until
+                {
+                    if !inner.list_held {
+                        log::info!("TEST HOOK: an extension list read is held until the hold ends");
+                    }
+                    inner.list_held = true;
+                    return;
+                }
+            }
             let mut known = Vec::new();
             let mut extensions = Vec::new();
             let mut helper_loaded = false;
