@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-18 (Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-18 (an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; six checks of the scripted run still fail, see the status section of 2026-11-18 (deferred install); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -80,7 +80,7 @@ Ninja on `PATH`:
   runs a script in a page when its load finishes. The macOS smoke test
   in CI launches the bundle up to three times on the `ci-smoke`
   profile because a fresh profile's first launch sometimes loads
-  nothing on the Intel runner (C6 in `docs/upstream-issues.md`); `NAUTILUS_TEST_CONTROL=<dir>` makes the engine carry out `cmd-N.json` commands from that directory (`load` an unpacked extension through the bridge's rewrite, `click` an extension's action, a raw `devtools` message through the management browser with its answers in `devtools.log`, `table`, `hold_list` (the extension list's reads are held for N seconds, then read again), `relay_eval` (an expression in an extension's relay page, its answer logged as INFO)). The hook is for scripted runs only: it is compiled into release builds and is powerful while set (it loads extensions and sends DevTools messages on the management browser's browser-wide channel). On Unix the engine refuses, with a logged warning and the hook off, a directory not owned by the profile's owner or writable by its group or others (use mode 0700); on Windows it refuses a directory that is not inside the user's own profile tree (the canonical `%USERPROFILE%`, with `%TEMP%` normally inside it, compared part by part and case-insensitively: `extensions.rs` `outside_profile`), and any platform without a rule refuses; `NAUTILUS_PUMP_LOG=1` reports a message pump that has not spun and `NAUTILUS_PUMP_TICK_MS` sets the pump's fallback interval (0 switches it off). `ci/side-panel/run.sh spike|pump` is the scripted run of the extension bridge on a throwaway profile (macOS; about six minutes; judge it by its exit status, never through a pipe); `reload`, `zombie`, `stop`, `idle` and `broken` are the provocations of review cycles 3 and 4 (I10: a reload and a worker stop with a debugger on a background tab, `zombie` with the extension list held during the reload; I11 and I14: a relay that cannot load, with a debugged tab; I15: an idle worker, which must not be started again), each about two minutes (`idle` up to four). A launch that exits non-zero or by a signal, is still up 120 s after its `--exit-after` (the script kills it, only if the pid is still the browser it launched), or logs a panic, a fatal runtime error, a RefCell borrowed twice (`already borrowed` or `already mutably borrowed`), or browsers still open at shutdown fails the run. `python3 ci/side-panel/phase5.py` is the scripted run of `chrome.tabs` and `chrome.windows` over the bridge (two suites, `main` and `restore`, on the throwaway profile `side-panel-p5`; judged by its exit status; `docs/bridge-protocol.md`, "Phase 5 scripted run"); on 2026-11-18 it stops at an extension page opened as a tab (the page has no bridge, and the browser process traps).
+  nothing on the Intel runner (C6 in `docs/upstream-issues.md`); `NAUTILUS_TEST_CONTROL=<dir>` makes the engine carry out `cmd-N.json` commands from that directory (`load` an unpacked extension through the bridge's rewrite, `click` an extension's action, a raw `devtools` message through the management browser with its answers in `devtools.log`, `table`, `hold_list` (the extension list's reads are held for N seconds, then read again), `relay_eval` (an expression in an extension's relay page, its answer logged as INFO)). The hook is for scripted runs only: it is compiled into release builds and is powerful while set (it loads extensions and sends DevTools messages on the management browser's browser-wide channel). On Unix the engine refuses, with a logged warning and the hook off, a directory not owned by the profile's owner or writable by its group or others (use mode 0700); on Windows it refuses a directory that is not inside the user's own profile tree (the canonical `%USERPROFILE%`, with `%TEMP%` normally inside it, compared part by part and case-insensitively: `extensions.rs` `outside_profile`), and any platform without a rule refuses; `NAUTILUS_PUMP_LOG=1` reports a message pump that has not spun and `NAUTILUS_PUMP_TICK_MS` sets the pump's fallback interval (0 switches it off). `ci/side-panel/run.sh spike|pump` is the scripted run of the extension bridge on a throwaway profile (macOS; about six minutes; judge it by its exit status, never through a pipe); `reload`, `zombie`, `stop`, `idle` and `broken` are the provocations of review cycles 3 and 4 (I10: a reload and a worker stop with a debugger on a background tab, `zombie` with the extension list held during the reload; I11 and I14: a relay that cannot load, with a debugged tab; I15: an idle worker, which must not be started again), each about two minutes (`idle` up to four). A launch that exits non-zero or by a signal, is still up 120 s after its `--exit-after` (the script kills it, only if the pid is still the browser it launched), or logs a panic, a fatal runtime error, a RefCell borrowed twice (`already borrowed` or `already mutably borrowed`), or browsers still open at shutdown fails the run. `python3 ci/side-panel/phase5.py` is the scripted run of `chrome.tabs` and `chrome.windows` over the bridge (two suites, `main` and `restore`, on the throwaway profile `side-panel-p5`; judged by its exit status; `docs/bridge-protocol.md`, "The scripted run (phase5.py)"); on 2026-11-18, after the deferred install of an extension page's namespaces, the browser no longer traps and the page is bridged; six checks still fail (`docs/bridge-protocol.md`, "The scripted run (phase5.py)").
 
 ## Conventions
 
@@ -302,10 +302,13 @@ Ninja on `PATH`:
   root must not start with `_`. Every extension is bridged when it loads
   (store install, "Load unpacked…", `NAUTILUS_TEST_CONTROL`'s `load`:
   `ExtensionManager::load_bridged`), from Phase 5 of the side-panel plan on.
-  Extension pages are bridged too, as designed (`bridge/pages.rs`; the Task 13 run found that a page opened as a tab by `tabs.create` gets no bridge, `docs/bridge-protocol.md`, "Phase 5 scripted run"): the render handler in
-  `store.rs` puts `pages::install` into each extension page's context before
-  its scripts run (not the relay page, not the helper's pages), and the page's
-  calls come back over the page lane (`PageLane`, a process message the
+  Extension pages are bridged too (`bridge/pages.rs`): the render handler in
+  `store.rs` puts `pages::install` into each extension page's context when it
+  is created, which evaluates the transport (the namespaces wait for the
+  page's first document change, `js/page_defer.js`, because Chromium defines
+  `chrome` in the page only after its context is created; the first change
+  comes before the page's first script runs). Not the relay page, not the
+  helper's pages. The page's calls come back over the page lane (`PageLane`, a process message the
   browser process answers from the calling frame's own address; `Hub::serves`
   refuses a page of an extension the bridge does not serve).
 - **A tab a debugger is on is painted.** The bridge reports each
@@ -459,6 +462,35 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-18, the extension page's install)
+
+An extension page's bridge was installed when its context was created, where
+Chromium has not yet defined `chrome`. `core.js` failed closed, so the page kept
+Chromium's own APIs, and a `tabs.group` on the page's own Alloy tab trapped the
+browser process (upstream entry C11 in `docs/upstream-issues.md`).
+
+What changed: the transport goes in at context creation, and the namespaces go
+in once, at the first change to the page's document (`js/page_defer.js`,
+`pages::deferred_namespaces`; the parser delivers that change before the page's
+first script runs, and `chrome` exists by then). `pages.rs` has unit tests of the
+composition; `ci/side-panel/bridge_check.mjs` checks the deferral: nothing is
+replaced before the change, the page's calls are bridged after it, the install
+runs once, and a missing `chrome` or document logs one error.
+
+Verified (exit status in brackets): `cargo fmt --all --check` [0],
+`cargo clippy --workspace --all-targets -- -D warnings` [0], `cargo test
+--workspace` [0; 213 and 2 passed], `cargo build --workspace --all-targets` [0],
+`node ci/side-panel/bridge_check.mjs` [0], `cargo xtask bundle-mac` [0];
+`ci/side-panel/phase5.py` twice [1 both; 63 PASS, 6 FAIL]; the regression modes
+`spike`, `pump`, `reload`, `zombie`, `stop`, `idle`, `broken` [0 each].
+
+Not fixed, and the owner's to decide: a page's first calls are answered from the
+published strip before its own tab is in it (the publish waits up to 2 s for
+the table); a restored extension page's calls are dropped with no reply when its
+extension is not yet served; the restore launch logs `Failed to create API on
+Chrome object`; the restore step waits for a discarded tab that the restore did
+not produce. Details: `docs/bridge-protocol.md`, "The scripted run (phase5.py)".
 
 ## Status and handoff (2026-11-18, review cycle 6 of Phase 1)
 

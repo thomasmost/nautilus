@@ -192,11 +192,20 @@ reach for its tab strip; the browser process dies. Seen on CEF
 record is the call, then the process is gone. CEF's maintainer has
 said general tab API support for Alloy style is not planned. No
 upstream issue found.
-**Workaround (planned, the extension bridge):** a script ahead of each
-extension's service worker replaces `chrome.tabs`, `tabGroups`,
-`windows` and `sidePanel` and answers from Nautilus's own model, so
-these calls never reach Chromium (Phases 5 and 7 of the side-panel
-plan). Until then an extension that calls either crashes Nautilus.
+**Seen from an extension page (2026-11-18, macOS):** an
+extension page opened as a tab gets its own Alloy tab id from
+`chrome.tabs.getCurrent()`, and `chrome.tabs.group` on that id crashes the
+browser process inside Chromium, after the page's other native calls return.
+An id no tab has gets `No tab with id`, and a page with no script does not
+crash. The crash is there with the bridge's code never called.
+**Workaround:** a script ahead of each extension's service worker, and the
+namespaces of each extension page, replace `chrome.tabs`, `tabGroups`,
+`windows` and `sidePanel` and answer from Nautilus's own model, so these
+calls never reach Chromium. An extension page's namespaces are replaced at
+the first change to its document, before its first script runs
+(`bridge/js/page_defer.js`). The engine refuses `tabs.group` and `ungroup`
+for a bridged caller. Until a page is bridged an extension that calls either
+crashes Nautilus.
 **Blocks:** tab groups for extensions, unless bridged.
 
 ### C12: the window and tab-strip APIs do not see Alloy-style tabs; `tabs.create` opens a Chromium window

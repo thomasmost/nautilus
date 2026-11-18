@@ -235,10 +235,12 @@ belongs to one running Nautilus at a time.
   move, id-addressed calls, the failed-closed methods, the events, an
   extension page opened as a tab, `windows.create`) and the `restore` suite
   (a deferred tab's first show). The owner's own Nautilus may run beside it:
-  its windows are not counted. **Status:** on 2026-11-18 both passes stopped at
-  the extension page's tab, where the browser process trapped and the page had
-  no bridge; the checks before that step pass. The run is kept as a record of
-  that defect, not as a pass (`docs/bridge-protocol.md`, "Phase 5 scripted run").
+  its windows are not counted. **Status:** on 2026-11-18, after the page's
+  namespaces were installed at its first document change, the browser no longer
+  traps and the extension page is bridged. Both passes exit 1 with 63 checks
+  passing and 6 failing: the page's own tab is not yet in the strip for its
+  first calls, and the restore suite finds no deferred tab. Not a pass; the
+  failures are described in `docs/bridge-protocol.md`, "The scripted run (phase5.py)".
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
   browser read commands from the named directory: `load` an unpacked
   extension, `click` an action, send a raw DevTools message on the

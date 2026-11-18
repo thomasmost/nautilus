@@ -118,8 +118,8 @@ worker alive. The bridge wraps `chrome.runtime.onConnect`'s
 `addListener`, `removeListener`, `hasListener` and `hasListeners` so that
 the extension's own listeners never receive this port, and `hasListener`
 and `hasListeners` do not count the bridge's own listener. The wrapper is
-in the worker only: extension pages have no bridge in protocol 1 (see the
-limits below).
+in the worker only; an extension page has its own transport and namespaces
+(see the limits below and "The scripted run (phase5.py)").
 
 | Direction | Message | Meaning |
 |-----------|---------|---------|
@@ -452,9 +452,11 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   protocol 1 history. `windowId` and `index` are the strip's, not Chromium's.
 - Only the methods in the table above are answered; everything else is
   refused, never passed to Chromium.
-- Extension pages get the bridge from Phase 5 on, when their context is
-  created (`bridge/pages.rs`): an extension's popup, its options page and
-  any page shown as a tab. The relay page and the helper extension's pages
+- Extension pages get the bridge (`bridge/pages.rs`): an
+  extension's popup, its options page and any page shown as a tab. The
+  transport goes in when the page's context is created; the namespaces go in
+  at the first change to the page's document, before its first script runs
+  (`js/page_defer.js`; "The scripted run (phase5.py)" has the measurements). The relay page and the helper extension's pages
   get none. A page's calls go up through its own lane (the process message
   under "Messages Phase 5 adds"); an event reaches the pages that have
   called, at most once, and an event for a page that is gone is dropped.
@@ -588,7 +590,7 @@ Adaptations carried by later tasks:
 Not determined at reconciliation:
 
 - Whether CEF answers `Target.getTargetInfo` inside the `execute_dev_tools_method` call (the basis of the reservation in B8).
-- Whether `ext/phase5.js` is inert when no suite is listening (B15): settled by Task 13, see "Phase 5 scripted run" below. Its results are the same as before, with one change the runs showed: its listeners let a delivered event start a stopped worker.
+- Whether `ext/phase5.js` is inert when no suite is listening (B15): settled by the scripted run, see "The scripted run (phase5.py)" below. Its results are the same as before, with one change the runs showed: its listeners let a delivered event start a stopped worker.
 - Whether the Phase 5 code compiles against the bridge: settled by the compiler in Tasks 9 to 12, not by reading.
 
 ## Messages Phase 5 adds
@@ -665,10 +667,14 @@ message `nautilus-bridge-call` with one string argument
 `self.__nautilusBridgeDeliver("<json>")` in the frame with `{"id", "ok"}`,
 `{"id", "error"}` or `{"event", "args"}`. The browser process takes the
 extension from the calling frame's own address, never from the message,
-and drops a call from a frame that is not a bridged extension's page.
+and drops a call from a frame that is not a bridged extension's page. A call
+from a bridged extension's page that the engine has not yet published its tab
+for is answered from the published strip, as a worker's call is; and a call
+dropped this way gets no reply, so the page's promise does not settle (the
+restore launch of the scripted run showed it).
 
 
-## Phase 5 scripted run (Task 13)
+## The scripted run (phase5.py)
 
 What the run established, on the macOS bundle built from this tree (2026-11-18).
 Each figure is from the kept files under `evidence/phase-5/` (not committed);
@@ -705,8 +711,9 @@ Two things the runs showed, and what was done:
   quiet window must follow a delivery the engine sent (`driver.py`
   `started_by_delivery`, tested first). The stop run on the final tree had such
   a delivery in its window (`INFO deliveries sent in the 90 s quiet window:
-  ['windows.onFocusChanged']`). Owner's question: an idle worker that listens
-  for events is started by each delivered event; is that what I15 means?
+  ['windows.onFocusChanged']`). Accepted by the owner on 2026-11-18 for now, to
+  be revisited: an idle worker that listens for events is started by each
+  delivered event (the stop check's `started_by_delivery` rule).
 - **A query before the first strip is published answers an empty list.** The
   worker's first `tabs.query` came while the first strip was held for the
   table (`task13-regress-stop2-logs/run-1.log` line 69: "(3 waiting for the
@@ -714,41 +721,90 @@ Two things the runs showed, and what was done:
   (`task13-regress-stop2-logs/results.jsonl` line 4). The engine answers from
   the published snapshot (the plan's wording), and before the first publish
   that snapshot is empty. The test worker now waits until both tabs are listed
-  (`sw.js` `listedTabs`, commit `3fc4ef2`). Not changed in the engine: a query
-  that waits for the first publish changes the query contract, so it is the
-  owner's decision.
+  (`sw.js` `listedTabs`, commit `3fc4ef2`). Accepted by the owner on 2026-11-18
+  for now, to be revisited: the engine is not changed, so a query that waits
+  for the first publish is not built.
 
-**The scripted run (`ci/side-panel/phase5.py`) stops on a defect.** Two passes
-on the committed tree, both the same: exit status 1, 48 checks passed, 15 failed
-(`task13-p5-run1.out`, `task13-p5-run2.out`; logs in `task13-p5-run1-logs/`,
-`task13-p5-run2-logs/`). Every step through `remove` reports `ok`; the step
-`page` (an extension page opened as a tab, by `chrome.tabs.create` of
-`chrome-extension://<id>/p5page.html`) never reports, and the browser process
-dies:
+**The scripted run (`ci/side-panel/phase5.py`) and the page's install.** Before
+the install was deferred, the run stopped at an extension page opened as a tab:
+the page was not bridged, and the browser process trapped. What was measured
+(evidence under `evidence/phase-5/`, not committed):
 
-- The page's own bridge logs `nautilus-bridge: no transport or no chrome in
-  this context (:56)` (`task13-p5-run2-logs/main.log` line 300; `core.js`
-  line 16 is the message). Either `chrome` or `__bridgeCall`/`__bridgeOnEvent`
-  is missing when `core.js` runs, so the page is not bridged. The install runs
-  in the render process's `on_context_created` (`store.rs` line 203,
-  `pages::install`), and the plan assumed Chromium's extension bindings exist
-  by then. The run says otherwise. Which of the two is missing is not
-  determined; `core.js` fails closed, as designed.
-- The page's script never reports (`page` and `an extension page shown as a
-  tab reported` fail), so the page's `native` and `current` checks did not run.
-- The browser's log stops at the page's `load started` (`task13-p5-run2-logs/main.log`
-  line 299). The browser then traps 1 s, 6 s and 16 s after that line in the
-  three crashing launches (reports at 20:12:56, 20:12:06 and 20:01:58 UTC):
-  `EXC_BREAKPOINT` (SIGTRAP) on `CrBrowserMain` inside `Engine::spin`
-  (crash reports `task13-p5-Nautilus-2026-11-18-151206.txt` and
-  `task13-p5-Nautilus-2026-11-18-151256.txt`; the first pass's report is
-  `Nautilus-2026-11-18-150158.ips`). The frames above `spin` are Chromium's,
-  and Chromium's fatal message did not reach the log (`enable-logging=stderr`
-  was tried in a diagnostic pass: nothing). The cause is not localised.
-- The later checks fail as a consequence: the events and `windows.create` steps
-  never run, and the `restore` launch reports no step at all.
+- **The page's `chrome` appears after its context is created.** `pages::install`
+  ran in the render process's `on_context_created`, and there `chrome` was
+  `undefined`: before the transport, `chrome=undefined` and
+  `__nautilusBridgeSend` a function; after the page's script was evaluated,
+  `chrome=undefined` and `__bridgeCall` a function. The page's own first script
+  saw `chrome` as an object (`task13b-e4b-probe-logs/main.log` lines 292 and
+  294; `task13b-e1-probe-logs/main.log` line 298). `core.js` then failed closed
+  with `nautilus-bridge: no transport or no chrome in this context (:56)`, so no
+  namespace was replaced and the page kept Chromium's own APIs. The order is
+  Chromium's: its extension bindings are created after CEF's callback returns.
+  The Chromium call site was not identified.
+- **The deferred install.** The transport still goes in at context creation. The
+  namespaces run once, from a `MutationObserver` on the document that is
+  registered at creation and disconnects at its first delivery (`js/page_defer.js`,
+  `pages::deferred_namespaces`). The parser delivers the first change before it
+  runs the page's first script, and by then `chrome` exists. Measured on the
+  bundle with console probes (`task13c-v1-head-logs` to `task13c-v5-inline-logs`):
+  the callback runs before a classic script in `<head>` (`task13c-v1-head-logs/main.log`
+  line 320, then the script's line 323, `cb=ran chrome=object`), before a script
+  that is the first element (`task13c-v2-first-logs/main.log`), before a module
+  script (`task13c-v3-module-logs/main.log` line 307), and in a page with no
+  script (`task13c-v4-noscript-logs/main.log` line 287). An inline script is
+  refused by the extension's content security policy
+  (`task13c-v5-inline-logs/main.log` lines 296 and 297), so a page's inline code
+  never runs. If the document is absent at creation, one error is logged and
+  nothing is installed. If `chrome` is absent at the change, `core.js` logs its
+  message once.
+- **The trap is Chromium's native `tabs.group`, reached only from an unbridged
+  page.** `chrome.tabs.getCurrent()` in an unbridged extension page returns the
+  page's Alloy tab id, and `chrome.tabs.group` on that id traps the browser
+  process inside Chromium. The last step marker before the trap is "group call"
+  (`task13b-e2-steps-logs/main.log`); an unknown id returns `No tab with id`
+  (`task13b-e3-group-logs/main.log`). The trap also happens with
+  `pages::install` never called (`task13b-e6-noinstall-logs`, exit -5), and does
+  not happen for a page with no script (`task13b-e5-plain-logs`), so it is not
+  caused by the bridge's code. A bridged page cannot make the call: the engine
+  refuses `tabs.group` and `ungroup` for a bridged caller (`bridge/router.rs`).
+  Upstream entry C11 in `docs/upstream-issues.md` records it.
+- **The run after the deferred install.** Two passes on the commit that makes
+  the change, both the same: exit status 1, 63 checks passed, 6 failed
+  (`task13c-final-p5-run1.out`, `task13c-final-p5-run2.out`; logs in
+  `task13c-final-p5-run1-logs/`, `task13c-final-p5-run2-logs/`). The browser does
+  not trap and exits cleanly in both; the page is bridged
+  (`installed: tabs, windows, runtime.onMessage`). The six failures:
+  - `the page is bridged before its scripts run`, `AC3.1 a page's current window
+    is the one showing it`, and `AC3.5 a page's tabs.group rejects too` (the
+    last reads `None`, since its step never ran). The page's `tabs.getCurrent()`
+    returned no tab (`Cannot read properties of undefined (reading 'id')`), so
+    its `tabs.group` was not called. The page's first calls are asked as
+    `(Page, View(TabId(5)))` (`task13c-final-p5-run1-logs/main.log` line 295),
+    and the engine answers from the published strip. That strip holds the
+    page's own tab only once the table names its Chromium id, or after the
+    2 s publish wait (`PUBLISH_WAIT`, `bridge/state.rs`); the page's calls come
+    during its load, before that. This is the race the worker's queries already
+    have (below), and it now reaches a page's own answers. Open: a call before
+    its tab is published, and whether it should wait, is the owner's decision.
+  - `sender.tab carries the strip's fields`: the page's `runtime.sendMessage`
+    reaches the worker in the same window, so `sender.tab` has the page's id but
+    `windowId: -1` and `index: -1`. Same cause.
+  - `restore-list` and `restore-show` never report. The restore launch restored
+    three live tabs and none was discarded, so the worker's wait for a discarded
+    tab ran its 40 s, and the launch ended at its 45 s limit
+    (`task13c-final-p5-run1-logs/restore.log` line 100). Whether the restore
+    produces a discarded tab here is not established. The restored extension
+    page loaded before its extension was served, and its first calls were
+    dropped without a reply (`restore.log` line 18). A dropped call never
+    settles, so the page's promise waits forever. Chromium also logged
+    `Failed to create API on Chrome object` twice (`restore.log` lines 23 and 26);
+    the main launch logged none. Both are open.
+- **The regression modes** on the same commit, each judged by its exit status
+  (`task13c-mode-*.out.status`): `spike` 0 (54 PASS), `pump` 0 (7 PASS), `reload`
+  0 (7 PASS), `zombie` 0 (21 PASS), `stop` 0 (17 PASS), `idle` 0 (9 PASS), and
+  `broken` 0 (14 PASS), none with a FAIL line.
 
-Passing checks before the stop (both passes): every tab listed in strip order
+Passing checks (before the deferred install and after it): every tab listed in strip order
 with `windowId`, `index`, `active`, `groupId`; `{active, currentWindow}` is the
 window's active tab; `windows.getAll`, `getCurrent`, `getLastFocused`;
 `tabs.create` resolves with the tab that exists afterwards; `update({active})`
@@ -757,7 +813,7 @@ activates it; `move` puts it first; `scripting.executeScript`,
 `chrome.debugger` (`Runtime.evaluate`, `Page.captureScreenshot`,
 `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`) on an id `tabs.query`
 returned; `captureVisibleTab` answers a JPEG data URL; `tabs.group` and
-`tabs.discard` answer as the plan says; `tabs.remove` of an unknown id and
+`tabs.discard` answer as the protocol states; `tabs.remove` of an unknown id and
 `chrome.tabs.get` with a callback reject in Chromium's words; `duplicate` and
 `remove`; `remove` closes the tab; the relay page answers `bridge: undefined`
 (`bridge: relay <id> answers the relay page: …`, `task13-p5-run2-logs/main.log`);
