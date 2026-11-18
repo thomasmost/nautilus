@@ -772,6 +772,26 @@ def broken_relay(ext):
           not kept, kept[:2])
 
 
+SENT = re.compile(r'event (\S+) \(delivery \d+\) sent')
+
+
+def started_by_delivery(quiet):
+    """(I15, since Phase 5) For the lines a stopped worker's quiet window logged:
+    returns (every restart is explained, every identity ask is explained). A
+    restart or an ask is explained only when a delivery the engine sent (an
+    event the worker listens for, or a click) comes before it in the window.
+    The plan's emit contract starts a stopped worker for a delivery and for
+    nothing else, so with no delivery in the window neither may happen."""
+    first_sent = next((i for i, line in enumerate(quiet) if SENT.search(line)), None)
+
+    def explained(i):
+        return first_sent is not None and first_sent < i
+
+    restarts = [i for i, line in enumerate(quiet) if 'runs a new worker instance' in line]
+    asks = [i for i, line in enumerate(quiet) if 'asks its relay which worker it reaches' in line]
+    return all(explained(i) for i in restarts), all(explained(i) for i in asks)
+
+
 def stop_provocation(ext):
     """(I10, identity) The worker debugs the background tab; the driver stops
     it over DevTools (ServiceWorker.stopAllWorkers). The engine restarts the
@@ -804,17 +824,25 @@ def stop_provocation(ext):
     control.devtools('ServiceWorker.enable', secs=5)
     stopped = control.devtools('ServiceWorker.stopAllWorkers', secs=5)
     check('stop: ServiceWorker.stopAllWorkers was answered', stopped is not None, stopped)
-    # I15: the stopped worker is not started by the engine for 90 s: no request
-    # for its identity (`identify`) and no restart. Only then does a click (the
-    # engine's own delivery) start it again, and its check runs.
+    # I15: for 90 s the engine starts the stopped worker only for a delivery
+    # (Phase 5: the test worker listens for tab and window events, and a
+    # delivered event starts a stopped worker, the plan's emit contract). A
+    # restart or an identity request with no delivery before it fails. Only
+    # then does a click (the engine's own delivery) start it again, and its
+    # check runs.
     stop_at = time.time()
     while time.time() - stop_at < 90:
         time.sleep(3)
     quiet = engine_lines(1)[lines_at_stop:]
     asks = [line for line in quiet if 'asks its relay which worker it reaches' in line]
     restarts = [line for line in quiet if 'runs a new worker instance' in line]
-    check('stop (I15): the engine asked for no identity of the stopped worker in 90 s', not asks, asks[:2])
-    check('stop (I15): the stopped worker was not restarted in 90 s', not restarts, restarts[:2])
+    sent = [m.group(1) for m in (SENT.search(line) for line in quiet) if m]
+    print('INFO deliveries sent in the 90 s quiet window: %s' % (sent or 'none'), flush=True)
+    restart_explained, ask_explained = started_by_delivery(quiet)
+    check('stop (I15): the stopped worker was restarted only after a delivery the engine sent', restart_explained,
+          restarts[:2] or 'no delivery in the window')
+    check('stop (I15): the engine asked for no identity of the stopped worker without a delivery first', ask_explained,
+          asks[:2] or 'no delivery in the window')
     with lock:
         cfg['quietClick'] = True
     control.send({'click': ext_id})
