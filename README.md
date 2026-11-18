@@ -670,13 +670,12 @@ Upstream causes and the features they block are tracked in
   behaviour and not yet clicked by hand. Extension popups see Chromium's own tabs,
   not Nautilus's: `chrome.tabs.query({active: true})` finds the hidden
   management page, so a popup that acts on "the current tab" acts on
-  nothing. An action without a popup shows a button that does nothing yet
-  (the bridge that delivers its click reaches only the test extension so
-  far). Only the test control's `load` is bridged; a store-installed or
-  "Load unpacked…" extension has no bridge yet, and an extension's action
-  click reaches its worker only through the bridge. A tab an extension is
-  debugging is kept painted, for an extension the bridge reaches (in this
-  build, the scripted test extension only); a background tab nothing
+  nothing. An action without a popup sends its click to the extension's worker
+  through the bridge. Every loaded extension's worker is bridged (store
+  installs, "Load unpacked…" and the test control alike); an extension's
+  pages (popup, options page) are not bridged yet, so the `chrome.tabs`
+  limit described above stands until the page lane lands. A tab an extension is
+  debugging is kept painted, for any extension whose worker is bridged; a background tab nothing
   reported as debugged is hidden, so DevTools ("Inspect") on a background
   tab is slow until it is shown. A debugged tab is hidden again when its
   extension is reloaded and the browser sees its session end (measured
@@ -686,9 +685,9 @@ Upstream causes and the features they block are tracked in
   extension's clicks are refused until the extension changes, and its
   debuggers are kept (the browser forgets a debugger only on the worker's
   own word, or when the extension is off or its tab closes). A debugger
-  called from an extension page (popup, options, side panel), and an
-  unbridged extension's debugger, are not reported until Phase 5 (see
-  `docs/bridge-protocol.md`, "Limits in protocol 1"). A symlink in an
+  called from an extension page (popup, options, side panel) is not reported
+  until the page lane lands (see `docs/bridge-protocol.md`, "Limits in
+  protocol 1"). A symlink in an
   unpacked extension is not copied: it is skipped with a warning that
   names it, and a worker entry that is a link or missing fails the load.
   Dot-files and dot-directories (`.git`, `.DS_Store`) are not copied
