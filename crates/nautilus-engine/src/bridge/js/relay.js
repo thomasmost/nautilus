@@ -67,6 +67,12 @@
     return port;
   }
 
+  // Whether this page's extension context is still alive: after a reload its
+  // chrome.runtime.id is undefined (measured: review cycle 4 zombie runs).
+  function contextAlive() {
+    try { return !!(chrome.runtime && chrome.runtime.id); } catch (e) { return false; }
+  }
+
   window.nautilusRelay = {
     // Resolves with the worker's next requests: [{call: {id, method, args}}].
     next: function () {
@@ -78,6 +84,10 @@
     // when the worker does not say within IDENTIFY_TIMEOUT_MS.
     identify: function () {
       return new Promise(function (resolve, reject) {
+        // A reloaded extension leaves this page alive with its context gone
+        // (a zombie), and its port gets no event: a hello cached from the old
+        // worker says nothing about the worker now. Such a page cannot answer.
+        if (!contextAlive()) { reject(new Error('the extension context is gone')); return; }
         if (known) { resolve(known); return; }
         var timer = setTimeout(function () {
           identifying = identifying.filter(function (w) { return w !== done; });
