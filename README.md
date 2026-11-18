@@ -215,9 +215,14 @@ belongs to one running Nautilus at a time.
   `chrome.tabs.query` and the ids it returns, and that no extension call
   takes a second with the window unfocused. `pump` runs the last part
   alone. `reload` (I10) makes the worker attach a debugger to the background
-  tab and reload the extension; `stop` stops the worker over DevTools while
-  it holds that debugger; `broken` (I11) replaces the stored relay page with
-  one that has no relay and closes the relay. Judge each by its exit status,
+  tab and reload the extension; `zombie` does the same with the extension
+  list held during the reload, so that only the worker-target check can see
+  it; `stop` stops the worker over DevTools while it holds that debugger and
+  checks that nothing starts it for 90 s; `idle` holds a debugger until the
+  worker is idle (or stops it when it does not idle within 120 s) and checks
+  the same; `broken` (I11, I14) replaces the stored relay page with one that
+  has no relay, closes the relay, and checks that the give-up keeps a
+  debugged tab shown. Judge each by its exit status,
   not through a pipe: a browser launch that exits non-zero or by a signal,
   is still up 120 s after its `--exit-after`, or logs a panic, a fatal
   runtime error, a RefCell borrowed twice ("already borrowed" or "already
@@ -675,11 +680,12 @@ Upstream causes and the features they block are tracked in
   reported as debugged is hidden, so DevTools ("Inspect") on a background
   tab is slow until it is shown. A debugged tab is hidden again when its
   extension is reloaded and the browser sees its session end (measured
-  with the test extension, `run.sh reload`; a reload that leaves the
-  extension's page open without a signal is not yet shown to be handled),
-  and a
+  with the test extension, `run.sh reload`, and with the extension's list
+  held, `run.sh zombie`, where the worker target shows the reload); a
   bridge page that will not load is given up after five openings: its
-  extension's clicks are refused until the extension changes. A debugger
+  extension's clicks are refused until the extension changes, and its
+  debuggers are kept (the browser forgets a debugger only on the worker's
+  own word, or when the extension is off or its tab closes). A debugger
   called from an extension page (popup, options, side panel), and an
   unbridged extension's debugger, are not reported until Phase 5 (see
   `docs/bridge-protocol.md`, "Limits in protocol 1"). A symlink in an

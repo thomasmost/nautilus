@@ -142,14 +142,25 @@ has no releases yet; `Unreleased` holds everything on `main`.
   browser now asks the extension's worker which debugger sessions still
   answer after it starts again, and forgets the others. A worker that
   stops and starts again keeps its sessions, so its tab stays painted.
-  A reload that leaves the extension's page open without telling the
-  browser is not yet shown to be handled.
+  A reload that leaves the extension's page open with no event is seen by
+  the extension's worker target, which the browser reads about every two
+  seconds while an extension's page is open; the page is opened again and
+  the worker's own answer decides the tab.
+- A tab that an extension is debugging stays painted when the browser can
+  no longer reach the extension's worker. The browser forgets a debugger
+  only when the worker says its session has ended, when the extension is
+  off or gone, or when the tab closes. A check that times out or fails
+  closes the page and keeps the debugger, and so does giving up on a page.
+  Before, giving up hid a debugged tab.
+- The browser no longer starts an extension's stopped worker to ask it who
+  it is when the worker's port closes. An idle worker stays stopped, as
+  Chromium's idle stop intends, and a debugged tab stays painted.
 - A page of the extension bridge that does not load (an extension's relay
   page, or the helper's) is opened at most five times in a row, the gap
-  between openings doubling from a quarter second. Then the browser gives
-  up on it until its extension changes: it logs once that it has done so,
-  and the extension's clicks are refused. Before, such a page was reopened
-  four times a second for as long as the browser ran.
+  between its five openings 250, 500, 1000 and 2000 ms. Then the browser
+  gives up on it until its extension changes: it logs once that it has done
+  so, and the extension's clicks are refused. Before, such a page was
+  reopened four times a second for as long as the browser ran.
 - On Windows the scripted-run control directory (`NAUTILUS_TEST_CONTROL`,
   for test runs only) must lie inside the user's profile folder; any
   other directory, or one that cannot be found, is refused with a warning

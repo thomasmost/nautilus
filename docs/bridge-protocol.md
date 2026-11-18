@@ -5,11 +5,36 @@ and the bridge script in an extension's service worker. Nothing outside
 `nautilus-engine` sees it. Phases 5 to 7 add calls and events here and
 say so in this file; a change that an older `bridge.js` on disk would
 misread raises the number in the port's name. Review cycle 3 added the
-instance id, the hello, `gone`, `identify`, `alive` and the give-up
-(below); they change the message shapes without a new number, because
-`install` rewrites `bridge.js` and `relay.js` on every load, so a copy
-loaded by this build always carries them. A copy written by an earlier
-build is not handled (see the limits).
+instance id, the hello, `gone`, `identify` and the give-up (below); review
+cycle 4 changed the hello's shape (its sessions carry three states),
+removed `alive`, stopped `gone` from asking the worker anything, and added
+the worker-target check and the debugger rule (below). They change the
+message shapes without a new number, because `install` rewrites `bridge.js`
+and `relay.js` on every load, so a copy loaded by this build always carries
+them. A copy written by an earlier build is not handled (see the limits).
+
+## The debugger rule (review cycle 4)
+
+Uncertainty never forgets. A tab that an extension's `chrome.debugger`
+session debugs stays shown (a hidden tab answers `Input.dispatchMouseEvent`
+only after about 5 s: the H5 stall, measured). The engine forgets one of
+those debuggers only on positive evidence (`policy::Evidence`,
+`policy::forgets`):
+
+1. the worker's detach report (`debugger.detached`, or Chromium's `onDetach`
+   for the worker's own debugger), applied as it arrives;
+2. a hello from a live worker that names the tab with the state
+   `not-attached` (Chromium's "Debugger is not attached" answer, or the tab
+   does not exist) (`policy::tabs_to_forget`);
+3. the extension is off or gone in the manager's list (`sync`);
+4. the tab closed (`untrack`).
+
+A timeout, an unknown probe result, a failed evaluation, an unreachable
+worker, a relay that is closed, a relay that is given up on, or any other
+error only closes the relay (to be opened again under the opening schedule)
+and keeps the debuggers. The engine's two evidence-based forgets (a hello,
+and `sync`) both pass through `policy::forgets`; a detach report and a tab's
+close are applied as they arrive.
 
 ## The parties
 
@@ -47,8 +72,19 @@ engine only by resolving a promise the engine is waiting on.
 | `nautilusRelay.next()` | `[{call: …}, {hello: …}, {gone: true}, …]`, when the worker has asked something or its identity or port changed | The engine keeps exactly one pending per relay and calls it again after each answer. It stays pending for as long as the worker is quiet. |
 | `nautilusRelay.reply(id, {result} \| {error}, instance)` | `true` if posted | The answer to call `id` of worker instance `instance`. The bridge takes only the answers for its own instance. |
 | `nautilusRelay.deliver({id, event, tabId})` | `{ok, error?, attempts, received}` | Hand an event to the worker, starting it if stopped. |
-| `nautilusRelay.identify()` | `{instance, attached}`, the worker's hello | Which worker instance the relay reaches. It connects, so a stopped worker starts. Rejects when no hello comes within 5 s. |
-| `nautilusRelay.alive()` | `true`; rejects when the page's extension context is gone | Checked every 2 s for a relay that holds debuggers. A reloaded extension leaves its pages open; their API calls then fail. |
+| `nautilusRelay.identify()` | `{instance, sessions}`, the worker's hello | Which worker instance the relay reaches, and the state of its session on each tab. It connects, so a stopped worker starts: the engine asks only when a relay has just passed its probe and an extension holds a debugger or a queued debugger report needs it (`Bridge::needs_identity`), never on a `gone` (I15). Rejects when no hello comes within 5 s, and then the relay is closed and opened again, its debuggers kept. |
+
+`alive()` was removed in review cycle 4. The engine asks for a table refresh
+every 2 s while a relay is open (`REFRESH_INTERVAL`), and a worker whose
+DevTools target changed is found that way (`policy::worker_target`: the
+relay is closed and opened again). The guess that `alive()` relied on
+(`chrome.runtime.id` and `getManifest` fail in a reloaded extension's page)
+was measured in the zombie runs (`review4-zombie-run1.out`, the INFO line
+`relay_eval`): in the zombie page `chrome.runtime.id` is `undefined` and
+`chrome.runtime.getManifest()` throws `Extension context invalidated.`
+(`review4-zombie-run1.out`, `review4-zombie-run2.out`, `review4-zombie-run3.out`;
+all three the same). So the guess "fails" was half right: the id does not
+throw, it is undefined; `getManifest` throws. Nothing depends on it now.
 
 The page's first evaluation after it loads is a probe:
 `typeof nautilusRelay === 'object' || typeof nautilusHelper === 'object'`.
@@ -76,7 +112,7 @@ limits below).
 
 | Direction | Message | Meaning |
 |-----------|---------|---------|
-| bridge → relay | `{hello: {instance, attached}}` | Sent first on every port, once the worker's debugger sessions are known. `instance` is this worker start's id; `attached` lists the Chromium tab ids on which this extension's own debugger session still answers (`null` when Chromium did not say). A call waits for the hello, so the engine knows the instance before any call. |
+| bridge → relay | `{hello: {instance, sessions}}` | Sent first on every port, once the worker's debugger sessions are known. `instance` is this worker start's id. `sessions` lists, for each Chromium tab the target list names (`chrome.debugger.getTargets`), the state of this extension's own debugger session there: `{tab, state}` with `state` `attached` (the session answers), `not-attached` (Chromium said so: "Debugger is not attached", or "No tab with id"), or `unknown` (a timeout or any other error). A tab the hello does not name has no evidence. A call waits for the hello, for at most about 2 s (`HELLO_TIMEOUT_MS`), so the engine knows the instance before any call. |
 | bridge → relay | `{call: {id, method, args, instance}}` | A bridged API call; `id` counts up per worker start. |
 | relay → bridge | `{reply: {id, instance, result?, error?}}` | Its answer. An instance other than the bridge's is ignored. Unanswered after 10 s, the bridge rejects. |
 | relay → bridge | `{deliver: {id, event, tabId}}` | An event to dispatch. `id` is the engine's, unique per launch. |
@@ -88,11 +124,17 @@ a `call` as it came, a `hello` as `{hello}`, and the port's end as
 `{gone: true}` (the worker stopped, or the extension was reloaded; the
 relay learns of it only if the port reports it).
 
-`attached` is decided by asking, not by `chrome.debugger.getTargets()`
+A session's state is decided by asking, not by `chrome.debugger.getTargets()`
 alone: `getTargets` marks a tab attached when any client is, the engine's
-own DevTools probe included, so each tab it marks is asked with
-`sendCommand` (`Runtime.evaluate` of `1`), and only a session this
-extension opened answers. Measured in `run.sh stop` (the session is open,
+own DevTools probe included. So each tab the list names is asked with
+`sendCommand` (`Runtime.evaluate` of `1`), and only a session this extension
+opened answers. Each probe is raced against 1 s (`PROBE_TIMEOUT_MS`) and the
+whole hello against 2 s; a probe that has not answered is `unknown`, which
+keeps the debugger. The probe's `Runtime.evaluate` is a trivial expression
+with no side effect; whether it answers on a page paused by `Debugger.pause`
+or on a hidden tab was not verified in this cycle (no run paused a page),
+and the timeout makes that harmless (the state is `unknown`, the debugger is
+kept). Measured in `run.sh stop` (the session is open,
 `ServiceWorker.stopAllWorkers` stops the worker, the engine restarts it,
 the hello lists the tab): the sessions survive the stop. Measured in
 `run.sh reload` (`chrome.runtime.reload()`): the new worker's
@@ -137,23 +179,85 @@ Each worker start has an instance id (`bridge.js`, `INSTANCE`). The
 engine learns it from the hello, and every call and debugger report
 carries it. The engine's rules (`policy.rs`, `relay.rs` `worker_hello`):
 
-- **Same instance:** nothing is dropped. The tabs the engine shows for
-  the extension's debuggers are kept where the hello's `attached` list
-  still has them (or where it does not say).
-- **New instance:** the tab lists and debugger reports the old instance
-  made and has not had answered are dropped without an answer, since their
-  call ids belong to that instance. Clicks are kept (a delivery's id is
-  unique). The tabs the extension debugs are forgotten where its sessions
-  no longer answer, and each one with no debugger left is hidden again.
-- **Unreached** (the relay cannot reach the worker: `identify` or `alive`
-  failed): the extension's queued tab lists and debugger reports are
-  dropped, and every tab it debugs is forgotten and hidden again. The
-  relay is closed, so the next turn opens a fresh one.
+- **Any instance** (the same or another): the hello's `not-attached` tabs
+  are forgotten (the rule above); its `attached` and `unknown` tabs, and the
+  tabs it does not name, keep their debuggers. A tab forgotten this way is
+  hidden again when no debugger is left on it.
+- **Same instance:** nothing else is dropped.
+- **New instance:** the tab lists the old instance made and has not had
+  answered are dropped without an answer, since their call ids belong to
+  that instance. A debugger report the old instance made and has not had
+  answered is kept and applied when the table resolves its tab (its session
+  survives a stop; measured), and its answer is not sent (`policy::reply_due`).
+  Clicks are kept (a delivery's id is unique).
+- **Unreached** (the relay cannot reach the worker: `identify` failed, or
+  its hello has no instance): nothing is forgotten. The relay is closed,
+  so the next turn opens a fresh one, and the opening counts as a failed one
+  for the schedule (`Opener::unreached`). A silent worker says nothing about
+  its sessions.
+- **A session for a tab the table cannot name yet** (the hello names a Chromium
+  tab id no table row has): kept pending, and applied by the first table join
+  that names it (`Bridge::apply_pending`). A debugger attach by the extension
+  drops that extension's pending sessions (a dropped one only keeps a debugger).
 
-A worker is asked (`identify`) when its relay's port reports `gone` or
-its relay opens again, and only when the extension holds a debugger or a
-debugger report is queued: a stopped worker is not started just to be
-asked. A relay that holds debuggers is checked with `alive` every 2 s.
+A worker is asked (`identify`) only when a relay has just passed its probe
+and the extension holds a debugger or a debugger report is queued. Its port
+reporting `gone` (an idle stop, or a reload) asks nothing: the engine asking
+would start the stopped worker, which defeats MV3's idle stop (I15). The new
+instance is learned from the hello of the worker's own next port (the
+relay's connect, or the worker's call), which arrives unasked. A changed
+target does not name the instance; it only decides the relay (below).
+
+**The worker target, a reload, and a restart.** The engine asks the helper
+for the target list every 2 s while any relay is open (`REFRESH_INTERVAL`,
+`refresh_due`), so a reload is seen within a bounded time with no tab
+activity. The helper lists an extension's service worker with type `worker`
+(`chrome.debugger.getTargets`: a fact measured in the probe; `service_worker`
+is accepted too), with the extension's URL (`policy::worker_target`,
+`table::worker_target_of`). A target other than the recorded one is a change
+(`WorkerTarget::Changed`, logged "worker target changed"). A change does not
+close the relay by itself. `policy::after_change` decides from one fact: did a
+new worker instance say hello through this relay since the last refresh?
+
+- Yes: the relay reaches the live worker, and it is kept
+  (`check_worker_targets`: "already said hello through its relay", or "said
+  hello through its relay: the relay is kept").
+- No, for `CHANGE_GRACE_REFRESHES` (2) refreshes: the relay is a zombie (a
+  reloaded extension's page cannot reach the new worker). It is closed, the
+  next turn opens a fresh one, and the fresh relay's probe and hello decide the
+  debuggers (`close_relay`; logged "is a zombie").
+
+**A restart after a stop changes the target, and the relay is kept.** Measured:
+`ServiceWorker.stopAllWorkers`, then a delivery that starts the worker again,
+comes back under a NEW target id (`review4-stop-run1.out`,
+`review4-spike-run2.out`: the change is logged and the relay is kept, the
+hello having come through it). So every restart produces a change. It does
+not produce a reopen, because the restarted instance's hello comes through the
+relay that the delivery connected. Without a hello in the grace (a reload: the
+zombie), the relay is closed once. The whole cycle is bounded: a change
+starts no worker (it asks nothing; the relay that the hello reaches is already
+connected), an idle stop removes the target and is not a change
+(`WorkerTarget::Absent`, the recorded target is kept), and each change
+produces at most one relay close, after two refreshes without a hello. Not
+measured: a stop and restart repeated in a loop; the runs had one restart.
+
+**The delivery guarantee across a change.** A kept relay interrupts nothing:
+its calls and deliveries in flight on its port complete as before (the spike run 2's
+`tabs.query` and clicks after the restart, and the stop run's restart check). When a
+zombie relay is closed, what is pending on it is dropped: a delivery sent
+through it and not acknowledged is logged as unknown and is never retried
+(`after_delivery`: a failed evaluation is not retried, so it is at most once);
+a click queued but not yet sent waits for the new relay and is delivered once
+(`job_turn`); a tab list or debugger report of the old instance is dropped, or
+is applied and not answered (`job_kept`, `reply_due`), because its call ids
+belong to a worker that is gone. The pure parts are tested
+(`policy::after_change`, `job_kept`, `reply_due`, `after_delivery`).
+
+An earlier build of this code lost a `tabs.query` in flight on the relay that
+the restart closed (a spike run's "the browser stopped listening"; its output
+was overwritten by the rerun, so the failure is claimed in the session and not
+kept). The grace above is the fix: the relay is no longer closed by a change
+the restarted worker reaches.
 
 ## Calls (bridge to engine)
 
@@ -218,15 +322,24 @@ page is given up.
 
 A hidden page (a relay, or the helper) is opened by the engine's turn
 when it is wanted and not open (`Bridge::reopen`), never from a callback.
-Each opening is counted, and the count is cleared by the page's probe.
-The gap before the next opening is 250 ms after the first failed one,
-doubling to a cap of 8 s (`policy::next_opening`). After five openings
-without a successful probe the engine gives up on that page:
+Each opening is counted (`Opener::failed`), and the count is cleared by the
+page's probe succeeding. A relay whose probe succeeded but whose worker
+could not be reached (`identify` failed) is counted too (`Opener::unreached`,
+cleared when a hello arrives). The schedule (`policy::next_opening`) counts
+the two together. The gap before the second opening is 250 ms, and each later
+gap doubles: 500, 1000 and 2000 ms before the fifth opening, which is the last
+(`policy::gap_after`, `policy::next_opening`; the openings fall at 0, 0.25,
+0.75, 1.75 and 3.75 s, and the sixth is never made). The gap is never below
+250 ms, not even after a success, so a page that passes its probe and then
+dies is not reopened on every turn (M19). After five failed openings in a row the engine gives up on
+that page:
 
 - it logs one warning that says so;
-- a relay's debuggers are forgotten (their tabs are shown again, since
-  the engine can no longer hear the worker), its queued work is dropped
-  with a log line, and its clicks are refused from then on;
+- a relay's debuggers are KEPT (not forgotten: the engine cannot hear the
+  worker, but its sessions may still be live, and a debugged hidden tab must
+  stay shown; they go by the list, by a tab's close, or by a hello; I14). Its
+  queued work is dropped with a log line, and its clicks are refused from
+  then on;
 - the helper's queued tab lists are answered with an error, and clicks
   are refused.
 
@@ -234,9 +347,11 @@ Nothing opens the page again until a sync sees its extension change (it
 came on, went off, or was reloaded: off and on in two lists). Measured:
 `run.sh broken` replaces the relay page in the throwaway profile and closes
 it; the engine opens it five times, logs the give-up once, opens nothing for
-12 s after it, and refuses a click (`review3-broken-after`). Before the change the
-same provocation opened the page 229 times in 60 s with no give-up
-(`review3-broken-before`).
+12 s after it, and refuses a click (`review3-final-broken`, the cycle 3
+build). Before that change the same provocation opened the page 229 times in
+60 s with no give-up (`review3-broken-before`). Cycle 4 adds a debugged tab:
+the worker attaches its debugger first, the give-up is logged with "its
+debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
 
 ## Limits in protocol 1
 
@@ -260,29 +375,39 @@ same provocation opened the page 229 times in 60 s with no give-up
   has run.
 - The loader for a classic worker loads the bridge in a `try`: if the
   bridge fails to load, the extension's own worker still runs, unbridged.
-- The session check is `sendCommand`, which runs `Runtime.evaluate` of `1`
-  in each tab Chromium marks attached, every time the worker's hello is
-  made (on a restart, or when the relay is asked). It is a trivial
-  evaluation the extension did not ask for. A tab the extension has no
-  session on is refused by Chromium, and the hello leaves it out.
-- A reload is judged from what the engine can see: the relay's port event
-  (`gone`), the `alive` check, and the list of extensions (`sync`). In the
-  measured runs the list showed the extension off during the reload and
-  `sync` forgot its debuggers, and the session was gone (`review3-final-reload-*`,
-  `review3-reload-after-attempt3` to `-attempt7`). The one case that is not
-  shown handled is a reload in which the list does not show the extension off
-  and the relay page stays open with no port event: the first attempt
-  before the fix (`review3-reload-before-attempt1`) and the build before the
-  `alive` check (`review3-reload-after-attempt2`, which failed) left the tab
-  painted with its session gone. The `alive` check was added for that case,
-  and the failure path it takes was run under a forced failure
-  (`review3-control-alive-forced-fail`); no run on the final build reached
-  the case, so whether `alive` fails on a real reload is not shown.
+- The session check is `sendCommand`, which runs `Runtime.evaluate` of `1` in
+  each tab the target list names, every time the worker's hello is made (on a
+  restart, or when the relay is asked). It is a trivial evaluation the
+  extension did not ask for. A tab with no session of the extension is refused
+  by Chromium at once ("not attached"); a tab whose probe does not answer within
+  1 s is `unknown`, and kept.
+- A reload is seen from three places: the list of extensions (`sync`), the
+  worker target (a changed DevTools target, within about 2 s, by the periodic
+  refresh), and the relay's port event (`gone`, which asks nothing). In the
+  cycle 3 runs the list showed the extension off during the reload and `sync`
+  forgot its debuggers (`review3-final-reload-*`, `review3-reload-after-attempt3`
+  to `-attempt7`). The case the list does not show (the relay page survives
+  with no port event and the list is not off) was the zombie of cycle 3
+  (`review3-reload-before-attempt1`, `review3-reload-after-attempt2`). Cycle 4
+  reaches it on purpose with the list held (`run.sh zombie`): the worker target
+  changes, the relay is opened again, and the new hello forgets the tab
+  (`review4-zombie-run1.out` to `-run3.out`; the path line "forgotten by
+  hello"). Not shown: a reload in which the worker's target id does not change
+  (every reload and restart in the kept runs changed it; no run had one that
+  did not, so the case is not exercised).
 - A copy written by an earlier build is not handled: its `bridge.js` sends
-  no hello or instance, and its `relay.js` has no `alive`. A copy is
-  rewritten on every load by this build, and the copies of a previous
-  engine are replaced the next time the extension is loaded.
-- A queued debugger report whose tab the table does not know, and whose
-  worker restarts before the table knows the tab, is dropped with a log
-  line (the worker's own call is not answered). Not provoked in a run: the
-  case is tested (`job_belongs`), not seen.
+  no hello or instance (cycle 3 and before) or its hello has the old shape
+  (`attached` instead of `sessions`, cycle 4), which the engine reads as no
+  hello. A copy is rewritten on every load by this build, and the copies of a
+  previous engine are replaced the next time the extension is loaded.
+- A queued debugger report whose tab the table does not know yet is kept and
+  applied when the table names the tab (M18), and its answer is not sent if its
+  worker instance is gone. Tested (`policy::job_kept`, `policy::reply_due`),
+  not seen in a run.
+- A hello's session for a tab the table cannot name yet is kept pending and
+  applied by the next join that names it (`Bridge::apply_pending`). Tested in
+  its parts; not seen in a run.
+- `chrome.debugger.getTargets` lists an extension's worker with type `worker`;
+  the engine takes the first target of that type (or `service_worker`) whose URL
+  is inside the extension. An extension with two such targets would be followed
+  by its first only.
