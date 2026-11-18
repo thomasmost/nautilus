@@ -472,3 +472,124 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   the engine takes the first target of that type (or `service_worker`) whose URL
   is inside the extension. An extension with two such targets would be followed
   by its first only.
+
+## Phase 5 reconciliation
+
+This section records how the Phase 5 plan (tabs and windows, the side
+panel) was reconciled with the bridge as Phase 1 built it, and which
+adaptations the later tasks carry out. On 2026-11-18 the owner decided
+the differences: everything Phase 1's reviews built is kept, and Phase
+5's intent is applied around it; an event bound for an extension that
+cannot be delivered is dropped, the way a click is.
+
+Rows 1 to 12, in the plan's order, with the code's real names:
+
+1. The worker's script: `bridge.js` `call(method, args)` posts `{call: {id, method, args, instance}}` (the instance was added by Phase 1's reviews); `run(delivery)` handled only `action.onClicked` and rejects any other event; the global is `self.__nautilusTransport`, frozen. Adaptation: Task 9 step 1a adds `__bridgeCall` and `__bridgeOnEvent`, hands non-click deliveries to the handlers; Task 11 step 1a makes the call's instance travel with the call (see row 2 and the list below).
+2. `Bridge::reply(extension, instance, call, answer)` (`relay.rs`), not `reply(extension, call, answer)`: the instance is a parameter. Adaptation: Task 11 step 1a. `CallIds` maps a Bridge-local `CallId` to `(extension, instance, worker call id)`; the trait's `reply` takes the triple out of the map and calls `Bridge::reply` with the instance, which keeps Phase 1's signature and `nautilusRelay.reply(id, answer, instance)`.
+3. `Bridge::worker_call(extension, item)` answered `tabs.query` with `Job::Query` and `table::query_rows`, routed `debugger.attached` and `debugger.detached` to `debugger_report`, and refused every other method. Adaptation: Task 11 step 1a keeps the debugger branch in front of the hub call (with the instance); every other method goes to `hub.call`; `Job::Query` and `query_rows` are deleted.
+4. `table::TabTable` in `Bridge`'s `Inner`, with `chromium(tab)` and `tab(chromium)`. The table is refreshed by the helper's answer (`Pending::Targets`), by a periodic refresh every 2 s while a relay is open, and by `reopen`, `click` and the queued jobs; "only when a job waits" was not accurate. Adaptation: Task 11 step 1a adds `Bridge::chromium_id`; `target_known` sets a flag that the next turn's `reopen` acts on (no CEF call from inside the observer); the `Pending::Targets` arm calls `hub.table_changed()` after `run_jobs`.
+5. As assumed: `DelegateState` has `last_focused` and `focused_browser` only, no tab-to-browser map. Adaptation: Task 11 step 2 adds `views`, `register_view`, `unregister_view` and `browser_of`.
+6. `Bridge::track(tab, browser, view)` stores a `TabRecord { browser, view, _probe }`, and `TabProbe` takes every DevTools method result of its browser. Adaptation: Task 11 step 1a keeps `track`'s signature and `TabRecord`; a shared cell holds the message id of the probe's `Target.getTargetInfo`, reserved before the CEF call as `reserve`/`settle` do, and `TabProbe` acts only on its own result.
+7. `install::rewrite_in_place(dir: &Path, skipped: &[PathBuf]) -> Result<Bridged, String>`: it takes the list of skipped links, which `entry_in_copy` needs. Adaptation: Task 10 keeps the two-argument signature; a directory that is already a marked copy is rewritten with an empty list. `BRIDGE_JS` is the constant in `install.rs`; Task 9 step 7 makes it `pub(crate)` and writes `worker_script()`.
+8. As assumed: `bridge.js` has the block headed `// ---- chrome.tabs.query, answered by the engine`, which defines `tabs.query` with `define`. Adaptation: Task 9 step 1a deletes it; the click path keeps Chromium's `tabs.get`, captured before the namespace is replaced.
+9. As assumed: no page-side bridge exists and extension pages receive the bridge's port (branch B). Adaptation: Task 12 steps 3 and 4 (branch B): pages get their own lane.
+10. The relay page's URL is built from `BRIDGE_DIR` in `Bridge::open_relay`; no constant named the whole path. Adaptation: Task 11 step 1a adds `relay::RELAY_PATH` (`/nautilus-bridge/relay.html`) and uses it in `open_relay`.
+11. As assumed: the harness is `ci/side-panel/` with `ext/manifest.json`, a classic worker `ext/background/sw.js` that begins `importScripts('lib.js')`, `driver.py`'s `Control` writing `cmd-N.json`, and `run.sh`; `{"load": dir}` goes to `ExtensionManager::load_bridged`. Adaptation: Task 13 step 1 uses the worker's real name, `background/sw.js`, and writes `importScripts('/phase5.js')` at its top.
+12. As assumed: `on_list` builds `Known { id, popup, bridged, enabled }` from `ManifestInfo { facts, icon }`, and the `Extension` literal already has `side_panel: false` and `commands`; `INFO.extensions.side_panels` is `false`. The osmena pin in `Cargo.toml` is `e111e50` (not `a2d3463` or `07323f9` as the plan names it). Adaptation: Task 2 adds only what the compiler reports missing; Tasks 2 and 14 move the pin.
+
+Adaptations carried by later tasks:
+
+- B1, Task 11 step 1a (`worker_call`): keep the `debugger.attached` and `debugger.detached` branch calling `debugger_report` with the instance, before the `hub.call` routing. Without it the debugged tab stays hidden and the debugger stalls.
+- B2, Task 11 step 1a (`CallIds`, `Bridge::reply`, the trait's `reply`): `CallIds` stores `(extension, instance, worker call id)`; `Bridge::reply` keeps Phase 1's four-argument signature; a new worker instance's hello drops that instance's entries (`policy::reply_due` remains the rule for answers).
+- B3, Task 11 step 1a: delete every `Job::Query` site and what only served queries (`Job::Query` in `Job`, `Job::extension`, `Job::kind`, `worker_hello`'s partition and its stale-query log, `fail_jobs`, `run`, `worker_call`), `table::query_rows` and its test, and `JobKind::Query` in `policy.rs` with the tests that only use it. Add the `Emit` arm to every exhaustive match that remains.
+- B4, Task 11 step 1a and `policy.rs`: a `JobKind::Emit` behaves as `JobKind::Click` in `failed_by_loss` and `overflow`, and `job_kept` does not keep it across an instance change. A tab or window event that cannot be delivered is dropped, logged, and not delivered later.
+- B5, Task 11 step 1a (`Pending::Emit`): the retry follows `policy::after_delivery`: a failed evaluation is not retried; a delivery the worker did not receive is retried once through `close_relay` in the callback and `queue(Job::Emit { attempt: 1 })`, with the relay reopened on the next turn. Do not call `open_relay` from a callback.
+- B6, Task 11 step 1a (`emit`): push the job with `queue`, so the bound of 256 and `trim` apply.
+- B7, Task 11 step 1a (`target_known`): set a flag; `reopen` on the next turn calls `refresh`. No CEF call from inside the observer.
+- B8, Task 11 step 1a (`track`, `TabProbe`): reserve the probe's message-id cell before the call, as `reserve` and `settle` do, so a result that arrives inside the call is accepted; the observer ignores any other result.
+- B9, Task 9 step 1a (`bridge.js`): capture Chromium's `tabs.get` before the namespace is replaced and use it on the click path; put the `if (delivery.event !== 'action.onClicked')` branch before the click branch and replace the final reject with it; wrap a handler call so a throwing handler cannot escape before `done` is posted.
+- B10, Task 9 step 7 (`install.rs`): `BRIDGE_JS` becomes `pub(crate)`, so that `worker_script()` can join it with the namespaces.
+- B12 and B13 and B18, Task 10 (`install.rs`): keep Phase 1's hardened copy (staging to `<name>.partial` and renaming into place; links skipped and recorded; `refuse_nested`; `entry_in_copy`; no copy left behind on failure) with all of its tests. Task 10 adds the marker and the copy without dot-files around it: the copy function returns the copy's path and the skipped list; `rewrite_in_place(dir, skipped)` keeps two arguments; a marked copy is rewritten with an empty list. The step 1 shim is not used to replace these tests.
+- B14, Task 13 step 3 (`phase5.py`): its launch fails a run on a non-zero or signal exit, on a launch still up past the grace, and on the log markers `run.sh` checks (`panicked at`, `fatal runtime error`, `already borrowed`, `already mutably borrowed`, `browser(s) still open at shutdown`).
+- B15, Task 13 step 1 (`ext/phase5.js`): before the Phase 5 run, show by running Phase 1's `run.sh` modes that `phase5.js` is inert when `phase5.py` is not listening.
+
+Not determined at reconciliation:
+
+- Whether CEF answers `Target.getTargetInfo` inside the `execute_dev_tools_method` call (the basis of the reservation in B8).
+- Whether `ext/phase5.js` is inert when no suite is listening (B15).
+- Whether the Phase 5 code compiles against the bridge: settled by the compiler in Tasks 9 to 12, not by reading.
+
+## Messages Phase 5 adds
+
+Protocol 1 (Phase 1) carries the calls and events below; Phase 5 adds
+the following, all through the same channel. The worker's calls now
+carry `instance` (`{call: {id, method, args, instance}}`), and the
+engine's reply carries the instance the call came from
+(`nautilusRelay.reply(id, answer, instance)`): a reply for another
+instance is ignored by the worker, so the engine answers each call
+with the instance that made it. A delivery of `Job::Emit` is at most
+once: the relay sends `{deliver: {id, event, args}}`, and an event the
+worker does not take is dropped, as a click is.
+
+The transport, as Phase 5 defines it (`bridge/transport.rs`):
+
+```rust
+pub(crate) type CallId = u64;
+
+pub(crate) enum Asker { Worker, View(TabId), Popup { over: TabId } }
+
+pub(crate) struct BridgeCall {
+    /// The lane's id for the call; the hub replaces it with its own and keeps
+    /// the lane's id (`Hub::routes`). For a worker call the lane's id is the
+    /// Bridge-local id from `CallIds` (Task 11, Step 1a).
+    pub id: CallId,
+    pub extension: String,
+    pub asker: Asker,
+    pub namespace: String,
+    pub method: String,
+    pub args: Vec<serde_json::Value>,
+}
+
+pub(crate) trait BridgeTransport {
+    /// Settle the promise of `call`: `Ok(value)` resolves it (JSON `null`
+    /// is `undefined`), `Err(message)` rejects it with that message.
+    fn reply(&self, call: CallId, result: Result<serde_json::Value, String>);
+    /// Run the listeners of `event` (for example "tabs.onCreated") in the
+    /// contexts of `extension` this transport serves, starting its worker
+    /// if it is stopped and delivering exactly once.
+    fn emit(&self, extension: &str, event: &str, args: &[serde_json::Value]);
+    /// Start `extension`'s worker if it is stopped; deliver nothing.
+    fn wake(&self, extension: &str);
+}
+```
+
+In the script, `__bridgeCall(namespace, method, args) → Promise`
+(rejecting with an `Error` whose message is the engine's) and
+`__bridgeOnEvent(handler)` with `handler(eventName, args)`.
+
+**The worker's call ids.** The `CallId` on this trait is the Bridge's
+own: `Bridge` maps it to `(extension, instance, worker call id)`
+(`CallIds`) and gives the hub that id in `BridgeCall.id`. A worker
+numbers its calls itself, so two workers can both have a call 7.
+
+**A forward** is an ordinary resolved value with one reserved key, so
+the transport needs no third kind of reply:
+`{"__forward": {"method": "get", "args": [123], "strip": {"123": {…seven fields…}}}}`.
+The script calls Chromium's `method` of the same namespace with `args`
+and lays `strip` over the tab objects in the result.
+
+Calls added to the protocol: the namespaces `tabs` and `windows` with
+the methods of the method tables (in the design: `tabs.query`,
+`tabs.get`, `tabs.create`, `tabs.update`, `tabs.remove`, and the rest
+of the `chrome.tabs` and `chrome.windows` surface the bridge answers,
+forwards, or refuses), `tabs.stripOf(id)` (the seven strip fields or
+`null`, used for `sender.tab`), and `bridge.listen(eventName)` (sent by
+the script on the first `addListener` of an event, so the engine fires
+only events someone listens to).
+
+For branch B (Task 12), extension pages have their own lane: a process
+message `nautilus-bridge-call` with one string argument
+`{"id", "ns", "method", "args"}`, answered by evaluating
+`self.__nautilusBridgeDeliver("<json>")` in the frame with `{"id", "ok"}`,
+`{"id", "error"}` or `{"event", "args"}`.
+
