@@ -26,6 +26,9 @@ mod snapshot;
 mod state;
 pub(crate) mod transport;
 
+mod call_ids;
+#[cfg(any(windows, target_os = "macos"))]
+mod hidden_page;
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod hub;
 #[cfg(any(windows, target_os = "macos"))]

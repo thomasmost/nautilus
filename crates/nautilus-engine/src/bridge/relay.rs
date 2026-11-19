@@ -1,11 +1,11 @@
-//! The CEF side of the bridge: hidden pages the engine evaluates
-//! scripts in (each bridged extension's relay page, and the helper
-//! extension's page), and the `Bridge` that owns them.
+//! The CEF side of the bridge: the `Bridge`, which owns the hidden pages
+//! the engine evaluates scripts in (`hidden_page`: each bridged
+//! extension's relay page, and the helper extension's page).
 //!
-//! A hidden page is a windowless browser nobody paints. The engine
-//! reaches it the way `ExtensionManager` reaches `chrome://extensions`:
-//! `Runtime.evaluate` through `execute_dev_tools_method`, the answer in
-//! `on_dev_tools_method_result`. No render-process code is involved.
+//! The engine reaches a hidden page the way `ExtensionManager` reaches
+//! `chrome://extensions`: `Runtime.evaluate` through DevTools
+//! (`devtools::evaluate`), the answer in `on_dev_tools_method_result`. No
+//! render-process code is involved.
 //!
 //! The decisions are in `policy` and `debugger` (pure); this file carries
 //! them out.
@@ -16,21 +16,16 @@ use std::rc::Rc;
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, BrowserSettings, CefString, Client, DevToolsMessageObserver, DialogHandler,
-    DisplayHandler, Frame, ImplBrowser, ImplBrowserHost, ImplClient, ImplDevToolsMessageObserver,
-    ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler,
-    ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity, Rect, Registration,
-    RenderHandler, RequestHandler, TerminationStatus, WindowInfo, WrapClient,
-    WrapDevToolsMessageObserver, WrapDisplayHandler, WrapLifeSpanHandler, WrapLoadHandler,
-    WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_dev_tools_message_observer,
-    wrap_display_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
-    wrap_request_handler,
+    Browser, DevToolsMessageObserver, ImplBrowser, ImplBrowserHost, ImplDevToolsMessageObserver,
+    Registration, WrapDevToolsMessageObserver, wrap_dev_tools_message_observer,
 };
 use osmena_core::TabId;
 use serde_json::{Value, json};
 
+use super::call_ids::CallIds;
 use super::debugger::{Change, Debuggers};
 use super::evaluation;
+use super::hidden_page::HiddenPage;
 use super::hub::Lane;
 use super::install::HELPER_ID;
 use super::policy::{
@@ -66,261 +61,6 @@ const MAX_JOBS: usize = 256;
 /// The script an evaluation of a hidden page checks first: a page whose
 /// script did not load answers `false` (or fails), and is closed.
 const PROBE: &str = "typeof nautilusRelay === 'object' || typeof nautilusHelper === 'object'";
-
-#[cfg(target_os = "macos")]
-fn no_window() -> cef::sys::cef_window_handle_t {
-    std::ptr::null_mut()
-}
-
-#[cfg(windows)]
-fn no_window() -> cef::sys::cef_window_handle_t {
-    cef::sys::HWND(std::ptr::null_mut())
-}
-
-/// A page in a windowless browser that is never shown.
-struct HiddenPage {
-    browser: Browser,
-    /// Tells this page from an earlier one under the same key: a callback
-    /// from a page that is gone must not change its successor.
-    generation: u64,
-    /// The DevTools observer stays registered while this lives.
-    _devtools: Option<Registration>,
-    /// Its main frame finished loading.
-    ready: Cell<bool>,
-}
-
-impl HiddenPage {
-    fn open(bridge: &Rc<Bridge>, key: &str, url: &str, generation: u64) -> Option<HiddenPage> {
-        let mut client = PageClient::new(
-            PageRender::new(),
-            PageLife::new(
-                bridge.delegate.clone(),
-                bridge.clone(),
-                key.to_string(),
-                generation,
-            ),
-            PageLoad::new(bridge.clone(), key.to_string(), generation),
-            PageDisplay::new(key.to_string()),
-            bridge.delegate.dialog_handler(),
-            PageRequest::new(bridge.clone(), key.to_string(), generation),
-        );
-        let window_info = WindowInfo::default().set_as_windowless(no_window());
-        let settings = BrowserSettings {
-            windowless_frame_rate: 1,
-            ..BrowserSettings::default()
-        };
-        let browser = cef::browser_host_create_browser_sync(
-            Some(&window_info),
-            Some(&mut client),
-            Some(&CefString::from(url)),
-            Some(&settings),
-            None,
-            None,
-        )?;
-        let mut observer = PageDevTools::new(bridge.clone(), key.to_string(), generation);
-        let devtools = browser
-            .host()
-            .and_then(|host| host.add_dev_tools_message_observer(Some(&mut observer)));
-        log::debug!("bridge: page {key} opening at {url}");
-        Some(HiddenPage {
-            browser,
-            generation,
-            _devtools: devtools,
-            ready: Cell::new(false),
-        })
-    }
-
-    /// Evaluate `expression` (a promise is awaited, the value returned
-    /// by value); the DevTools message id the answer will carry.
-    fn evaluate(browser: &Browser, expression: &str) -> Option<i32> {
-        // Id 0 asks CEF for the next id of this browser; a caller's
-        // own id may be raised, so the returned one is what counts.
-        crate::devtools::evaluate(&browser.host()?, 0, expression)
-    }
-
-    fn close(&self) {
-        if let Some(host) = self.browser.host() {
-            host.close_browser(1);
-        }
-    }
-}
-
-wrap_client! {
-    struct PageClient {
-        render: RenderHandler,
-        life: LifeSpanHandler,
-        load: LoadHandler,
-        display: DisplayHandler,
-        dialog: DialogHandler,
-        request: RequestHandler,
-    }
-
-    impl Client {
-        fn render_handler(&self) -> Option<RenderHandler> {
-            Some(self.render.clone())
-        }
-
-        fn life_span_handler(&self) -> Option<LifeSpanHandler> {
-            Some(self.life.clone())
-        }
-
-        fn load_handler(&self) -> Option<LoadHandler> {
-            Some(self.load.clone())
-        }
-
-        fn display_handler(&self) -> Option<DisplayHandler> {
-            Some(self.display.clone())
-        }
-
-        fn dialog_handler(&self) -> Option<DialogHandler> {
-            Some(self.dialog.clone())
-        }
-
-        fn request_handler(&self) -> Option<RequestHandler> {
-            Some(self.request.clone())
-        }
-    }
-}
-
-// A windowless browser must have a render handler that names a view
-// rectangle; nothing is done with what it paints.
-wrap_render_handler! {
-    struct PageRender;
-
-    impl RenderHandler {
-        fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>) {
-            if let Some(rect) = rect {
-                rect.x = 0;
-                rect.y = 0;
-                rect.width = 16;
-                rect.height = 16;
-            }
-        }
-    }
-}
-
-wrap_life_span_handler! {
-    struct PageLife {
-        delegate: Rc<DelegateState>,
-        bridge: Rc<Bridge>,
-        key: String,
-        generation: u64,
-    }
-
-    impl LifeSpanHandler {
-        fn on_after_created(&self, _browser: Option<&mut Browser>) {
-            self.delegate.add_live(1);
-        }
-
-        fn on_before_close(&self, _browser: Option<&mut Browser>) {
-            self.delegate.add_live(-1);
-            // Closed by the engine, the page is already gone and this is
-            // a no-op; closed underneath (an extension reload), it goes.
-            self.bridge.page_gone(&self.key, self.generation, "it closed", false);
-        }
-    }
-}
-
-// A renderer that terminates takes the page's script with it; the browser
-// itself stays until it is closed, so the page is closed too.
-wrap_request_handler! {
-    struct PageRequest {
-        bridge: Rc<Bridge>,
-        key: String,
-        generation: u64,
-    }
-
-    impl RequestHandler {
-        fn on_render_process_terminated(
-            &self,
-            _browser: Option<&mut Browser>,
-            _status: TerminationStatus,
-            _error_code: ::std::os::raw::c_int,
-            _error_string: Option<&CefString>,
-        ) {
-            self.bridge
-                .page_gone(&self.key, self.generation, "its renderer terminated", true);
-        }
-    }
-}
-
-wrap_load_handler! {
-    struct PageLoad {
-        bridge: Rc<Bridge>,
-        key: String,
-        generation: u64,
-    }
-
-    impl LoadHandler {
-        fn on_load_end(
-            &self,
-            _browser: Option<&mut Browser>,
-            frame: Option<&mut Frame>,
-            _http_status_code: ::std::os::raw::c_int,
-        ) {
-            if frame.is_some_and(|f| f.is_main() != 0) {
-                self.bridge.page_ready(&self.key, self.generation);
-            }
-        }
-    }
-}
-
-wrap_display_handler! {
-    struct PageDisplay {
-        key: String,
-    }
-
-    impl DisplayHandler {
-        fn on_console_message(
-            &self,
-            _browser: Option<&mut Browser>,
-            _level: LogSeverity,
-            message: Option<&CefString>,
-            _source: Option<&CefString>,
-            _line: ::std::os::raw::c_int,
-        ) -> ::std::os::raw::c_int {
-            log::debug!(
-                "bridge: page {} says: {}",
-                self.key,
-                message.map(CefString::to_string).unwrap_or_default()
-            );
-            1
-        }
-    }
-}
-
-wrap_dev_tools_message_observer! {
-    struct PageDevTools {
-        bridge: Rc<Bridge>,
-        key: String,
-        generation: u64,
-    }
-
-    impl DevToolsMessageObserver {
-        fn on_dev_tools_method_result(
-            &self,
-            _browser: Option<&mut Browser>,
-            message_id: ::std::os::raw::c_int,
-            success: ::std::os::raw::c_int,
-            result: Option<&[u8]>,
-        ) {
-            self.bridge.page_result(
-                &self.key,
-                self.generation,
-                message_id,
-                success != 0,
-                result.unwrap_or_default(),
-            );
-        }
-
-        /// The page's DevTools session ended: the results still pending
-        /// will never arrive (CEF's header says so), so they are dropped
-        /// and what was waiting for them is asked again.
-        fn on_dev_tools_agent_detached(&self, _browser: Option<&mut Browser>) {
-            self.bridge.page_detached(&self.key, self.generation);
-        }
-    }
-}
 
 /// What a pending evaluation was for.
 enum Pending {
@@ -500,90 +240,6 @@ struct TabRecord {
     _probe: Option<Registration>,
 }
 
-/// The engine's ids for worker calls. A worker numbers its calls itself, so
-/// two extensions' workers can both have a call 7, and a worker instance
-/// that is replaced leaves calls whose answers its successor would ignore.
-/// The hub is given a Bridge-local id per call (`issue`); this map gives back
-/// the worker's (extension, instance, call) when the answer comes (`take`).
-#[derive(Default)]
-pub(crate) struct CallIds {
-    last: CallId,
-    calls: HashMap<CallId, (String, String, u64)>,
-}
-
-impl CallIds {
-    /// The Bridge-local id of call `worker_call` of `instance` of `extension`.
-    pub(crate) fn issue(&mut self, extension: &str, instance: &str, worker_call: u64) -> CallId {
-        self.last += 1;
-        self.calls.insert(
-            self.last,
-            (extension.to_string(), instance.to_string(), worker_call),
-        );
-        self.last
-    }
-
-    /// The triple of `call`, removed: an answer is sent once.
-    pub(crate) fn take(&mut self, call: CallId) -> Option<(String, String, u64)> {
-        self.calls.remove(&call)
-    }
-
-    /// Drop the calls of `extension`'s instances other than `current`, the
-    /// instance a hello has just named. Returns how many were dropped.
-    pub(crate) fn retire_instances(&mut self, extension: &str, current: &str) -> usize {
-        let before = self.calls.len();
-        self.calls
-            .retain(|_, (e, instance, _)| e != extension || instance == current);
-        before - self.calls.len()
-    }
-}
-
-#[cfg(test)]
-mod call_ids_tests {
-    use super::CallIds;
-
-    #[test]
-    fn calls_of_two_workers_with_the_same_number_stay_apart() {
-        let mut ids = CallIds::default();
-        let a = ids.issue("aaaa", "i1", 7);
-        let b = ids.issue("bbbb", "i2", 7);
-        assert_ne!(a, b);
-        assert_eq!(ids.take(b), Some(("bbbb".to_string(), "i2".to_string(), 7)));
-        assert_eq!(ids.take(a), Some(("aaaa".to_string(), "i1".to_string(), 7)));
-        assert_eq!(ids.take(a), None, "an answer is sent once");
-    }
-
-    #[test]
-    fn a_new_worker_instance_retires_the_calls_of_the_old_one_and_no_others() {
-        let mut ids = CallIds::default();
-        let old_one = ids.issue("aaaa", "old", 1);
-        let old_two = ids.issue("aaaa", "old", 2);
-        let other = ids.issue("bbbb", "old", 3);
-        let same = ids.issue("aaaa", "new", 4);
-        assert_eq!(
-            ids.retire_instances("aaaa", "new"),
-            2,
-            "the two calls of the old instance go"
-        );
-        assert_eq!(ids.take(old_one), None);
-        assert_eq!(ids.take(old_two), None);
-        assert_eq!(
-            ids.take(other),
-            Some(("bbbb".to_string(), "old".to_string(), 3)),
-            "another extension's calls stay"
-        );
-        assert_eq!(
-            ids.take(same),
-            Some(("aaaa".to_string(), "new".to_string(), 4)),
-            "the current instance's calls stay"
-        );
-        assert_eq!(
-            ids.retire_instances("aaaa", "new"),
-            0,
-            "a hello of the same instance retires nothing"
-        );
-    }
-}
-
 #[derive(Default)]
 struct Inner {
     table: TabTable,
@@ -631,7 +287,7 @@ struct Inner {
 /// The engine's end of the bridge. One per engine, owned by the
 /// extension manager.
 pub(crate) struct Bridge {
-    delegate: Rc<DelegateState>,
+    pub(super) delegate: Rc<DelegateState>,
     inner: RefCell<Inner>,
 }
 
@@ -1246,7 +902,7 @@ impl Bridge {
     }
 
     /// A hidden page's main frame loaded.
-    fn page_ready(self: &Rc<Self>, key: &str, generation: u64) {
+    pub(super) fn page_ready(self: &Rc<Self>, key: &str, generation: u64) {
         {
             let inner = self.inner.borrow();
             if !is_current(&inner, key, generation) {
@@ -1281,7 +937,7 @@ impl Bridge {
     /// join. A wanted relay is opened again by the next turn (`reopen`),
     /// never from this callback. `close` says the page still has to be
     /// closed by us.
-    fn page_gone(self: &Rc<Self>, key: &str, generation: u64, why: &str, close: bool) {
+    pub(super) fn page_gone(self: &Rc<Self>, key: &str, generation: u64, why: &str, close: bool) {
         let (page, stale_jobs) = {
             let mut inner = self.inner.borrow_mut();
             let Some(page) = take_page(&mut inner, key, generation) else {
@@ -1327,7 +983,7 @@ impl Bridge {
     /// asked again from this callback: CEF reports the end again to a call
     /// made inside it, which turned into an endless loop (the run that found
     /// this logged the report thousands of times in a millisecond).
-    fn page_detached(self: &Rc<Self>, key: &str, generation: u64) {
+    pub(super) fn page_detached(self: &Rc<Self>, key: &str, generation: u64) {
         let current = is_current(&self.inner.borrow(), key, generation);
         if current {
             self.page_gone(key, generation, "its DevTools session ended", true);
@@ -1895,7 +1551,7 @@ impl Bridge {
     }
 
     /// An evaluation in a hidden page answered.
-    fn page_result(
+    pub(super) fn page_result(
         self: &Rc<Self>,
         key: &str,
         generation: u64,
