@@ -12,7 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cef::rc::Rc as _;
 use cef::{
@@ -48,6 +48,14 @@ pub(crate) enum Lane {
 /// users of that channel stay far below it.
 const CAPTURE_IDS: i32 = 1_000_000;
 const CAPTURE_FAILED: &str = "Failed to capture tab: the browser returned no image.";
+/// How long a screenshot may take before it fails.
+const CAPTURE_WAIT: Duration = Duration::from_secs(10);
+
+/// Whether a screenshot is over: its browser is gone, or it has waited for
+/// `CAPTURE_WAIT`.
+pub(crate) fn capture_spent(started: Instant, now: Instant, browser_alive: bool) -> bool {
+    !browser_alive || now.saturating_duration_since(started) >= CAPTURE_WAIT
+}
 
 /// A screenshot under way.
 struct Capture {
@@ -55,6 +63,9 @@ struct Capture {
     format: String,
     /// Keeps the observer registered until the result is in.
     observer: Registration,
+    /// The tab whose browser takes the screenshot, and when it was asked.
+    tab: TabId,
+    started: Instant,
 }
 
 pub(crate) struct Hub {
@@ -76,6 +87,10 @@ pub(crate) struct Hub {
     /// Observers whose result has arrived, let go on the next tick rather
     /// than inside their own callback.
     spent: RefCell<Vec<Registration>>,
+    /// The DevTools results that came in, answered on the next tick rather
+    /// than inside the observer that received them: a reply evaluates in the
+    /// relay, which must not run inside a DevTools callback.
+    finished: RefCell<Vec<(i32, bool, Vec<u8>)>>,
 }
 
 impl Hub {
@@ -100,6 +115,7 @@ impl Hub {
             captures: RefCell::new(HashMap::new()),
             last_capture: Cell::new(CAPTURE_IDS),
             spent: RefCell::new(Vec::new()),
+            finished: RefCell::new(Vec::new()),
         })
     }
 
@@ -178,6 +194,7 @@ impl Hub {
         // is a CEF call, which is not made with a borrow held.
         let spent = std::mem::take(&mut *self.spent.borrow_mut());
         drop(spent);
+        self.settle_captures(Instant::now());
         // A page whose frame is gone takes its listeners with it.
         if let Some(pages) = &self.pages {
             let gone = pages.gone();
@@ -312,6 +329,8 @@ impl Hub {
                 call,
                 format,
                 observer,
+                tab,
+                started: Instant::now(),
             },
         );
         if host.execute_dev_tools_method(
@@ -322,6 +341,39 @@ impl Hub {
         {
             self.captured(id, false, &[]);
         }
+        (self.nudge)();
+    }
+
+    /// Answers the DevTools results that came in, and fails the screenshots
+    /// whose browser is gone or that have waited too long (`capture_spent`).
+    /// While any screenshot is pending, the next tick is asked for.
+    fn settle_captures(&self, now: Instant) {
+        let finished = std::mem::take(&mut *self.finished.borrow_mut());
+        for (id, success, result) in finished {
+            self.captured(id, success, &result);
+        }
+        let open: Vec<(i32, TabId, Instant)> = self
+            .captures
+            .borrow()
+            .iter()
+            .map(|(id, capture)| (*id, capture.tab, capture.started))
+            .collect();
+        for (id, tab, started) in open {
+            if capture_spent(started, now, self.browser_alive(tab)) {
+                self.captured(id, false, &[]);
+            }
+        }
+        if !self.captures.borrow().is_empty() {
+            (self.nudge)();
+        }
+    }
+
+    /// Whether `tab` still has a browser (its screenshot can be taken).
+    fn browser_alive(&self, tab: TabId) -> bool {
+        self.delegate
+            .upgrade()
+            .and_then(|delegate| delegate.browser_of(tab))
+            .is_some()
     }
 
     fn captured(&self, id: i32, success: bool, result: &[u8]) {
@@ -364,8 +416,31 @@ wrap_dev_tools_message_observer! {
             result: Option<&[u8]>,
         ) {
             if let Some(hub) = self.hub.upgrade() {
-                hub.captured(message_id, success != 0, result.unwrap_or_default());
+                hub.finished.borrow_mut().push((
+                    message_id,
+                    success != 0,
+                    result.unwrap_or_default().to_vec(),
+                ));
+                (hub.nudge)();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_capture_is_spent_when_its_browser_is_gone_or_its_wait_is_over() {
+        let t0 = Instant::now();
+        assert!(!capture_spent(t0, t0, true));
+        assert!(capture_spent(t0, t0, false));
+        assert!(!capture_spent(
+            t0,
+            t0 + CAPTURE_WAIT - Duration::from_millis(1),
+            true
+        ));
+        assert!(capture_spent(t0, t0 + CAPTURE_WAIT, true));
     }
 }

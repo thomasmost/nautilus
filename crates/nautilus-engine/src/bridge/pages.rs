@@ -301,9 +301,6 @@ impl PageLane {
             log::warn!("a bridge call from {url}, which is no extension page, was dropped");
             return true;
         };
-        let Some(hub) = delegate.hub() else {
-            return true;
-        };
         // An extension the hub does not serve yet is not dropped here: the
         // call is held there until it is served, and then refused if it
         // never is (`BridgeState::page_call`), so the page always gets a reply.
@@ -311,7 +308,20 @@ impl PageLane {
             .argument_list()
             .filter(|arguments| arguments.size() >= 1)
             .map(|arguments| CefString::from(&arguments.string(0)).to_string());
+        // A call the browser cannot take is answered with an error when its
+        // number can be read: this frame is an extension's page, so the answer
+        // goes to it and to no other frame.
+        let Some(hub) = delegate.hub() else {
+            refuse(
+                frame,
+                &extension,
+                text.as_deref(),
+                "the bridge is not running.",
+            );
+            return true;
+        };
         let Some(call) = text.as_deref().and_then(parse_call) else {
+            refuse(frame, &extension, text.as_deref(), "the call is malformed.");
             return true;
         };
         let id = self.last.get() + 1;
@@ -450,6 +460,22 @@ impl PageLane {
     }
 }
 
+/// The number a page gave a call, read even when the rest of the call is not
+/// well formed.
+pub(crate) fn call_number(text: &str) -> Option<u64> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    value.get("id")?.as_u64()
+}
+
+/// Answer the page's call `text` with `message`, when its number can be read
+/// (`call_number`); a call with no readable number has nothing to answer.
+fn refuse(frame: &Frame, extension: &str, text: Option<&str>, message: &str) {
+    let Some(id) = text.and_then(call_number) else {
+        return;
+    };
+    deliver(frame, extension, &json!({ "id": id, "error": message }));
+}
+
 /// Evaluate `payload`'s delivery in `frame`, if it is still a page of
 /// `extension`.
 fn deliver(frame: &Frame, extension: &str, payload: &Value) {
@@ -470,6 +496,14 @@ mod tests {
     use super::*;
 
     const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+
+    #[test]
+    fn a_call_number_is_read_from_a_call_that_is_not_well_formed() {
+        assert_eq!(call_number(r#"{"id":7,"ns":3}"#), Some(7));
+        assert_eq!(call_number(r#"{"ns":"tabs"}"#), None);
+        assert_eq!(call_number("not json"), None);
+        assert_eq!(call_number(r#"{"id":"7"}"#), None);
+    }
 
     #[test]
     fn only_an_extension_s_own_pages_are_bridged() {

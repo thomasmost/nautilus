@@ -65,7 +65,7 @@ function world({ viaPage }) {
     const answer = answers.get(ns + '.' + method);
     try { return Promise.resolve(answer ? answer(args) : null); } catch (e) { return Promise.reject(e); }
   };
-  const sandbox = { chrome, console: { error: (...a) => sandbox.errors.push(a.join(' ')), log() {} }, errors: [], Promise, Map, JSON, Object, Array, Error, String };
+  const sandbox = { chrome, console: { error: (...a) => sandbox.errors.push(a.join(' ')), log() {} }, errors: [], Promise, Map, JSON, Object, Array, Error, String, setTimeout, clearTimeout };
   sandbox.self = sandbox;
   vm.createContext(sandbox);
   if (viaPage) {
@@ -200,7 +200,7 @@ for (const viaPage of [false, true]) {
 // first change of the document. Chromium's `chrome` appears between the two,
 // as the render process measures it, so it is set at the change. The
 // observer is a stand-in that delivers only while it is connected.
-function pageContext({ bindingsAtChange = true, hasDocument = true }) {
+function pageContext({ bindingsAtChange = true, hasDocument = true, answers = true }) {
   const observers = [];
   const errors = [];
   const sent = [];
@@ -232,7 +232,14 @@ function pageContext({ bindingsAtChange = true, hasDocument = true }) {
   const sandbox = {
     console: { error: (...a) => errors.push(a.map(String).join(' ')), log() {} },
     Promise, Map, Set, JSON, Object, Array, Error, String, Math, Date, setTimeout, clearTimeout,
-    __nautilusBridgeSend: (text) => { sent.push(JSON.parse(text)); events.push('call'); },
+    // The browser answers each call (an empty answer) unless `answers` is false,
+    // so a call nobody waits for is never refused by its bound.
+    __nautilusBridgeSend: (text) => {
+      const message = JSON.parse(text);
+      sent.push(message);
+      events.push('call');
+      if (answers) { setTimeout(() => sandbox.__nautilusBridgeDeliver(JSON.stringify({ id: message.id, ok: [] })), 0); }
+    },
     __nautilusBridgeReport: (text) => { reports.push(JSON.parse(text)); events.push('report'); },
   };
   sandbox.self = sandbox;
@@ -517,5 +524,15 @@ function loadWorker(runtime) {
   runtime.onConnect.fire(worker);
   worker.peer.postMessage({ call: { id: 3, method: 'query', args: [] } });
   assert.equal(JSON.stringify(await sandbox.nautilusRelay.next()), JSON.stringify([{ call: { id: 3, method: 'query', args: [] } }]));
+}
+{
+  // A page's call that the browser never answers is refused after the same
+  // bound a worker's call has (the call never hangs).
+  const p = pageContext({ answers: false });
+  const started = Date.now();
+  const silent = p.sandbox.__bridgeCall('tabs', 'query', []).then(() => 'answered', (e) => e.message);
+  const outcome = await Promise.race([silent, wait(11000).then(() => 'hung')]);
+  assert.equal(outcome, 'Nautilus: query was not answered.');
+  assert.ok(Date.now() - started >= 9000, 'the bound is the worker\'s, about ten seconds');
 }
 console.log('bridge scripts: ok');

@@ -7,13 +7,21 @@
   var send = root.__nautilusBridgeSend;
   if (typeof send !== 'function' || root.__bridgeCall) { return; }
   delete root.__nautilusBridgeSend;
+  // The same bound as the worker's calls (bridge.js): a call the browser never
+  // answers is refused, so no page call hangs.
+  var CALL_TIMEOUT_MS = 10000;
   var next = 1;
   var waiting = new Map();
   var handlers = [];
   root.__bridgeCall = function (namespace, method, args) {
     return new Promise(function (resolve, reject) {
       var id = next++;
-      waiting.set(id, { resolve: resolve, reject: reject });
+      var entry = { resolve: resolve, reject: reject, timer: null };
+      entry.timer = setTimeout(function () {
+        if (waiting.get(id) === entry) { waiting.delete(id); }
+        reject(new Error('Nautilus: ' + method + ' was not answered.'));
+      }, CALL_TIMEOUT_MS);
+      waiting.set(id, entry);
       var text = JSON.stringify({ id: id, ns: namespace, method: method, args: args });
       // A call leaves once the page's own tab is reported (page_report.js).
       var wait = root.__nautilusReportWait;
@@ -31,6 +39,7 @@
       var entry = waiting.get(message.id);
       if (!entry) { return; }
       waiting.delete(message.id);
+      clearTimeout(entry.timer);
       if (typeof message.error === 'string') {
         entry.reject(new Error(message.error));
       } else {
