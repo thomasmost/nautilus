@@ -668,6 +668,7 @@ fn capture(call: &BridgeCall, view: &View) -> Result<Outcome, String> {
         return Err("Either the '<all_urls>' or 'activeTab' permission is required.".to_string());
     }
     let tab = window.active().ok_or(NO_SELECTED_TAB)?;
+    capturable(&tab.url, &call.extension)?;
     if !view.ids.is_live(tab.id) {
         return Err(not_loaded(view.ids.ext(tab.id).unwrap_or(TAB_ID_NONE)));
     }
@@ -676,6 +677,23 @@ fn capture(call: &BridgeCall, view: &View) -> Result<Outcome, String> {
         format: format.to_string(),
         quality,
     })
+}
+
+/// Whether `captureVisibleTab` may read the page at `url` for `extension`:
+/// the web's schemes, and the extension's own pages. Browser pages, other
+/// extensions' pages and files are refused (this browser grants no file
+/// access, so a file page is never readable).
+fn capturable(url: &str, extension: &str) -> Result<(), String> {
+    let refused =
+        || format!("Cannot capture the tab: its page ({url}) is not one an extension may capture.");
+    let Ok(parsed) = Url::parse(url) else {
+        return Err(refused());
+    };
+    match parsed.scheme() {
+        "http" | "https" | "ftp" | "data" => Ok(()),
+        "chrome-extension" if parsed.host_str() == Some(extension) => Ok(()),
+        _ => Err(refused()),
+    }
 }
 
 fn windows(call: &BridgeCall, view: &View) -> Result<Outcome, String> {
@@ -1823,6 +1841,47 @@ mod tests {
             rejected(world.tabs("captureVisibleTab", json!([]))),
             "Either the '<all_urls>' or 'activeTab' permission is required."
         );
+    }
+
+    #[test]
+    fn capture_takes_only_pages_an_extension_may_read_and_refuses_the_rest() {
+        let own = format!("chrome-extension://{EXT}/page.html");
+        let other = "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/popup.html";
+        let mut active = tab(1, "a*");
+        for (url, allowed) in [
+            ("https://a.example/", true),
+            ("http://a.example/", true),
+            ("ftp://a.example/", true),
+            ("data:text/html,hi", true),
+            (own.as_str(), true),
+            ("chrome://settings/", false),
+            ("chrome-untrusted://terminal/", false),
+            ("devtools://devtools/bundled/devtools_app.html", false),
+            ("about:blank", false),
+            ("file:///Users/someone/index.html", false),
+            (other, false),
+            ("", false),
+        ] {
+            active.url = url.to_string();
+            let world = World::new(snapshot(vec![window(1, true, vec![active.clone()])]));
+            let outcome = world.tabs("captureVisibleTab", json!([]));
+            if allowed {
+                assert_eq!(
+                    outcome,
+                    Outcome::Capture {
+                        tab: TabId(1),
+                        format: "jpeg".to_string(),
+                        quality: 90
+                    },
+                    "{url}"
+                );
+            } else {
+                assert!(
+                    matches!(&outcome, Outcome::Reject(message) if message.contains(url)),
+                    "{url}: {outcome:?}"
+                );
+            }
+        }
     }
 
     #[test]
