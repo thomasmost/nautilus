@@ -498,7 +498,13 @@ function loadWorker(runtime) {
   // The relay adopts its worker's port: a port from a content script (with a
   // tab), or from another extension, is ignored, and what it sends never
   // reaches the relay's calls.
-  const runtime = { id: 'x', lastError: undefined, onConnect: nativeEvent(), connect: () => { throw new Error('connect is not expected'); } };
+  // The rewritten manifest names the loader as the service worker.
+  const runtime = {
+    id: 'x', lastError: undefined, onConnect: nativeEvent(),
+    connect: () => { throw new Error('connect is not expected'); },
+    getManifest: () => ({ background: { service_worker: 'background/nautilus-loader.js' } }),
+    getURL: (path) => 'chrome-extension://x/' + path,
+  };
   const sandbox = { chrome: { runtime }, console: { error() {}, log() {} }, Promise, Map, JSON, Object, Array, Error, String, setTimeout, clearTimeout };
   sandbox.self = sandbox;
   sandbox.window = sandbox;
@@ -520,6 +526,14 @@ function loadWorker(runtime) {
   runtime.onConnect.fire(other);
   other.peer.postMessage({ call: { id: 2, method: 'query', args: [] } });
   assert.equal(await Promise.race([sandbox.nautilusRelay.next(), wait(30).then(() => 'nothing')]), 'nothing');
+  // Another page of this extension (a popup, the options page) and another
+  // script of it are not the worker: their ports are refused too.
+  for (const url of ['chrome-extension://x/popup.html', 'chrome-extension://x/options.html', 'chrome-extension://x/background/other.js']) {
+    const page = forgedFrom({ id: 'x', url });
+    runtime.onConnect.fire(page);
+    page.peer.postMessage({ call: { id: 4, method: 'query', args: [] } });
+    assert.equal(await Promise.race([sandbox.nautilusRelay.next(), wait(30).then(() => 'nothing')]), 'nothing', `the relay adopted a port from ${url}`);
+  }
   // The worker's own port (from this extension, no tab) is adopted.
   const worker = forgedFrom({ id: 'x', url: 'chrome-extension://x/background/nautilus-loader.js' });
   runtime.onConnect.fire(worker);

@@ -58,12 +58,20 @@
 
   // The worker opens the port itself when it was started by something
   // else and needs the engine.
-  // Only this extension's worker opens the port here. The worker's port has
-  // an address inside this extension (its script); a content script's port has
-  // the web page's address, and a port from another extension has another id.
+  // Only the worker of this extension opens the port here. The rewritten
+  // manifest names the worker's script (the loader), and the worker's port
+  // carries that script's address: another page of this extension (a popup,
+  // the options page), a content script (the web page's address) and another
+  // extension (another id) are all refused.
+  function workerUrl() {
+    try {
+      var worker = chrome.runtime.getManifest().background.service_worker;
+      return typeof worker === 'string' ? chrome.runtime.getURL(worker) : null;
+    } catch (e) { return null; }
+  }
   function fromWorker(sender) {
-    return !!sender && sender.id === chrome.runtime.id &&
-      typeof sender.url === 'string' && sender.url.indexOf('chrome-extension://' + chrome.runtime.id + '/') === 0;
+    var worker = workerUrl();
+    return !!sender && !!worker && sender.id === chrome.runtime.id && sender.url === worker;
   }
   chrome.runtime.onConnect.addListener(function (newPort) {
     if (newPort.name === PORT && fromWorker(newPort.sender)) { adopt(newPort); }
