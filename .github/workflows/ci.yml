@@ -69,6 +69,14 @@ jobs:
           path: .cef
           key: cef-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
+      # The Rust cache brings back cef-dll-sys's CMake build tree, which
+      # names its compiler and linker by full path. A runner image with a
+      # newer MSVC toolset leaves that tree pointing at tools that are
+      # gone, and CMake then fails its compiler check.
+      - name: Drop CMake build trees left by another toolchain
+        shell: bash
+        run: bash ci/drop-stale-cmake-trees.sh
+
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --all-targets
@@ -130,6 +138,10 @@ jobs:
         with:
           path: .cef
           key: cef-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+      # As in the check job.
+      - name: Drop CMake build trees left by another toolchain
+        shell: bash
+        run: bash ci/drop-stale-cmake-trees.sh
 
       # Windows: the NSIS installer.
       - if: runner.os == 'Windows'
