@@ -1322,6 +1322,25 @@ wrap_display_handler! {
             }
         }
 
+        // The page started or stopped using the camera or the
+        // microphone: Chromium says what it has open now, each time
+        // that changes, and osmena's strip marks the tab while anything
+        // is.
+        fn on_media_access_change(
+            &self,
+            _browser: Option<&mut Browser>,
+            has_video_access: ::std::os::raw::c_int,
+            has_audio_access: ::std::os::raw::c_int,
+        ) {
+            let capture = osmena_core::MediaCapture {
+                microphone: has_audio_access != 0,
+                camera: has_video_access != 0,
+            };
+            log::debug!("tab {}: media in use: {capture:?}", self.view.label());
+            self.view
+                .report(move |tab| EngineEvent::MediaCaptureChanged { tab, capture });
+        }
+
         fn on_title_change(&self, _browser: Option<&mut Browser>, title: Option<&CefString>) {
             let title = title.map(CefString::to_string).unwrap_or_default();
             log::debug!("tab {}: title {title:?}", self.view.label());

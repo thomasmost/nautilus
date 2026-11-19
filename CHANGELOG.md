@@ -68,6 +68,12 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- A tab whose page is using the microphone or the camera carries a
+  recording mark: a red dot left of its icon, slowly fading out and
+  in, with the device named under the pointer (osmena draws it;
+  Chromium's `OnMediaAccessChange` reports the use here). The dot
+  stays however narrow the tab gets, goes when the page lets the
+  device go, and a collapsed folder's chip carries it for its tabs.
 - The icon at the left end of the Launch Panel's field says what Enter
   will open (osmena): the site's own favicon for a page, a magnifier
   for a search, sparkles for a question.
