@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use osmena_core::TabId;
 use serde_json::Value;
 
+use super::pages::extension_of;
 use super::policy::Session;
 
 /// A worker's `hello` (`bridge.js`): the worker instance it is, and for each
@@ -147,12 +148,29 @@ pub(crate) fn join(views: &[(TabId, String)], targets: &[Target]) -> Vec<Row> {
     rows
 }
 
+/// The outcome of a page's report of its own Chromium tab id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Report {
+    /// The id is now the view's.
+    Recorded,
+    /// The view already has this id.
+    Same,
+    /// The report is ignored, and why.
+    Refused(&'static str),
+}
+
 /// The table the engine keeps: each tab's target id, and the rows of
 /// the last join.
 #[derive(Default)]
 pub(crate) struct TabTable {
     targets: HashMap<TabId, String>,
     rows: Vec<Row>,
+    /// The listing of the last join: the targets a report is checked against.
+    listed: Vec<Target>,
+    /// Each extension page's own report of its Chromium tab id, with the
+    /// extension it was made from. A report is a row only while its view is
+    /// still that extension's page (`prune_reports`).
+    reported: HashMap<TabId, (i64, String)>,
 }
 
 impl TabTable {
@@ -161,20 +179,103 @@ impl TabTable {
         self.targets.insert(tab, target);
     }
 
+    /// The page of `tab` reported its own Chromium tab id. Refused: `tab`
+    /// has no target yet, or is not a page of `extension`; it already has an
+    /// id from any source, which must be the same; the listing names the id
+    /// for another target; or another tab has it.
+    pub(crate) fn report(&mut self, tab: TabId, chromium: i64, extension: &str) -> Report {
+        if let Some(current) = self.chromium(tab) {
+            return if current == chromium {
+                Report::Same
+            } else {
+                Report::Refused("the tab already has a Chromium id")
+            };
+        }
+        let Some(id) = self.targets.get(&tab) else {
+            return Report::Refused("the view has no DevTools target yet");
+        };
+        let own_page = self.listed.iter().any(|target| {
+            &target.id == id && extension_of(&target.url).as_deref() == Some(extension)
+        });
+        if !own_page {
+            return Report::Refused("the view is not a page of that extension");
+        }
+        if self
+            .listed
+            .iter()
+            .any(|target| target.tab_id == Some(chromium) && &target.id != id)
+        {
+            return Report::Refused("the listing names the id for another target");
+        }
+        if self.tab(chromium).is_some() {
+            return Report::Refused("another tab has the id");
+        }
+        self.reported.insert(tab, (chromium, extension.to_string()));
+        self.rows = self.rows_of();
+        Report::Recorded
+    }
+
     /// `tab` closed.
     pub(crate) fn forget(&mut self, tab: TabId) {
         self.targets.remove(&tab);
+        self.reported.remove(&tab);
         self.rows.retain(|row| row.tab != tab);
     }
 
     /// The helper listed `targets`: the rows are joined afresh.
     pub(crate) fn join(&mut self, targets: &[Target]) {
+        self.listed = targets.to_vec();
+        self.prune_reports();
+        self.rows = self.rows_of();
+    }
+
+    /// Drop a report whose view is no longer a page of the extension it was
+    /// made from: it was closed, or it navigated elsewhere.
+    fn prune_reports(&mut self) {
+        let listed = &self.listed;
+        let targets = &self.targets;
+        self.reported.retain(|tab, (_, extension)| {
+            targets
+                .get(tab)
+                .and_then(|id| listed.iter().find(|target| &target.id == id))
+                .is_some_and(|target| {
+                    extension_of(&target.url).as_deref() == Some(extension.as_str())
+                })
+        });
+    }
+
+    /// The rows of the last listing, with each report that no row of the
+    /// listing already names. A listed row (the helper's) always wins.
+    fn rows_of(&self) -> Vec<Row> {
         let views: Vec<(TabId, String)> = self
             .targets
             .iter()
             .map(|(tab, id)| (*tab, id.clone()))
             .collect();
-        self.rows = join(&views, targets);
+        let mut rows = join(&views, &self.listed);
+        for (tab, (chromium, _)) in &self.reported {
+            if rows
+                .iter()
+                .any(|row| row.tab == *tab || row.chromium == *chromium)
+            {
+                continue;
+            }
+            let Some(target) = self
+                .targets
+                .get(tab)
+                .and_then(|id| self.listed.iter().find(|target| &target.id == id))
+            else {
+                continue;
+            };
+            rows.push(Row {
+                tab: *tab,
+                chromium: *chromium,
+                url: target.url.clone(),
+                title: target.title.clone(),
+            });
+        }
+        rows.sort_by_key(|row| row.tab);
+        rows
     }
 
     pub(crate) fn rows(&self) -> &[Row] {
@@ -479,5 +580,152 @@ mod tests {
             table.resolve(&Debuggee::Target("D2C9E333".to_string())),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+    const EXT: &str = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/p5page.html";
+    const OTHER_EXT: &str = "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/p5page.html";
+
+    fn view_page(id: &str, url: &str) -> Target {
+        Target {
+            id: id.into(),
+            tab_id: None,
+            kind: "other".into(),
+            url: url.into(),
+            title: "t".into(),
+        }
+    }
+
+    fn tab_page(id: &str, tab_id: i64, url: &str) -> Target {
+        Target {
+            id: id.into(),
+            tab_id: Some(tab_id),
+            kind: "page".into(),
+            url: url.into(),
+            title: "t".into(),
+        }
+    }
+
+    /// View 5 on target "V" at `url`, joined against the listing.
+    fn table_with(url: &str, extra: Vec<Target>) -> (TabTable, Vec<Target>) {
+        let mut targets = vec![view_page("V", url)];
+        targets.extend(extra);
+        let mut table = TabTable::default();
+        table.set_target(TabId(5), "V".to_string());
+        table.join(&targets);
+        (table, targets)
+    }
+
+    #[test]
+    fn a_report_names_the_view_of_an_extension_page_and_a_listing_keeps_it() {
+        let (mut table, targets) = table_with(EXT, vec![]);
+        assert_eq!(table.report(TabId(5), 433, ID), Report::Recorded);
+        assert_eq!(table.chromium(TabId(5)), Some(433));
+        assert_eq!(table.tab(433), Some(TabId(5)));
+        assert_eq!(table.rows().len(), 1);
+        table.join(&targets);
+        assert_eq!(table.chromium(TabId(5)), Some(433));
+    }
+
+    #[test]
+    fn a_second_report_of_the_same_id_is_the_same_and_a_different_one_is_refused() {
+        let (mut table, _) = table_with(EXT, vec![]);
+        table.report(TabId(5), 433, ID);
+        assert_eq!(table.report(TabId(5), 433, ID), Report::Same);
+        assert!(matches!(
+            table.report(TabId(5), 434, ID),
+            Report::Refused(_)
+        ));
+        assert_eq!(table.chromium(TabId(5)), Some(433));
+    }
+
+    #[test]
+    fn an_id_the_helper_lists_for_another_target_is_refused() {
+        let (mut free, _) = table_with(EXT, vec![]);
+        assert_eq!(
+            free.report(TabId(5), 433, ID),
+            Report::Recorded,
+            "the same id, not listed"
+        );
+        let (mut table, _) = table_with(EXT, vec![tab_page("W", 433, "https://example.com/")]);
+        assert!(matches!(
+            table.report(TabId(5), 433, ID),
+            Report::Refused(_)
+        ));
+        assert_eq!(table.chromium(TabId(5)), None);
+    }
+
+    #[test]
+    fn a_view_with_no_target_is_refused_and_the_helpers_row_wins_over_a_report() {
+        let mut table = TabTable::default();
+        assert!(
+            matches!(table.report(TabId(5), 433, ID), Report::Refused(_)),
+            "no target yet"
+        );
+
+        let mut table = TabTable::default();
+        table.set_target(TabId(7), "W".to_string());
+        table.join(&[tab_page("W", 433, "https://example.com/")]);
+        assert_eq!(table.chromium(TabId(7)), Some(433));
+        assert!(matches!(
+            table.report(TabId(7), 999, ID),
+            Report::Refused(_)
+        ));
+        assert_eq!(table.report(TabId(7), 433, ID), Report::Same);
+        assert_eq!(table.chromium(TabId(7)), Some(433));
+    }
+
+    #[test]
+    fn a_report_ends_when_its_view_leaves_the_extension_page_and_a_web_page_joins_as_before() {
+        let (mut table, mut targets) = table_with(EXT, vec![]);
+        table.report(TabId(5), 433, ID);
+
+        targets[0] = view_page("V", "https://example.com/");
+        table.join(&targets);
+        assert_eq!(
+            table.chromium(TabId(5)),
+            None,
+            "the report does not outlive the page"
+        );
+
+        targets[0] = view_page("V", OTHER_EXT);
+        table.join(&targets);
+        assert_eq!(
+            table.chromium(TabId(5)),
+            None,
+            "another extension's page is not this one"
+        );
+
+        targets[0] = view_page("V", EXT);
+        table.join(&targets);
+        assert_eq!(
+            table.report(TabId(5), 433, ID),
+            Report::Recorded,
+            "a new report after navigation back"
+        );
+
+        targets[0] = tab_page("V", 433, "https://example.com/");
+        table.join(&targets);
+        assert_eq!(
+            table.chromium(TabId(5)),
+            Some(433),
+            "the helper's row joins the web page"
+        );
+    }
+
+    #[test]
+    fn closing_the_view_drops_its_report() {
+        let (mut table, targets) = table_with(EXT, vec![]);
+        assert_eq!(table.report(TabId(5), 433, ID), Report::Recorded);
+        assert_eq!(table.chromium(TabId(5)), Some(433));
+        table.forget(TabId(5));
+        table.join(&targets);
+        assert_eq!(table.chromium(TabId(5)), None);
+        assert_eq!(table.tab(433), None);
     }
 }

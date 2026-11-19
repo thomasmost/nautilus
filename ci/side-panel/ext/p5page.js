@@ -5,7 +5,9 @@
     native: typeof chrome.tabs.sendMessage === 'function' && chrome.tabs.TAB_ID_NONE === -1
   };
   try {
+    var started = performance.now();
     var me = await chrome.tabs.getCurrent();
+    out.getCurrentMs = Math.round(performance.now() - started);
     out.current = me && { id: me.id, index: me.index, windowId: me.windowId, active: me.active };
     out.activeCurrent = (await chrome.tabs.query({ active: true, currentWindow: true })).map(function (t) { return t.id; });
     out.window = (await chrome.windows.getCurrent()).id;

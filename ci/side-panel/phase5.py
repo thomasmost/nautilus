@@ -365,6 +365,7 @@ def judge_main(code, log, samples):
     check("an extension page shown as a tab reported", len(pages) == 1, str(pages))
     if page_tab and pages:
         result, sender = pages[0]["data"]["result"], pages[0]["data"]["senderTab"]
+        info(f"the page's first call (getCurrent) answered in {result.get('getCurrentMs')} ms")
         check("the page is bridged before its scripts run",
               result.get("installed") and "tabs" in result["installed"] and "windows" in result["installed"]
               and result.get("native") is True and "error" not in result, str(result))

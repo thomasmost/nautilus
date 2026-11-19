@@ -195,6 +195,8 @@ function pageContext({ bindingsAtChange = true, hasDocument = true }) {
   const observers = [];
   const errors = [];
   const sent = [];
+  const reports = []; // the tab ids the page reported
+  const events = []; // 'report' and 'call', in the order they reached the browser
   const reached = []; // Chromium's own functions that were really called
   const chrome = {
     runtime: {
@@ -220,8 +222,9 @@ function pageContext({ bindingsAtChange = true, hasDocument = true }) {
   };
   const sandbox = {
     console: { error: (...a) => errors.push(a.map(String).join(' ')), log() {} },
-    Promise, Map, Set, JSON, Object, Array, Error, String, Math, Date,
-    __nautilusBridgeSend: (text) => sent.push(JSON.parse(text)),
+    Promise, Map, Set, JSON, Object, Array, Error, String, Math, Date, setTimeout, clearTimeout,
+    __nautilusBridgeSend: (text) => { sent.push(JSON.parse(text)); events.push('call'); },
+    __nautilusBridgeReport: (text) => { reports.push(JSON.parse(text)); events.push('report'); },
   };
   sandbox.self = sandbox;
   if (hasDocument) sandbox.document = {};
@@ -232,7 +235,7 @@ function pageContext({ bindingsAtChange = true, hasDocument = true }) {
   };
   vm.createContext(sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
-  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js'].map(read).join('\n');
+  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'page_report.js'].map(read).join('\n');
   vm.runInContext(
     `(function (root, install) {\n${read('page_defer.js')}\n})(self, function () {\ntry {\n${namespaces}\n} catch (e) { console.error('nautilus-bridge: ' + e); }\n});`,
     sandbox,
@@ -243,7 +246,7 @@ function pageContext({ bindingsAtChange = true, hasDocument = true }) {
       if (observer.connected) observer.callback([{ type: 'childList' }]);
     }
   };
-  return { sandbox, observers, errors, sent, reached, mutate };
+  return { sandbox, observers, errors, sent, reports, events, reached, chrome, mutate };
 }
 
 {
@@ -393,5 +396,53 @@ function loadWorker(runtime) {
   const worker = loadWorker(w.runtime);
   assert.equal(await worker.__bridgeCall('tabs', 'query', [{}]), 'answer to tabs.query');
   assert.deepEqual(w.served, ['tabs.query']);
+}
+{
+  // A page's tab is reported before any of its calls, and the calls wait for
+  // the report: the browser handles the report first, so a call is answered
+  // with the Chromium id the report named.
+  const p = pageContext({});
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 433, windowId: 1 });
+  p.mutate();
+  p.chrome.tabs.query({});
+  p.chrome.tabs.get(433);
+  assert.deepEqual(p.sent, [], 'a call went before the report');
+  await tick(); await tick();
+  assert.deepEqual(p.reports, [{ tab: 433 }]);
+  assert.deepEqual(p.events, ['report', 'call', 'call']);
+  assert.deepEqual(p.sent.map((m) => [m.ns, m.method]), [['tabs', 'query'], ['tabs', 'get']]);
+  // A later call goes at once: the gate is open.
+  p.chrome.tabs.query({});
+  assert.equal(p.sent.length, 3);
+}
+{
+  // A page that is no tab (no tab id from Chromium) reports nothing and its
+  // calls go at once.
+  const p = pageContext({});
+  p.chrome.tabs.getCurrent = () => Promise.resolve(undefined);
+  p.mutate();
+  p.chrome.tabs.query({});
+  await tick(); await tick();
+  assert.deepEqual(p.reports, []);
+  assert.equal(p.sent.length, 1);
+}
+{
+  // Chromium's answer that fails, or never comes: the report is given up
+  // after a bound, and the calls then go (a call is never held for good).
+  const failed = pageContext({});
+  failed.chrome.tabs.getCurrent = () => Promise.reject(new Error('no'));
+  failed.mutate();
+  failed.chrome.tabs.query({});
+  await tick(); await tick();
+  assert.equal(failed.sent.length, 1);
+  const silent = pageContext({});
+  silent.chrome.tabs.getCurrent = () => new Promise(() => {});
+  silent.mutate();
+  silent.chrome.tabs.query({});
+  await wait(20);
+  assert.equal(silent.sent.length, 0, 'the bound has not passed');
+  await wait(1100);
+  assert.equal(silent.sent.length, 1, 'the bound passed, and the call went');
+  assert.deepEqual(silent.reports, []);
 }
 console.log('bridge scripts: ok');

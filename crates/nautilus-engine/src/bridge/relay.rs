@@ -40,7 +40,7 @@ use super::policy::{
     next_opening, overflow, relay_changes, reply_due, session_evidence, tabs_to_forget,
 };
 use super::table::{
-    Debuggee, Hello, TabTable, Target, debuggee_of, hello_of, parse_targets, target_id_of,
+    Debuggee, Hello, Report, TabTable, Target, debuggee_of, hello_of, parse_targets, target_id_of,
     worker_target_of,
 };
 use super::transport::{Asker, BridgeCall, BridgeTransport, CallId};
@@ -2164,6 +2164,26 @@ impl Bridge {
 }
 
 impl Bridge {
+    /// A page reported its own Chromium tab id (`pages.rs`, `Hub::report_tab`):
+    /// the table records it or refuses it, and says which in the log.
+    pub(crate) fn report_tab(&self, tab: TabId, chromium: i64, extension: &str) -> Report {
+        let verdict = self
+            .inner
+            .borrow_mut()
+            .table
+            .report(tab, chromium, extension);
+        match verdict {
+            Report::Recorded => {
+                log::info!("bridge: {extension}'s page reports {tab:?} is Chromium tab {chromium}")
+            }
+            Report::Same => {}
+            Report::Refused(why) => log::warn!(
+                "bridge: {extension}'s page report of Chromium tab {chromium} for {tab:?} was ignored: {why}"
+            ),
+        }
+        verdict
+    }
+
     /// The Chromium id of `tab`, when the table knows it (the hub's lookup).
     pub(crate) fn chromium_id(&self, tab: TabId) -> Option<i64> {
         self.inner.borrow().table.chromium(tab)

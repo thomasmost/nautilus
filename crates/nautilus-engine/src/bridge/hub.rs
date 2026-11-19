@@ -27,6 +27,10 @@ use serde_json::Value;
 use super::pattern::Grants;
 use super::snapshot::Snapshot;
 use super::state::{BridgeState, Effect};
+use super::table::Report;
+
+/// Records a page's report of its own Chromium tab id (`Hub::report_tab`).
+pub(crate) type Reporter = Box<dyn Fn(TabId, i64, &str) -> Report>;
 use super::transport::{BridgeCall, BridgeTransport, CallId};
 use crate::delegate::DelegateState;
 
@@ -62,6 +66,8 @@ pub(crate) struct Hub {
     delegate: Weak<DelegateState>,
     /// The tab-id table: Chromium's id for a tab, when it is known.
     table: Box<dyn Fn(TabId) -> Option<i64>>,
+    /// Records a page's report of its own Chromium tab id in the table.
+    reporter: Reporter,
     /// Asks for another `tick` in a moment.
     nudge: Box<dyn Fn()>,
     captures: RefCell<HashMap<i32, Capture>>,
@@ -77,6 +83,7 @@ impl Hub {
         worker: Rc<dyn BridgeTransport>,
         pages: Option<Rc<dyn BridgeTransport>>,
         table: Box<dyn Fn(TabId) -> Option<i64>>,
+        reporter: Reporter,
         nudge: Box<dyn Fn()>,
     ) -> Rc<Hub> {
         Rc::new(Hub {
@@ -87,6 +94,7 @@ impl Hub {
             last_call: Cell::new(0),
             delegate: Rc::downgrade(delegate),
             table,
+            reporter,
             nudge,
             captures: RefCell::new(HashMap::new()),
             last_capture: Cell::new(CAPTURE_IDS),
@@ -137,6 +145,14 @@ impl Hub {
             .borrow_mut()
             .extension_reply(token, reply, Instant::now());
         self.run(effects);
+    }
+
+    /// A page of `tab` reported its own Chromium tab id. A recorded report is
+    /// published at once, so the page's calls that follow see that id.
+    pub(crate) fn report_tab(self: &Rc<Self>, tab: TabId, chromium: i64, extension: &str) {
+        if (self.reporter)(tab, chromium, extension) == Report::Recorded {
+            self.table_changed();
+        }
     }
 
     /// The table gained or lost a tab's Chromium id.

@@ -29,7 +29,7 @@ use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker, WindowStrip
 use url::Url;
 
 #[cfg(any(windows, target_os = "macos"))]
-use crate::bridge::hub::Hub;
+use crate::bridge::hub::{Hub, Reporter};
 use crate::bridge::pages::PageLane;
 #[cfg(any(windows, target_os = "macos"))]
 use crate::bridge::transport::BridgeTransport;
@@ -240,11 +240,18 @@ impl Engine {
             // the delegate holds it too, for the tabs' process messages.
             let page_lane = Rc::new(PageLane::default());
             delegate.set_page_lane(&page_lane);
+            let reporter: Reporter = {
+                let bridge = bridge.clone();
+                Box::new(move |tab, chromium, extension| {
+                    bridge.report_tab(tab, chromium, extension)
+                })
+            };
             let hub = Hub::new(
                 &delegate,
                 bridge.clone() as Rc<dyn BridgeTransport>,
                 Some(page_lane.clone() as Rc<dyn BridgeTransport>),
                 table,
+                reporter,
                 nudge,
             );
             delegate.set_hub(&hub);

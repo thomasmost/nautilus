@@ -25,15 +25,25 @@ use cef::{
 use serde_json::{Value, json};
 use url::Url;
 
+use osmena_core::TabId;
+
 use super::hub::Lane;
+use super::ids::SYNTHETIC_BASE;
 use super::install::HELPER_ID;
 use super::relay::RELAY_PATH;
-use super::transport::{BridgeCall, BridgeTransport, CallId};
+use super::transport::{Asker, BridgeCall, BridgeTransport, CallId};
 use super::{PAGE_TRANSPORT_JS, namespaces_script};
 
 /// The deferred install's observer (`js/page_defer.js`), which
 /// `deferred_namespaces` wraps around the namespaces.
 const DEFER_JS: &str = include_str!("js/page_defer.js");
+
+/// The page's own tab id, reported after the namespaces (`page_report.js`).
+const REPORT_JS: &str = include_str!("js/page_report.js");
+
+/// The function the render process binds for a report; the page's report
+/// script takes it and deletes it.
+const REPORT_FUNCTION: &str = "__nautilusBridgeReport";
 use crate::crx;
 use crate::delegate::DelegateState;
 
@@ -59,6 +69,33 @@ pub(crate) fn extension_of(url: &str) -> Option<String> {
         return None;
     }
     Some(id.to_string())
+}
+
+/// The process message a page's own Chromium tab id travels in
+/// (`js/page_report.js`).
+pub(crate) const REPORT_MESSAGE: &str = "nautilus-bridge-tab";
+
+/// The Chromium tab id a page reports: an object whose only key is `tab`,
+/// holding a positive integer below `SYNTHETIC_BASE`.
+pub(crate) fn report_of(text: &str) -> Option<i64> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let object = value.as_object()?;
+    if object.len() != 1 {
+        return None;
+    }
+    let tab = object.get("tab")?.as_i64()?;
+    (0 < tab && tab < SYNTHETIC_BASE).then_some(tab)
+}
+
+/// Whether a report may come from a frame, and for which view and extension:
+/// the main frame of a bridged extension's page that is shown as a tab. The
+/// view is the browser's own (`Asker::View`), never something the page named.
+pub(crate) fn report_source(main: bool, url: &str, view: Option<TabId>) -> Option<(String, TabId)> {
+    if !main {
+        return None;
+    }
+    let extension = extension_of(url)?;
+    Some((extension, view?))
 }
 
 /// A call as a page sent it.
@@ -92,7 +129,7 @@ pub(crate) fn parse_call(text: &str) -> Option<PageCall> {
 pub(crate) fn page_script() -> String {
     format!(
         "try {{\n{PAGE_TRANSPORT_JS}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}\n{}",
-        deferred_namespaces(&namespaces_script())
+        deferred_namespaces(&format!("{}\n{REPORT_JS}", namespaces_script()))
     )
 }
 
@@ -130,6 +167,18 @@ pub(crate) fn install(context: &mut V8Context) {
         Some(&mut function),
         V8Propertyattribute::default(),
     );
+    let report_name = CefString::from(REPORT_FUNCTION);
+    let mut report_handler = BridgeReport::new();
+    let Some(mut report_function) =
+        cef::v8_value_create_function(Some(&report_name), Some(&mut report_handler))
+    else {
+        return;
+    };
+    global.set_value_bykey(
+        Some(&report_name),
+        Some(&mut report_function),
+        V8Propertyattribute::default(),
+    );
     // CEF's `eval` does nothing without both out-pointers.
     let (mut retval, mut exception) = (None, None);
     context.eval(
@@ -155,28 +204,50 @@ wrap_v8_handler! {
             _retval: Option<&mut Option<V8Value>>,
             _exception: Option<&mut CefString>,
         ) -> ::std::os::raw::c_int {
-            let Some([Some(text), ..]) = arguments else {
-                return 0;
-            };
-            if text.is_string() == 0 {
-                return 0;
-            }
-            let text = CefString::from(&text.string_value()).to_string();
-            let Some(frame) = cef::v8_context_get_current_context().and_then(|c| c.frame()) else {
-                return 0;
-            };
-            let Some(mut message) =
-                cef::process_message_create(Some(&CefString::from(CALL_MESSAGE)))
-            else {
-                return 0;
-            };
-            if let Some(arguments) = message.argument_list() {
-                arguments.set_string(0, Some(&CefString::from(text.as_str())));
-            }
-            frame.send_process_message(ProcessId::BROWSER, Some(&mut message));
-            1
+            send_to_browser(CALL_MESSAGE, arguments)
         }
     }
+}
+
+// The same for the tab report: one string, sent in its own message.
+wrap_v8_handler! {
+    struct BridgeReport;
+
+    impl V8Handler {
+        fn execute(
+            &self,
+            _name: Option<&CefString>,
+            _object: Option<&mut V8Value>,
+            arguments: Option<&[Option<V8Value>]>,
+            _retval: Option<&mut Option<V8Value>>,
+            _exception: Option<&mut CefString>,
+        ) -> ::std::os::raw::c_int {
+            send_to_browser(REPORT_MESSAGE, arguments)
+        }
+    }
+}
+
+/// Sends the one string argument of a bound function to the browser process
+/// as a process message named `name`, from the frame that called it.
+fn send_to_browser(name: &str, arguments: Option<&[Option<V8Value>]>) -> ::std::os::raw::c_int {
+    let Some([Some(text), ..]) = arguments else {
+        return 0;
+    };
+    if text.is_string() == 0 {
+        return 0;
+    }
+    let text = CefString::from(&text.string_value()).to_string();
+    let Some(frame) = cef::v8_context_get_current_context().and_then(|c| c.frame()) else {
+        return 0;
+    };
+    let Some(mut message) = cef::process_message_create(Some(&CefString::from(name))) else {
+        return 0;
+    };
+    if let Some(arguments) = message.argument_list() {
+        arguments.set_string(0, Some(&CefString::from(text.as_str())));
+    }
+    frame.send_process_message(ProcessId::BROWSER, Some(&mut message));
+    1
 }
 
 /// Browser process: the lane between extension pages and the hub.
@@ -207,7 +278,11 @@ impl PageLane {
         frame: &Frame,
         message: &ProcessMessage,
     ) -> bool {
-        if CefString::from(&message.name()).to_string() != CALL_MESSAGE {
+        let name = CefString::from(&message.name()).to_string();
+        if name == REPORT_MESSAGE {
+            return self.report(delegate, browser, frame, message);
+        }
+        if name != CALL_MESSAGE {
             return false;
         }
         // The extension is the frame's own address, as the browser process
@@ -246,6 +321,42 @@ impl PageLane {
                 args: call.args,
             },
         );
+        true
+    }
+
+    /// A page reported its own Chromium tab id. The view is the browser's: the
+    /// frame must be the main frame of a bridged extension's page, and the
+    /// browser's view for its browser must be a tab (`report_source`). A
+    /// report that is not accepted is logged once and ignored.
+    fn report(
+        &self,
+        delegate: &DelegateState,
+        browser: &Browser,
+        frame: &Frame,
+        message: &ProcessMessage,
+    ) -> bool {
+        let url = CefString::from(&frame.url()).to_string();
+        let view = match delegate.asker_of(browser) {
+            Asker::View(tab) => Some(tab),
+            Asker::Worker | Asker::Popup { .. } => None,
+        };
+        let text = message
+            .argument_list()
+            .filter(|arguments| arguments.size() >= 1)
+            .map(|arguments| CefString::from(&arguments.string(0)).to_string());
+        let Some(chromium) = text.as_deref().and_then(report_of) else {
+            log::warn!("a tab report from {url} was dropped: it is not a tab id");
+            return true;
+        };
+        let Some((extension, tab)) = report_source(frame.is_main() != 0, &url, view) else {
+            log::warn!(
+                "a tab report from {url} was dropped: it is not the main frame of a bridged extension's page shown as a tab"
+            );
+            return true;
+        };
+        if let Some(hub) = delegate.hub() {
+            hub.report_tab(tab, chromium, &extension);
+        }
         true
     }
 
@@ -431,6 +542,70 @@ mod tests {
         assert_eq!(
             delivery(&json!({ "id": 3, "ok": { "title": "a \"quoted\" </script> title" } })),
             r#"self.__nautilusBridgeDeliver("{\"id\":3,\"ok\":{\"title\":\"a \\\"quoted\\\" </script> title\"}}");"#
+        );
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+
+    fn page_url() -> String {
+        format!("chrome-extension://{ID}/p5page.html")
+    }
+
+    #[test]
+    fn a_report_is_an_object_with_only_a_positive_tab_id_below_the_synthetic_range() {
+        assert_eq!(report_of(r#"{"tab":5}"#), Some(5));
+        assert_eq!(report_of(r#"{"tab":1999999999}"#), Some(1_999_999_999));
+        assert_eq!(report_of(r#"{"tab":0}"#), None);
+        assert_eq!(report_of(r#"{"tab":-3}"#), None);
+        assert_eq!(report_of(r#"{"tab":2000000000}"#), None);
+        assert_eq!(report_of(r#"{"tab":"5"}"#), None);
+        assert_eq!(report_of(r#"{"tab":5.5}"#), None);
+        assert_eq!(report_of(r#"{"tab":5,"view":7}"#), None, "only the id");
+        assert_eq!(report_of("{}"), None);
+        assert_eq!(report_of("5"), None);
+        assert_eq!(report_of("not json"), None);
+    }
+
+    #[test]
+    fn only_the_main_frame_of_a_bridged_extension_page_shown_as_a_tab_may_report() {
+        let view = Some(TabId(5));
+        assert_eq!(
+            report_source(true, &page_url(), view),
+            Some((ID.to_string(), TabId(5)))
+        );
+        assert_eq!(report_source(false, &page_url(), view), None, "a subframe");
+        assert_eq!(
+            report_source(
+                true,
+                &format!("chrome-extension://{ID}/nautilus-bridge/relay.html"),
+                view
+            ),
+            None,
+            "the relay page"
+        );
+        assert_eq!(
+            report_source(
+                true,
+                &format!("chrome-extension://{HELPER_ID}/helper.html"),
+                view
+            ),
+            None,
+            "the helper's page"
+        );
+        assert_eq!(
+            report_source(true, "https://example.com/", view),
+            None,
+            "a web page"
+        );
+        assert_eq!(
+            report_source(true, &page_url(), None),
+            None,
+            "a view that is no tab"
         );
     }
 }

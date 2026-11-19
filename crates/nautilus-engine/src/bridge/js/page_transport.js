@@ -14,7 +14,10 @@
     return new Promise(function (resolve, reject) {
       var id = next++;
       waiting.set(id, { resolve: resolve, reject: reject });
-      send(JSON.stringify({ id: id, ns: namespace, method: method, args: args }));
+      var text = JSON.stringify({ id: id, ns: namespace, method: method, args: args });
+      // A call leaves once the page's own tab is reported (page_report.js).
+      var wait = root.__nautilusReportWait;
+      if (typeof wait === 'function') { wait(function () { send(text); }); } else { send(text); }
     });
   };
   root.__bridgeOnEvent = function (handler) { handlers.push(handler); };
