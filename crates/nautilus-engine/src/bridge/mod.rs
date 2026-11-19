@@ -200,6 +200,40 @@ mod tests {
     }
 
     #[test]
+    fn the_strip_fields_a_worker_remembers_are_the_ones_the_engine_sends() {
+        // `js/runtime.js` keeps these fields of each tab for `sender.tab`;
+        // `View::strip_json` is what the engine answers `stripOf` with.
+        let opening = "var FIELDS = [";
+        let start = RUNTIME_JS.find(opening).expect("the list is there") + opening.len();
+        let end = start + RUNTIME_JS[start..].find(']').expect("the list ends");
+        let mut remembered: Vec<String> = RUNTIME_JS[start..end]
+            .split(',')
+            .map(|name| name.trim().trim_matches('\'').to_string())
+            .collect();
+        remembered.sort();
+
+        use super::snapshot::tests::{snapshot, tab, window};
+        let snapshot = snapshot(vec![window(1, true, vec![tab(1, "a*")])]);
+        let ids = IdSpace::default();
+        let grants = Grants::default();
+        let view = View {
+            snapshot: &snapshot,
+            ids: &ids,
+            grants: &grants,
+            last_focused: None,
+        };
+        let strip = view.strip_json(&snapshot.windows[0], 0);
+        let mut sent: Vec<String> = strip
+            .as_object()
+            .expect("the strip is an object")
+            .keys()
+            .cloned()
+            .collect();
+        sent.sort();
+        assert_eq!(remembered, sent);
+    }
+
+    #[test]
     fn the_worker_script_is_the_transport_then_the_namespaces() {
         let script = worker_script();
         assert!(script.starts_with(super::install::BRIDGE_JS));

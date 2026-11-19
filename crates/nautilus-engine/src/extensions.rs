@@ -1343,7 +1343,7 @@ mod native {
             };
             if load_helper {
                 log::info!("loading the helper extension");
-                self.load_unpacked(self.store_dir.join("nautilus-helper"));
+                self.load_unpacked(bridge::install::helper_dir(&self.store_dir));
             }
             self.bridge.sync(helper_loaded, &bridged);
             if let Some(hub) = self.delegate.hub() {

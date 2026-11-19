@@ -194,9 +194,9 @@ impl TabTable {
         let Some(id) = self.targets.get(&tab) else {
             return Report::Refused("the view has no DevTools target yet");
         };
-        let own_page = self.listed.iter().any(|target| {
-            &target.id == id && extension_of(&target.url).as_deref() == Some(extension)
-        });
+        let own_page = self
+            .listed_target(tab)
+            .is_some_and(|target| extension_of(&target.url).as_deref() == Some(extension));
         if !own_page {
             return Report::Refused("the view is not a page of that extension");
         }
@@ -244,6 +244,12 @@ impl TabTable {
         });
     }
 
+    /// `tab`'s own target in the last listing, if it is listed.
+    fn listed_target(&self, tab: TabId) -> Option<&Target> {
+        let id = self.targets.get(&tab)?;
+        self.listed.iter().find(|target| &target.id == id)
+    }
+
     /// The rows of the last listing, with each report that no row of the
     /// listing already names. A listed row (the helper's) always wins.
     fn rows_of(&self) -> Vec<Row> {
@@ -260,11 +266,7 @@ impl TabTable {
             {
                 continue;
             }
-            let Some(target) = self
-                .targets
-                .get(tab)
-                .and_then(|id| self.listed.iter().find(|target| &target.id == id))
-            else {
+            let Some(target) = self.listed_target(*tab) else {
                 continue;
             };
             rows.push(Row {

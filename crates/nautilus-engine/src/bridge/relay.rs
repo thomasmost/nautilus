@@ -1158,18 +1158,25 @@ impl Bridge {
     }
 
     /// Hide `tab` once no debugger is left on it, and log that it was hidden
-    /// again, in the words the detach path uses (`set_debugged`): the driver's
-    /// checks read that line, so it is logged only when the tab was hidden.
+    /// again. Every path that takes a tab's last debugger away ends here, so
+    /// the line has one wording: the driver's checks read it, and it is
+    /// logged only when the tab was hidden.
     fn hide_again(&self, tab: TabId, handles: Option<TabHandles>, chromium: Option<i64>) {
         let Some((browser, view)) = handles else {
             return;
         };
         if set_tab_debugged(&browser, &view, false) {
-            let chromium = chromium.map_or_else(|| "?".to_string(), |id| id.to_string());
             log::info!(
-                "bridge: {tab:?} (Chromium tab {chromium}) hidden again: no debugger is left on it"
+                "bridge: {tab:?} (Chromium tab {}) hidden again: no debugger is left on it",
+                chromium_label(chromium)
             );
         }
+    }
+
+    /// Acknowledge a debugger report: the worker waits for the answer, and
+    /// must not hang on it whatever became of the report.
+    fn acknowledge(&self, extension: &str, instance: &str, call: u64) {
+        self.reply(extension, instance, call, &json!({"result": null}));
     }
 
     /// Close every hidden page; the engine pumps until they are gone.
@@ -1528,14 +1535,14 @@ impl Bridge {
     ) {
         let Some(debuggee) = debuggee else {
             log::warn!("bridge: {extension}: a debugger report names no tab or target");
-            self.reply(extension, instance, call, &json!({"result": null}));
+            self.acknowledge(extension, instance, call);
             return;
         };
         let known = self.inner.borrow().table.resolve(&debuggee);
         match known {
             Some(tab) => {
                 self.set_debugged(extension, tab, attach);
-                self.reply(extension, instance, call, &json!({"result": null}));
+                self.acknowledge(extension, instance, call);
             }
             // Not in the table yet: the next join decides it (`run`).
             None => {
@@ -1566,9 +1573,6 @@ impl Bridge {
             };
             (change, tab_handles(&inner, tab), inner.table.chromium(tab))
         };
-        // The Chromium id is in the log so that a run can name the tab a
-        // debugger was on by the id its extension knows it by.
-        let chromium = chromium.map_or_else(|| "?".to_string(), |id| id.to_string());
         match change {
             Change::Unchanged => {
                 log::debug!("bridge: {extension}: {tab:?} debugger unchanged");
@@ -1579,19 +1583,14 @@ impl Bridge {
                     && set_tab_debugged(&browser, &view, true)
                 {
                     log::info!(
-                        "bridge: {tab:?} (Chromium tab {chromium}) was hidden; shown for the debugger of {extension}"
+                        "bridge: {tab:?} (Chromium tab {}) was hidden; shown for the debugger of {extension}",
+                        chromium_label(chromium)
                     );
                 }
             }
             Change::Undebugged => {
                 log::info!("bridge: {extension} no longer debugs {tab:?}");
-                if let Some((browser, view)) = handles
-                    && set_tab_debugged(&browser, &view, false)
-                {
-                    log::info!(
-                        "bridge: {tab:?} (Chromium tab {chromium}) hidden again: no debugger is left on it"
-                    );
-                }
+                self.hide_again(tab, handles, chromium);
             }
         }
     }
@@ -1833,7 +1832,7 @@ impl Bridge {
                     log::warn!(
                         "bridge: {extension}: the debugger of {debuggee:?} is not tracked: {why}"
                     );
-                    self.reply(&extension, &instance, call, &json!({"result": null}));
+                    self.acknowledge(&extension, &instance, call);
                 }
             }
         }
@@ -1900,7 +1899,7 @@ impl Bridge {
                         "bridge: {extension}: {debuggee:?} is no Nautilus tab in the table; its debugger is not tracked"
                     ),
                 }
-                self.reply(&extension, &instance, call, &json!({"result": null}));
+                self.acknowledge(&extension, &instance, call);
             }
         }
     }
@@ -2303,6 +2302,13 @@ fn drop_pending(inner: &mut Inner, key: &str, why: &str) {
         }
         sent.pending = None;
     }
+}
+
+/// A tab's Chromium id as the log shows it, so that a run can name the tab
+/// a debugger was on by the id its extension knows it by; `?` when the
+/// table does not know it.
+fn chromium_label(chromium: Option<i64>) -> String {
+    chromium.map_or_else(|| "?".to_string(), |id| id.to_string())
 }
 
 /// A delivery's outcome as the log shows it.

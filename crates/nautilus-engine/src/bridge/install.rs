@@ -24,6 +24,11 @@ pub(crate) const HELPER_ID: &str = "gblknehfeeaadaalhiogpllhfpelpngj";
 /// The helper's directory under the profile's `chromium/extensions/`.
 const HELPER_DIR: &str = "nautilus-helper";
 
+/// Where the helper extension is under `store_dir`.
+pub(crate) fn helper_dir(store_dir: &Path) -> PathBuf {
+    store_dir.join(HELPER_DIR)
+}
+
 /// What became of an extension's directory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Bridged {
@@ -41,7 +46,7 @@ fn write(path: &Path, text: &str) -> Result<(), String> {
 /// `chromium/extensions`) and return its directory. Written at every
 /// start, so a newer build's helper replaces an older one's.
 pub(crate) fn write_helper(store_dir: &Path) -> Result<PathBuf, String> {
-    let dir = store_dir.join(HELPER_DIR);
+    let dir = helper_dir(store_dir);
     fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     write(&dir.join("manifest.json"), HELPER_MANIFEST)?;
     write(&dir.join("helper.html"), HELPER_HTML)?;

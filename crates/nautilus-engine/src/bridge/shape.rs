@@ -68,15 +68,9 @@ impl<'a> View<'a> {
     /// A `chrome.tabs.Tab` from the snapshot alone.
     pub(crate) fn tab_json(&self, window: &SnapWindow, index: usize) -> Value {
         let tab = &window.tabs[index];
-        let mut object = json!({
+        let mut object = self.strip_json(window, index);
+        let rest = json!({
             "id": self.ids.ext(tab.id).unwrap_or(TAB_ID_NONE),
-            "index": index,
-            "windowId": window_id(window.id),
-            "groupId": group_id(tab.folder),
-            "active": tab.active,
-            "highlighted": tab.active,
-            "selected": tab.active,
-            "pinned": false,
             "incognito": false,
             "audible": false,
             "mutedInfo": { "muted": false },
@@ -87,6 +81,9 @@ impl<'a> View<'a> {
             "splitViewId": -1,
             "status": status(tab),
         });
+        if let (Some(object), Value::Object(rest)) = (object.as_object_mut(), rest) {
+            object.extend(rest);
+        }
         if self.grants.sees(&tab.url) {
             object["url"] = json!(tab.url);
             object["title"] = json!(tab.title);
