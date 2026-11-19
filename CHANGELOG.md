@@ -8,6 +8,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- The strip's "+" no longer scrolls out of sight when there are more
+  tabs than fit, and the window can always be moved: a stretch right
+  of the "+" is kept free of tabs as the drag area, marked by a grip
+  of dots that lights under the pointer (osmena).
 - The Launch Panel's field completes to a page, without the `?query`
   and `#fragment` an address in the history may carry (osmena): `sho`
   completes to `shop.example/list`, not to
