@@ -57,6 +57,19 @@ pub(crate) fn capture_spent(started: Instant, now: Instant, browser_alive: bool)
     !browser_alive || now.saturating_duration_since(started) >= CAPTURE_WAIT
 }
 
+/// The captures among `open` (each its id, its tab and when it was asked) that
+/// are spent at `now`, given whether a tab's browser is still alive.
+pub(crate) fn spent_captures(
+    open: &[(i32, TabId, Instant)],
+    now: Instant,
+    alive: impl Fn(TabId) -> bool,
+) -> Vec<i32> {
+    open.iter()
+        .filter(|(_, tab, started)| capture_spent(*started, now, alive(*tab)))
+        .map(|(id, _, _)| *id)
+        .collect()
+}
+
 /// A screenshot under way.
 struct Capture {
     call: CallId,
@@ -358,10 +371,8 @@ impl Hub {
             .iter()
             .map(|(id, capture)| (*id, capture.tab, capture.started))
             .collect();
-        for (id, tab, started) in open {
-            if capture_spent(started, now, self.browser_alive(tab)) {
-                self.captured(id, false, &[]);
-            }
+        for id in spent_captures(&open, now, |tab| self.browser_alive(tab)) {
+            self.captured(id, false, &[]);
         }
         if !self.captures.borrow().is_empty() {
             (self.nudge)();
@@ -442,5 +453,25 @@ mod tests {
             true
         ));
         assert!(capture_spent(t0, t0 + CAPTURE_WAIT, true));
+    }
+
+    #[test]
+    fn the_spent_captures_are_the_ones_whose_browser_is_gone_or_whose_wait_is_over() {
+        let t0 = Instant::now();
+        let open = [
+            (1, TabId(1), t0),
+            (2, TabId(2), t0),
+            (3, TabId(3), t0 + CAPTURE_WAIT - Duration::from_millis(1)),
+            (4, TabId(4), t0),
+        ];
+        // Tab 2's browser is gone; captures 1 and 4 have waited out their time;
+        // capture 3 is one millisecond short of it.
+        let alive = |tab: TabId| tab != TabId(2);
+        assert_eq!(
+            spent_captures(&open, t0 + CAPTURE_WAIT, alive),
+            vec![1, 2, 4]
+        );
+        assert_eq!(spent_captures(&open, t0, |_| true), Vec::<i32>::new());
+        assert_eq!(spent_captures(&[], t0, |_| false), Vec::<i32>::new());
     }
 }

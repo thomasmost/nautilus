@@ -161,6 +161,20 @@ pub(crate) fn refusal_script() -> String {
     )
 }
 
+/// Takes the call `call` out of `calls` and returns it when its frame is still
+/// a page of the extension the call was made for: the frame's current address
+/// (`url_of`) decides, against the stored extension. The call is taken either
+/// way, so an answer is given at most once.
+fn take_answer<F>(
+    calls: &mut HashMap<CallId, (F, u64, String)>,
+    call: CallId,
+    url_of: impl FnOnce(&F) -> String,
+) -> Option<(F, u64, String)> {
+    let (frame, id, extension) = calls.remove(&call)?;
+    let url = url_of(&frame);
+    deliverable(&url, &extension).then_some((frame, id, extension))
+}
+
 /// Render process: put the bridge into an extension page's new context.
 /// Called from the render-process handler's `on_context_created`. When the
 /// bound functions cannot be made, the page gets `refusal_script` instead, so
@@ -456,8 +470,10 @@ impl PageLane {
     /// Answer the page call `call`: the page's own number, in the frame
     /// that asked, if that frame is still a page of the extension that asked.
     pub(crate) fn reply(&self, call: CallId, result: Result<Value, String>) {
-        let removed = self.calls.borrow_mut().remove(&call);
-        let Some((frame, id, extension)) = removed else {
+        let answer = take_answer(&mut self.calls.borrow_mut(), call, |frame| {
+            CefString::from(&frame.url()).to_string()
+        });
+        let Some((frame, id, extension)) = answer else {
             return;
         };
         let payload = match result {
@@ -525,6 +541,36 @@ mod tests {
     use super::*;
 
     const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+
+    #[test]
+    fn a_reply_is_taken_only_for_the_frame_still_on_the_extension_that_asked() {
+        const OTHER: &str = "ponmlkjihgfedcbaponmlkjihgfedcba";
+        let page = format!("chrome-extension://{ID}/page.html");
+        let mut calls: HashMap<CallId, (String, u64, String)> = HashMap::new();
+        calls.insert(1, (page.clone(), 7, ID.to_string()));
+        assert_eq!(
+            take_answer(&mut calls, 1, |frame| frame.clone()),
+            Some((page, 7, ID.to_string()))
+        );
+        assert!(calls.is_empty());
+        // The frame navigated to another extension's page: no reply, and the call is gone.
+        calls.insert(
+            2,
+            (
+                format!("chrome-extension://{OTHER}/page.html"),
+                8,
+                ID.to_string(),
+            ),
+        );
+        assert_eq!(take_answer(&mut calls, 2, |frame| frame.clone()), None);
+        assert!(calls.is_empty());
+        // The frame navigated to the web.
+        calls.insert(3, ("https://example.com/".to_string(), 9, ID.to_string()));
+        assert_eq!(take_answer(&mut calls, 3, |frame| frame.clone()), None);
+        assert!(calls.is_empty());
+        // A call that is not pending has no answer.
+        assert_eq!(take_answer(&mut calls, 4, |frame| frame.clone()), None);
+    }
 
     #[test]
     fn a_page_whose_bridge_cannot_be_bound_refuses_native_tabs_and_windows() {
