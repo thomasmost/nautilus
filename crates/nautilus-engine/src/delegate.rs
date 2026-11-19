@@ -927,12 +927,29 @@ wrap_render_handler! {
         }
 
         fn on_popup_show(&self, _browser: Option<&mut Browser>, show: ::std::os::raw::c_int) {
+            // Logged because its absence is the symptom to look for: a
+            // `<select>` that takes the click and opens nothing was
+            // never handed to this view as a popup widget.
+            log::debug!(
+                "tab {}: popup widget {}",
+                self.view.label(),
+                if show != 0 { "shown" } else { "hidden" }
+            );
             self.view.frame.borrow_mut().show_popup(show != 0);
             self.view.report(EngineEvent::FrameReady);
         }
 
         fn on_popup_size(&self, _browser: Option<&mut Browser>, rect: Option<&Rect>) {
             if let Some(rect) = rect {
+                log::debug!(
+                    "tab {}: popup widget at {},{} sized {}x{} (view scale {})",
+                    self.view.label(),
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    self.view.scale.get()
+                );
                 let scale = self.view.scale.get();
                 self.view.frame.borrow_mut().set_popup_rect(
                     (rect.x as f32 * scale).round() as i32,

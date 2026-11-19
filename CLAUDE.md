@@ -488,6 +488,40 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
+## Status and handoff (2026-11-19, `<select>` on macOS: open)
+
+The owner reported that an HTML `<select>` does not open in Nautilus
+on macOS. It is not fixed; this is what is known, for whoever next
+sits at a Mac.
+
+On Windows it works: a debug build on a page with one `<select>`,
+clicked once, logs `popup widget shown`, `popup widget at 100,140
+sized 300x118`, and the capture shows the list under the control
+(`on_popup_show`, `on_popup_size`, `on_paint` with `PET_POPUP`,
+composed by `frame.rs`). Resizing the view closes the list, which is
+Chromium's doing and correct.
+
+Nothing in that path is per platform in this crate, so the difference
+is expected to be Chromium's: on macOS (and Android) Chromium is built
+with external popup menus, where a `<select>` asks the browser process
+for a native menu instead of drawing a popup widget, and a windowless
+view has no native menu to show. CEF is understood to switch that off
+per view in the renderer when it knows the browser is windowless; a
+view whose renderer never learned that would take the click and open
+nothing. That is a hypothesis from reading, not from a run.
+
+To tell, on a Mac: `RUST_LOG=nautilus_engine=debug`, click a
+`<select>`, and look for the two `popup widget` lines (added for
+this). If they are absent, the popup widget path is never taken and
+the hypothesis stands: compare a tab the shell created with one
+Chromium created (`window.open`, `on_before_popup`), and a first load
+with a page reached after a cross-site navigation, and look in CEF's
+own log (`NAUTILUS_CEF_LOG=verbose`) for `NOTIMPLEMENTED` from the
+windowless view's popup menu or for "Timeout of new browser info
+response". If they are present, the list is shown and painted but not
+seen, and the place to look is the popup's rectangle against the view
+scale (`on_popup_size` multiplies by it) and `frame.rs`'s composition.
+
 ## Status and handoff (2026-11-19, the message ids)
 
 The deferred item of the bridge cleanup (PR #2): can the relay choose
