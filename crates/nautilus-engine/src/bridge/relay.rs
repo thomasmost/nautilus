@@ -26,7 +26,7 @@ use super::call_ids::CallIds;
 use super::debugger::{Change, Debuggers};
 use super::evaluation;
 use super::hidden_page::HiddenPage;
-use super::hub::Lane;
+use super::hub::{CAPTURE_IDS, Lane};
 use super::install::HELPER_ID;
 use super::policy::{
     AfterAsk, Answered, Evidence, Identity, JobKind, JobTurn, MAX_OPENINGS, Next, Opening,
@@ -49,10 +49,16 @@ const HELPER_KEY: &str = "helper";
 /// (`chrome-extension://<id><RELAY_PATH>`). It is `BRIDGE_DIR`'s relay.
 pub(crate) const RELAY_PATH: &str = "/nautilus-bridge/relay.html";
 
-/// The sentinel of a tab's probe whose call is in progress (`Probe::sent`).
-const RESERVED: i32 = -1;
-/// The sentinel of a tab's probe whose call failed: no result carries it.
-const NOT_SENT: i32 = -2;
+/// The DevTools message id of a tab's probe (`Bridge::track`). The probe is
+/// the first DevTools call on its tab's browser, and CEF keeps a caller's id
+/// that is not below the browser's next one (`Inner::next_message`), and a
+/// browser counts from 1. The same browser later carries the hub's
+/// screenshots, whose ids are above `CAPTURE_IDS`, so the probe's must stay
+/// below it.
+const TAB_PROBE_ID: i32 = 1;
+const _: () = assert!(TAB_PROBE_ID < CAPTURE_IDS);
+/// A tab's probe whose call was not sent: no result carries this id.
+const NOT_SENT: i32 = 0;
 
 /// Waiting jobs beyond this are failed, oldest first, so a page that
 /// never comes back cannot grow the queue without bound.
@@ -210,15 +216,6 @@ impl Job {
     }
 }
 
-/// An evaluation whose call is in progress: its pending entry is reserved
-/// before the call, because CEF can answer inside the call, before it has
-/// returned the message id. Such an answer is matched here by `key`.
-struct Sending {
-    token: u64,
-    key: String,
-    pending: Option<Pending>,
-}
-
 /// How a hidden page has fared in its openings (`policy::next_opening`):
 /// the openings since its last successful probe (`failed`), the openings whose
 /// relay passed its probe and then could not reach its worker (`unreached`,
@@ -269,9 +266,13 @@ struct Inner {
     /// Evaluations sent and not yet answered, by page key and the
     /// DevTools message id of that page's browser.
     pending: HashMap<(String, i32), Pending>,
-    /// Evaluations whose call has not returned yet.
-    sending: Vec<Sending>,
-    next_token: u64,
+    /// The message id of the next evaluation in any hidden page. CEF
+    /// keeps a caller's id when it is not below the next id of the page's
+    /// browser (`CefDevToolsController::ExecuteDevToolsMethod`: each browser
+    /// counts from 1 and moves past every id it is given), and nothing else
+    /// sends on a hidden page's browser, so one increasing counter for all
+    /// the pages is always kept.
+    next_message: i32,
     /// The helper has been asked for the targets and has not answered.
     refreshing: bool,
     /// A tab's target id was learned after the last refresh: the next turn
@@ -357,7 +358,7 @@ impl Bridge {
             inner: RefCell::new(Inner {
                 next_delivery: 1,
                 next_generation: 1,
-                next_token: 1,
+                next_message: 1,
                 ..Inner::default()
             }),
         })
@@ -371,24 +372,22 @@ impl Bridge {
         let Some(host) = browser.host() else {
             return;
         };
-        let probe = Rc::new(Probe::default());
-        // Reserved before the call: CEF can answer inside it (see `Probe`).
-        probe.sent.set(RESERVED);
-        let mut observer = TabProbe::new(self.clone(), tab, probe.clone());
+        // The id is the probe's own and the observer knows it before the
+        // call: CEF can answer inside it.
+        let sent = Rc::new(Cell::new(TAB_PROBE_ID));
+        let mut observer = TabProbe::new(self.clone(), tab, sent.clone());
         let registration = host.add_dev_tools_message_observer(Some(&mut observer));
-        let id = host.execute_dev_tools_method(0, Some(&"Target.getTargetInfo".into()), None);
+        let id =
+            host.execute_dev_tools_method(TAB_PROBE_ID, Some(&"Target.getTargetInfo".into()), None);
         if id == 0 {
-            probe.sent.set(NOT_SENT);
-            probe.early.borrow_mut().clear();
+            sent.set(NOT_SENT);
             log::warn!("bridge: cannot ask {tab:?} for its target id");
-        } else {
-            probe.sent.set(id);
-            let early: Vec<(i32, bool, Vec<u8>)> = probe.early.borrow_mut().drain(..).collect();
-            for (message, success, result) in early {
-                if message == id {
-                    self.target_known(tab, success, &result);
-                }
-            }
+        } else if id != TAB_PROBE_ID {
+            // Not expected: the probe is the first call on its browser.
+            sent.set(id);
+            log::warn!(
+                "bridge: CEF replaced message id {TAB_PROBE_ID} with {id} for {tab:?}'s probe"
+            );
         }
         self.inner.borrow_mut().tabs.insert(
             tab,
@@ -850,48 +849,36 @@ impl Bridge {
         }
     }
 
-    /// Evaluate `expression` in the page under `key`; the pending entry is
-    /// reserved before the call and settled after it, so an answer that
-    /// CEF gives inside the call (before the call returns its id) is still
-    /// matched (`page_result`). The state is not borrowed across the call.
+    /// Evaluate `expression` in the page under `key`. The pending entry is
+    /// recorded before the call, under a message id of the bridge's own
+    /// (`Inner::next_message`), so an answer that CEF gives inside the call
+    /// finds it (`page_result`). The state is not borrowed across the call.
     fn evaluate(&self, key: &str, expression: &str, pending: Pending) -> bool {
-        let browser = {
-            let inner = self.inner.borrow();
-            page_ref(&inner, key).map(|page| page.browser.clone())
+        let (browser, id) = {
+            let mut inner = self.inner.borrow_mut();
+            let Some(browser) = page_ref(&inner, key).map(|page| page.browser.clone()) else {
+                return false;
+            };
+            let id = inner.next_message;
+            inner.next_message += 1;
+            inner.pending.insert((key.to_string(), id), pending);
+            (browser, id)
         };
-        let Some(browser) = browser else {
-            return false;
-        };
-        let token = self.reserve(key, pending);
-        let id = HiddenPage::evaluate(&browser, expression);
-        self.settle(token, key, id)
-    }
-
-    fn reserve(&self, key: &str, pending: Pending) -> u64 {
+        let sent = HiddenPage::evaluate(&browser, id, expression);
+        if sent == Some(id) {
+            return true;
+        }
+        // The entry may be gone already: its page can be lost inside the call.
         let mut inner = self.inner.borrow_mut();
-        let token = inner.next_token;
-        inner.next_token += 1;
-        inner.sending.push(Sending {
-            token,
-            key: key.to_string(),
-            pending: Some(pending),
-        });
-        token
-    }
-
-    /// The call returned `id`: the reservation becomes a pending entry under
-    /// it, unless the answer already came (and took the entry). A failed call
-    /// leaves nothing pending.
-    fn settle(&self, token: u64, key: &str, id: Option<i32>) -> bool {
-        let mut inner = self.inner.borrow_mut();
-        let Some(at) = inner.sending.iter().position(|s| s.token == token) else {
-            return id.is_some();
-        };
-        let sent = inner.sending.remove(at);
-        match id {
-            Some(id) => {
-                if let Some(pending) = sent.pending {
-                    inner.pending.insert((key.to_string(), id), pending);
+        let entry = inner.pending.remove(&(key.to_string(), id));
+        match sent {
+            Some(sent) => {
+                // Not expected (see `Inner::next_message`). An answer that came
+                // inside the call found no entry and is lost.
+                log::warn!("bridge: CEF replaced message id {id} with {sent} for the page {key}");
+                inner.next_message = inner.next_message.max(sent.saturating_add(1));
+                if let Some(entry) = entry {
+                    inner.pending.insert((key.to_string(), sent), entry);
                 }
                 true
             }
@@ -1554,17 +1541,7 @@ impl Bridge {
             if !is_current(&inner, key, generation) {
                 return;
             }
-            match inner.pending.remove(&(key.to_string(), id)) {
-                Some(pending) => Some(pending),
-                // The answer came while its call was still running, before
-                // the call returned the id: it is the reservation's.
-                None => inner
-                    .sending
-                    .iter_mut()
-                    .rev()
-                    .find(|s| s.key == key && s.pending.is_some())
-                    .and_then(|s| s.pending.take()),
-            }
+            inner.pending.remove(&(key.to_string(), id))
         };
         let Some(pending) = pending else {
             return;
@@ -1930,14 +1907,6 @@ fn drop_pending(inner: &mut Inner, key: &str, why: &str) {
         log_lost(key, pending, why);
         false
     });
-    // An evaluation still inside its call is dropped with its page: its
-    // answer, if any, is for a page that is gone.
-    for sent in inner.sending.iter_mut().filter(|s| s.key == key) {
-        if let Some(pending) = &sent.pending {
-            log_lost(key, pending, why);
-        }
-        sent.pending = None;
-    }
 }
 
 /// A tab's Chromium id as the log shows it, so that a run can name the tab
@@ -1955,22 +1924,14 @@ fn describe(value: &Result<Value, String>) -> String {
     }
 }
 
-/// One tab's probe for its target id: the message id of the one
-/// `Target.getTargetInfo` it sends (`sent`). Until the call returns, that id
-/// is `RESERVED`, and CEF's answers in the window are kept (`early`); they
-/// count only once the call has returned the id they carry. So the probe
-/// acts on its own result and on no other method's result.
-#[derive(Default)]
-struct Probe {
-    sent: Cell<i32>,
-    early: RefCell<Vec<(i32, bool, Vec<u8>)>>,
-}
-
+// One tab's probe for its target id. `sent` is the message id of the one
+// `Target.getTargetInfo` it sends (`TAB_PROBE_ID`, set before the call), so
+// the probe acts on its own result and on no other method's result.
 wrap_dev_tools_message_observer! {
     struct TabProbe {
         bridge: Rc<Bridge>,
         tab: TabId,
-        probe: Rc<Probe>,
+        sent: Rc<Cell<i32>>,
     }
 
     impl DevToolsMessageObserver {
@@ -1981,17 +1942,9 @@ wrap_dev_tools_message_observer! {
             success: ::std::os::raw::c_int,
             result: Option<&[u8]>,
         ) {
-            let result = result.unwrap_or_default();
-            match self.probe.sent.get() {
-                RESERVED => self
-                    .probe
-                    .early
-                    .borrow_mut()
-                    .push((message_id, success != 0, result.to_vec())),
-                sent if sent == message_id => {
-                    self.bridge.target_known(self.tab, success != 0, result);
-                }
-                _ => {}
+            if self.sent.get() == message_id {
+                self.bridge
+                    .target_known(self.tab, success != 0, result.unwrap_or_default());
             }
         }
     }

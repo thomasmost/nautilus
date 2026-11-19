@@ -91,11 +91,11 @@ impl HiddenPage {
     }
 
     /// Evaluate `expression` (a promise is awaited, the value returned
-    /// by value); the DevTools message id the answer will carry.
-    pub(super) fn evaluate(browser: &Browser, expression: &str) -> Option<i32> {
-        // Id 0 asks CEF for the next id of this browser; a caller's
-        // own id may be raised, so the returned one is what counts.
-        crate::devtools::evaluate(&browser.host()?, 0, expression)
+    /// by value) as DevTools message `id`; the id the answer will carry.
+    pub(super) fn evaluate(browser: &Browser, id: i32, expression: &str) -> Option<i32> {
+        // CEF keeps `id` when it is not below this browser's next id, and
+        // otherwise uses that next id (`Bridge::evaluate` has the rule).
+        crate::devtools::evaluate(&browser.host()?, id, expression)
     }
 
     pub(super) fn close(&self) {

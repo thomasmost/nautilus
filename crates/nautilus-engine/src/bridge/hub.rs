@@ -46,7 +46,7 @@ pub(crate) enum Lane {
 
 /// The first DevTools message id the hub uses on a tab's browser; other
 /// users of that channel stay far below it.
-const CAPTURE_IDS: i32 = 1_000_000;
+pub(super) const CAPTURE_IDS: i32 = 1_000_000;
 const CAPTURE_FAILED: &str = "Failed to capture tab: the browser returned no image.";
 /// How long a screenshot may take before it fails.
 const CAPTURE_WAIT: Duration = Duration::from_secs(10);

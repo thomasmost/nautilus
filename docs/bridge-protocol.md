@@ -685,7 +685,7 @@ Adaptations carried by later tasks:
 
 Not determined at reconciliation:
 
-- Whether CEF answers `Target.getTargetInfo` inside the `execute_dev_tools_method` call (the basis of the reservation in B8).
+- Whether CEF answers `Target.getTargetInfo` inside the `execute_dev_tools_method` call (the basis of the reservation in B8). It no longer matters: since 2026-11-19 the probe and the relay send under ids of their own, recorded before the call, and the reservation (`reserve`, `settle`) is gone.
 - Whether `ext/phase5.js` is inert when no suite is listening (B15): settled by the scripted run, see "The scripted run (phase5.py)" below. Its results are the same as before, with one change the runs showed: its listeners let a delivered event start a stopped worker.
 - Whether the Phase 5 code compiles against the bridge: settled by the compiler in Tasks 9 to 12, not by reading.
 
@@ -1244,7 +1244,8 @@ Not verified:
   and `AC3.4` failing once in two earlier passes, and `Failed to create API on
   Chrome object` in the restore launch (not identified).
 - Whether CEF answers `Target.getTargetInfo` inside the probe's call (the basis
-  of the reservation in the reconciliation's B8).
+  of the reservation in the reconciliation's B8). It no longer matters: since
+  2026-11-19 the probe sends under its own id and there is no reservation.
 
 For the next phase: the protocol and the method tables above are the contract;
 a namespace is added as "How a later phase adds a namespace" describes. The

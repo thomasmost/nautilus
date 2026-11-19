@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-19 (the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-19 (the relay and the tab probe choose their own DevTools message ids, see the status section of 2026-11-19, the message ids; before that, the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -313,8 +313,11 @@ Ninja on `PATH`:
   rewritten manifest names, the loader sits beside the original entry
   (relative `importScripts` resolve against the worker's URL), and
   the engine talks to a relay page with `Runtime.evaluate`, as the
-  manager talks to `chrome://extensions`. Use the message id
-  `execute_dev_tools_method(0, …)` returns. Names in an extension's
+  manager talks to `chrome://extensions`. Every DevTools call carries
+  an id of the caller's own, recorded before the call (CEF can answer
+  inside it): CEF keeps an id that is not below the browser's next one,
+  so ids must increase on each browser (the status section of
+  2026-11-19, the message ids). Names in an extension's
   root must not start with `_`. Every extension is bridged when it loads
   (store install, "Load unpacked…", `NAUTILUS_TEST_CONTROL`'s `load`:
   `ExtensionManager::load_bridged`), from Phase 5 of the side-panel plan on.
@@ -485,6 +488,65 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
+## Status and handoff (2026-11-19, the message ids)
+
+The deferred item of the bridge cleanup (PR #2): can the relay choose
+its own DevTools message ids, as the manager and the screenshots do?
+Yes. The rule, read in CEF's source at the pinned commit (154.0.34,
+`14c5a08`, `libcef/browser/devtools/devtools_controller.cc`,
+`CefDevToolsController::ExecuteDevToolsMethod`): a caller's id is kept
+when it is not below the controller's `next_message_id_`, and the
+counter then moves to one past it; an id below the counter (0 among
+them) is replaced by the counter's value. The counter starts at 1 and
+there is one controller per browser, made on the first DevTools call
+and kept. `SendDevToolsMessage` (the test control's raw `devtools`
+message) does not read or move the counter. So an id that increases on
+each browser is always kept.
+
+What changed (`bridge/relay.rs`, `bridge/hidden_page.rs`):
+
+- `Bridge::evaluate` takes an id from one counter for every hidden
+  page (`Inner::next_message`, from 1), records the pending entry under
+  it, then calls. Nothing else sends on a hidden page's browser. An
+  unsent call removes the entry. A returned id that differs moves the
+  entry and logs `bridge: CEF replaced message id …` (a warning).
+- A tab's probe sends `Target.getTargetInfo` as id 1 (`TAB_PROBE_ID`),
+  known to its observer before the call. It is the first DevTools call
+  on its tab's browser (`track` is called once per browser, at creation
+  or at a popup's adoption); the hub's screenshots on the same browser
+  start above `CAPTURE_IDS` (1,000,000), and a constant assertion keeps
+  the probe's id below that.
+- Gone: `Sending`, `reserve`, `settle`, the reservation fallback in
+  `page_result`, the `sending` half of `drop_pending`, `RESERVED`,
+  `Probe` and its `early` buffer. The manager's and the hub's ids, the
+  generation check (`is_current`) and every log line's words are as
+  they were.
+
+Verified on the Mac (Apple silicon), exit status in brackets. Before
+the change, on `ef87e1f` with a bundle built with `--features
+test-hooks`: `run.sh` `spike` [0, 54 PASS], `pump` [0, 7], `reload`
+[0, 7], `zombie` [0, 21], `broken` [0, 14], `stop` [0, 17], `idle`
+[0, 9]; `phase5.py` [0, 74 PASS, 0 FAIL]. That run is also the first
+harness run of PR #2's other commits (one delivery path, the helper's
+page in the relays' map, the single platform gate). After the change:
+`cargo fmt --all --check` [0]; clippy `-D warnings` with and without
+`--all-features` [0, 0]; `cargo test --workspace` [0; 247 and 3
+passed] and with `--all-features` [0; 258 and 3]; `node
+ci/side-panel/bridge_check.mjs` [0]; `cargo xtask bundle-mac
+--features test-hooks` [0]; the same eight runs, each once, with the
+same statuses and counts. The warning's text is in the bundled binary
+and in none of the launches' logs (`run.sh`'s with `SIDE_PANEL_LOGS`,
+`phase5.py`'s `main.log` and `restore.log`), nor is `cannot ask`.
+
+Not verified: Windows (nothing ran there; the code has no platform
+branch); an answer that arrives inside the call was not provoked or
+counted, so whether CEF ever does that here is still not known (the
+entry is recorded first either way); each mode ran once per build, so
+a rare race would not show. The local osmena checkout was 42 commits
+behind the pinned revision, so the builds used a temporary project
+patch table pointing at the `extension-side-panel` worktree (`9bafb0e`,
+the pinned revision), not committed.
+
 ## Status and handoff (2026-11-19, the test hooks)
 
 From a review of the branch before its merge: the scripted runs' hooks
@@ -523,7 +585,8 @@ on a push to `main`.
 
 Left for a follow-up, from the same review: `relay.rs` holds six jobs
 in one `RefCell` and has almost no tests; DevTools evaluation is
-written twice with two conventions for message ids; clicks and events
+written twice with two conventions for message ids (settled: the
+status section of 2026-11-19, the message ids); clicks and events
 are one delivery written twice; the helper's page is special-cased
 beside the relays' map; three maps hold a tab's browser; the
 `cfg(any(windows, target_os = "macos"))` gates are inconsistent
