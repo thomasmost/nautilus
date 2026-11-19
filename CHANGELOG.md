@@ -8,6 +8,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- Tabs narrow to 40 points, an icon between its paddings, before the
+  strip scrolls, where every tab stopped at 64 (osmena). The active
+  tab keeps 64, so its close control always shows, and a tab that is
+  recording keeps room for its mark. A tab grows to its width when it
+  is selected, its close control fading in, and shrinks back when
+  another is. A narrow inactive tab is closed with the middle button
+  or once selected.
 - The strip's "+" no longer scrolls out of sight when there are more
   tabs than fit, and the window can always be moved: a stretch right
   of the "+" is kept free of tabs as the drag area, marked by a grip
