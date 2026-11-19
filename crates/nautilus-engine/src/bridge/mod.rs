@@ -27,16 +27,11 @@ mod state;
 pub(crate) mod transport;
 
 mod call_ids;
-#[cfg(any(windows, target_os = "macos"))]
 mod hidden_page;
-#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod hub;
-#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod pages;
-#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod relay;
 
-#[cfg(any(windows, target_os = "macos"))]
 pub(crate) use relay::Bridge;
 
 const CORE_JS: &str = include_str!("js/core.js");

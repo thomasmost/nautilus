@@ -91,6 +91,22 @@ Ninja on `PATH`:
   patch the osmena checkout in `~/.cargo/config.toml` (osmena's README),
   make it there with its tests, push, and bump the `rev`s here. Only what
   Chromium needs lives in this repository.
+- **Extensions have one platform seam.** Windows and macOS run
+  extensions; nothing else does yet. The gate is
+  `cfg(any(windows, target_os = "macos"))`, and it stands in few
+  places: `mod bridge` in `lib.rs` (the whole bridge, once), the
+  `native` and `stub` halves of `ExtensionManager` (`extensions.rs`)
+  and of `Popups` (`popup.rs`), the delegate's ends of the bridge (one
+  `impl` block, two fields and the process-message hook in
+  `delegate.rs`), and the script-context hook in `store.rs`. The engine
+  itself has none: it reaches the bridge only through
+  `ExtensionManager` (`strip_changed`, `extension_reply`,
+  `poll_bridge`, `tick_bridge`, `release_bridge`), which the stub
+  answers with nothing. Supporting another platform (Linux) means the
+  two windows that are platform code, the manager's hidden window and
+  the action popup, and then widening that one condition; the bridge
+  has no platform code of its own. No build on another platform is
+  made or tested, so expect the stub to need care the first time.
 - **Engine facts live in `INFO`.** `nautilus_engine::INFO` names the
   engine, its Chromium major (bump it with the `cef` pin), its data
   directory (`chromium/`), and its wheel distance; product strings live in

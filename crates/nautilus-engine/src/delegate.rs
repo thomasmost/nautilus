@@ -107,11 +107,9 @@ pub(crate) struct DelegateState {
     /// (kept so a page's browser can be matched without asking CEF under
     /// the borrow): for the screenshot `tabs.captureVisibleTab` takes, and
     /// to tell which view a page that calls the bridge is in.
-    #[cfg(any(windows, target_os = "macos"))]
     views: RefCell<HashMap<TabId, (std::os::raw::c_int, Browser)>>,
     /// Each open action popup's browser, by CEF's identifier, with the tab
     /// that was active when it opened (which names its window).
-    #[cfg(any(windows, target_os = "macos"))]
     popups_over: RefCell<HashMap<std::os::raw::c_int, TabId>>,
     /// The bridge's hub; the engine owns it, hence weak.
     #[cfg(any(windows, target_os = "macos"))]
@@ -172,7 +170,6 @@ impl DelegateState {
 
     /// Let go of the views and popups of the browser `id`. Each removed value
     /// is let go of after its borrow is released.
-    #[cfg(any(windows, target_os = "macos"))]
     fn forget_views(&self, id: std::os::raw::c_int) {
         let views: Vec<(TabId, (std::os::raw::c_int, Browser))> = {
             let mut views = self.views.borrow_mut();
@@ -189,35 +186,20 @@ impl DelegateState {
         self.popups_over.borrow_mut().remove(&id);
     }
 
-    /// Other platforms open no views or popups, so there is nothing to let go.
-    #[cfg(not(any(windows, target_os = "macos")))]
-    fn forget_views(&self, _id: std::os::raw::c_int) {}
-
     /// A tab's view was created: its browser is `browser`.
-    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn register_view(&self, tab: TabId, browser: &Browser) {
         let id = browser.identifier();
         let displaced = self.views.borrow_mut().insert(tab, (id, browser.clone()));
         drop(displaced);
     }
 
-    /// Other platforms open no views, so there is none to record.
-    #[cfg(not(any(windows, target_os = "macos")))]
-    pub(crate) fn register_view(&self, _tab: TabId, _browser: &Browser) {}
-
     /// A tab's view is gone (`TabHost::close_tab`, or the host dropped).
-    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn unregister_view(&self, tab: TabId) {
         let removed = self.views.borrow_mut().remove(&tab);
         drop(removed);
     }
 
-    /// Other platforms record no views, so there is none to remove.
-    #[cfg(not(any(windows, target_os = "macos")))]
-    pub(crate) fn unregister_view(&self, _tab: TabId) {}
-
     /// The browser showing the view `tab`.
-    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn browser_of(&self, tab: TabId) -> Option<Browser> {
         self.views
             .borrow()
@@ -225,27 +207,20 @@ impl DelegateState {
             .map(|(_, browser)| browser.clone())
     }
 
-    /// Other platforms record no views: no tab has a browser here.
-    #[cfg(not(any(windows, target_os = "macos")))]
-    pub(crate) fn browser_of(&self, _tab: TabId) -> Option<Browser> {
-        None
-    }
-
     /// An action popup opened over `over`: its browser, by CEF's id.
-    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn register_popup(&self, browser: &Browser, over: TabId) {
         let id = browser.identifier();
         self.popups_over.borrow_mut().insert(id, over);
     }
+}
 
-    /// Other platforms open no popups, so there is none to record.
-    #[cfg(not(any(windows, target_os = "macos")))]
-    pub(crate) fn register_popup(&self, _browser: &Browser, _over: TabId) {}
-
+/// The delegate's ends of the extension bridge (`bridge`), on the
+/// platforms that have it.
+#[cfg(any(windows, target_os = "macos"))]
+impl DelegateState {
     /// Who is asking, for a bridge call from a page in `browser`: the view it
     /// is, the popup it is, or (any other browser) nobody with a window, like
     /// a worker. Used by the extension pages' lane.
-    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn asker_of(&self, browser: &Browser) -> crate::bridge::transport::Asker {
         use crate::bridge::transport::Asker;
         let id = browser.identifier();
@@ -266,29 +241,27 @@ impl DelegateState {
 
     /// The lane extension pages call the bridge on, once the engine has
     /// made it (`engine.rs`). The lane holds no reference back here.
-    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn set_page_lane(&self, lane: &Rc<crate::bridge::pages::PageLane>) {
         *self.page_lane.borrow_mut() = Some(lane.clone());
     }
 
     /// The page lane, while the engine is alive.
-    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn page_lane(&self) -> Option<Rc<crate::bridge::pages::PageLane>> {
         self.page_lane.borrow().clone()
     }
 
     /// The bridge's hub, once the engine has made it.
-    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn set_hub(&self, hub: &Rc<crate::bridge::hub::Hub>) {
         *self.hub.borrow_mut() = Rc::downgrade(hub);
     }
 
     /// The bridge's hub, while the engine is alive.
-    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn hub(&self) -> Option<Rc<crate::bridge::hub::Hub>> {
         self.hub.borrow().upgrade()
     }
+}
 
+impl DelegateState {
     /// Answer the next folder dialog with `dir` instead of showing it.
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) fn set_extensions(&self, manager: &Rc<ExtensionManager>) {
