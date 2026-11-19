@@ -287,6 +287,7 @@ mod stub {
 
         pub(crate) fn untrack_tab(&self, _tab: osmena_core::TabId) {}
 
+        #[cfg(feature = "test-hooks")]
         pub(crate) fn poll_control(&self) {}
 
         pub(crate) fn poll_bridge(&self) {}
@@ -403,18 +404,35 @@ mod native {
     }
 
     /// A scripted run's command directory (`NAUTILUS_TEST_CONTROL`).
+    #[cfg(feature = "test-hooks")]
     struct Control {
         dir: PathBuf,
         /// The number of the next `cmd-N.json` to carry out.
         next: u32,
     }
 
+    /// What a scripted run holds in the manager. Only a build with the
+    /// `test-hooks` feature has it.
+    #[cfg(feature = "test-hooks")]
+    #[derive(Default)]
+    struct Hooks {
+        /// The scripted run's command directory, if one was named.
+        control: Option<Control>,
+        /// A scripted run's hold on the extension list (`hold_list`): until
+        /// this instant, a listing's answer is not read (sync sees no list).
+        list_hold: Option<Instant>,
+        /// A listing's answer came during the hold; it is read again when the
+        /// hold ends, so that the list the engine acts on is the one after it.
+        list_held: bool,
+    }
+
     /// The scripted run's control directory, if `NAUTILUS_TEST_CONTROL`
     /// names one that may be used. A directory that fails the check is
     /// logged and the hook stays off.
+    #[cfg(feature = "test-hooks")]
     fn test_control(engine_dir: &Path) -> Option<Control> {
         let dir = PathBuf::from(std::env::var_os("NAUTILUS_TEST_CONTROL")?);
-        if let Some(reason) = super::control_refusal(&dir, engine_dir) {
+        if let Some(reason) = crate::test_control::control_refusal(&dir, engine_dir) {
             log::warn!(
                 "TEST HOOK refused: {} ({reason}); the hook stays off",
                 dir.display()
@@ -465,14 +483,9 @@ mod native {
         /// The helper extension was missing from a listing and its load
         /// has been asked for.
         helper_requested: bool,
-        /// The scripted run's command directory, if one was named.
-        control: Option<Control>,
-        /// A scripted run's hold on the extension list (`hold_list`): until
-        /// this instant, a listing's answer is not read (sync sees no list).
-        list_hold: Option<Instant>,
-        /// A listing's answer came during the hold; it is read again when the
-        /// hold ends, so that the list the engine acts on is the one after it.
-        list_held: bool,
+        /// A scripted run's control and its hold on the list.
+        #[cfg(feature = "test-hooks")]
+        hooks: Hooks,
         /// Extensions whose directory was already looked at for the bridge
         /// this run (`on_list`), so each is bridged once per run.
         checked: HashSet<String>,
@@ -512,6 +525,19 @@ mod native {
             engine_dir: &Path,
             unpacked: Arc<UnpackQueue>,
         ) -> Rc<Self> {
+            #[cfg(not(feature = "test-hooks"))]
+            for hook in [
+                "NAUTILUS_TEST_CONTROL",
+                "NAUTILUS_TEST_PAGE_SCRIPT",
+                "NAUTILUS_PUMP_LOG",
+                "NAUTILUS_PUMP_TICK_MS",
+            ] {
+                if std::env::var_os(hook).is_some() {
+                    log::warn!(
+                        "{hook} is set, but this build has no test hooks: build with `--features test-hooks`"
+                    );
+                }
+            }
             let store_dir = engine_dir.join("extensions");
             if let Err(e) = bridge::install::write_helper(&store_dir) {
                 log::error!("cannot write the helper extension: {e}");
@@ -537,9 +563,11 @@ mod native {
                     loads: VecDeque::new(),
                     loading: false,
                     helper_requested: false,
-                    control: test_control(engine_dir),
-                    list_hold: None,
-                    list_held: false,
+                    #[cfg(feature = "test-hooks")]
+                    hooks: Hooks {
+                        control: test_control(engine_dir),
+                        ..Hooks::default()
+                    },
                     checked: HashSet::new(),
                     migrations: Default::default(),
                 }),
@@ -851,15 +879,16 @@ mod native {
         /// Carry out the next command of a scripted run, if one is
         /// waiting. Called by the engine on every spin; does nothing
         /// unless `NAUTILUS_TEST_CONTROL` was set.
+        #[cfg(feature = "test-hooks")]
         pub(crate) fn poll_control(self: &Rc<Self>) {
             // A hold that ended with a listing held reads the list again, so the
             // engine acts on the list as it is after the hold.
             let again = {
                 let mut inner = self.inner.borrow_mut();
-                match inner.list_hold {
+                match inner.hooks.list_hold {
                     Some(until) if Instant::now() >= until => {
-                        inner.list_hold = None;
-                        std::mem::take(&mut inner.list_held)
+                        inner.hooks.list_hold = None;
+                        std::mem::take(&mut inner.hooks.list_held)
                     }
                     _ => false,
                 }
@@ -870,7 +899,7 @@ mod native {
             }
             let (number, text) = {
                 let mut inner = self.inner.borrow_mut();
-                let Some(control) = inner.control.as_mut() else {
+                let Some(control) = inner.hooks.control.as_mut() else {
                     return;
                 };
                 let path = control.dir.join(format!("cmd-{}.json", control.next));
@@ -926,7 +955,7 @@ mod native {
                 // The extension list is not read for this long, so the
                 // engine's sync sees no change while the extension reloads.
                 log::info!("TEST HOOK: command {number}: hold_list {seconds} s");
-                self.inner.borrow_mut().list_hold =
+                self.inner.borrow_mut().hooks.list_hold =
                     Some(Instant::now() + std::time::Duration::from_secs(seconds));
             } else if let Some(relay) = command.get("relay_eval") {
                 // The relay page's own answer to an expression, logged.
@@ -951,10 +980,11 @@ mod native {
 
         /// Append a DevTools message of the management browser to the
         /// scripted run's `devtools.log`.
+        #[cfg(feature = "test-hooks")]
         fn control_log(&self, message: &[u8]) {
             use std::io::Write;
             let inner = self.inner.borrow();
-            let Some(control) = inner.control.as_ref() else {
+            let Some(control) = inner.hooks.control.as_ref() else {
                 return;
             };
             let file = std::fs::OpenOptions::new()
@@ -1141,21 +1171,26 @@ mod native {
             }
         }
 
+        /// Whether a scripted run's hold (`hold_list`) is on: the listing is
+        /// then not read, so sync sees no change while the hold lasts.
+        #[cfg(feature = "test-hooks")]
+        fn list_is_held(&self) -> bool {
+            let mut inner = self.inner.borrow_mut();
+            let held = inner
+                .hooks
+                .list_hold
+                .is_some_and(|until| Instant::now() < until);
+            if held && !std::mem::replace(&mut inner.hooks.list_held, true) {
+                log::info!("TEST HOOK: an extension list read is held until the hold ends");
+            }
+            held
+        }
+
         /// The current list: remember the popups, report the model's view.
         fn on_list(&self, items: &[serde_json::Value]) {
-            {
-                // A scripted run's hold (`hold_list`): the listing is not read,
-                // so sync sees no change while the hold lasts.
-                let mut inner = self.inner.borrow_mut();
-                if let Some(until) = inner.list_hold
-                    && Instant::now() < until
-                {
-                    if !inner.list_held {
-                        log::info!("TEST HOOK: an extension list read is held until the hold ends");
-                    }
-                    inner.list_held = true;
-                    return;
-                }
+            #[cfg(feature = "test-hooks")]
+            if self.list_is_held() {
+                return;
             }
             let mut known = Vec::new();
             let mut extensions = Vec::new();
@@ -1610,16 +1645,20 @@ mod native {
         }
 
         impl DevToolsMessageObserver {
-            // Every message, for a scripted run's log. 0: not handled,
-            // so the method results and events are still delivered.
+            // Every message, for a scripted run's log (a build with the
+            // `test-hooks` feature). 0: not handled, so the method results
+            // and events are still delivered.
             fn on_dev_tools_message(
                 &self,
                 _browser: Option<&mut Browser>,
                 message: Option<&[u8]>,
             ) -> ::std::os::raw::c_int {
+                #[cfg(feature = "test-hooks")]
                 if let Some(message) = message {
                     self.manager.control_log(message);
                 }
+                #[cfg(not(feature = "test-hooks"))]
+                let _ = message;
                 0
             }
 
@@ -1706,252 +1745,6 @@ mod native {
                 manager.store_download_finished(&self.id, bytes);
             }
         }
-    }
-}
-/// Why `NAUTILUS_TEST_CONTROL`'s directory must not be used, or `None`
-/// when it may. Unix: the directory must belong to the user that owns the
-/// profile's engine directory (the browser created it), and no one but its
-/// owner may write to it (`control_refusal_for`). Windows: the directory,
-/// canonicalised, must lie inside the user's own profile tree (the canonical
-/// `%USERPROFILE%`, which holds `%TEMP%`), by `outside_profile`. Any other
-/// platform refuses, since it has no rule.
-#[cfg(unix)]
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-fn control_refusal(dir: &std::path::Path, profile: &std::path::Path) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-    let meta = match std::fs::metadata(dir) {
-        Ok(meta) => meta,
-        Err(e) => return Some(format!("it cannot be read: {e}")),
-    };
-    match std::fs::metadata(profile) {
-        Ok(owner) => control_refusal_for(&meta, owner.uid()),
-        Err(e) => Some(format!("the profile directory cannot be read: {e}")),
-    }
-}
-
-#[cfg(windows)]
-fn control_refusal(dir: &std::path::Path, _profile: &std::path::Path) -> Option<String> {
-    let dir = match std::fs::canonicalize(dir) {
-        Ok(dir) => dir,
-        Err(e) => return Some(format!("it cannot be canonicalised: {e}")),
-    };
-    if !dir.is_dir() {
-        return Some("it is not a directory".to_string());
-    }
-    let Some(home) = std::env::var_os("USERPROFILE") else {
-        return Some("USERPROFILE is not set, so the profile tree is unknown".to_string());
-    };
-    match std::fs::canonicalize(&home) {
-        Ok(home) => outside_profile(&dir, &home, true),
-        Err(e) => Some(format!(
-            "the user's profile folder cannot be canonicalised: {e}"
-        )),
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn control_refusal(_dir: &std::path::Path, _profile: &std::path::Path) -> Option<String> {
-    Some("this platform has no rule for the control directory".to_string())
-}
-
-/// The Windows containment rule, as a pure function over canonical paths so
-/// that it is tested on every platform: `dir` must be `root` or inside it,
-/// compared component by component (`C:\Users\Thomas2` is not inside
-/// `C:\Users\Thomas`), with each name compared case-insensitively when
-/// `fold_case` (Windows' file system). `None` when `dir` may be used.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn outside_profile(
-    dir: &std::path::Path,
-    root: &std::path::Path,
-    fold_case: bool,
-) -> Option<String> {
-    let names = |path: &std::path::Path| -> Vec<String> {
-        path.components()
-            .map(|part| {
-                let name = part.as_os_str().to_string_lossy().into_owned();
-                if fold_case { name.to_lowercase() } else { name }
-            })
-            .collect()
-    };
-    let (dir_names, root_names) = (names(dir), names(root));
-    let inside = !root_names.is_empty()
-        && dir_names.len() >= root_names.len()
-        && dir_names[..root_names.len()] == root_names[..];
-    if inside {
-        None
-    } else {
-        Some(format!(
-            "it is not inside your profile folder {}",
-            root.display()
-        ))
-    }
-}
-
-/// The owner and mode test on the control directory's metadata, against
-/// the uid that owns the profile.
-#[cfg(unix)]
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-fn control_refusal_for(meta: &std::fs::Metadata, owner: u32) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-    if !meta.is_dir() {
-        return Some("it is not a directory".to_string());
-    }
-    if meta.uid() != owner {
-        return Some(format!(
-            "it belongs to uid {}, not to uid {owner}, which owns the profile",
-            meta.uid()
-        ));
-    }
-    if meta.mode() & 0o022 != 0 {
-        return Some(format!(
-            "it is writable by its group or others (mode {:o})",
-            meta.mode() & 0o777
-        ));
-    }
-    None
-}
-
-/// Control-directory tests. The containment rule runs on every platform; the
-/// owner and mode check on Unix.
-#[cfg(test)]
-mod containment_tests {
-    use std::path::Path;
-
-    use super::outside_profile;
-
-    const HOME: &str = "C:/Users/Thomas";
-
-    #[test]
-    fn a_directory_inside_the_profile_tree_is_accepted() {
-        let home = Path::new(HOME);
-        assert_eq!(
-            outside_profile(
-                Path::new("C:/Users/Thomas/AppData/Local/Temp/ctl-1"),
-                home,
-                true
-            ),
-            None
-        );
-        assert_eq!(
-            outside_profile(home, home, true),
-            None,
-            "the profile folder itself"
-        );
-    }
-
-    #[test]
-    fn a_name_that_only_starts_like_the_profile_is_not_inside_it() {
-        let home = Path::new(HOME);
-        assert!(outside_profile(Path::new("C:/Users/Thomas2/ctl"), home, true).is_some());
-        assert!(outside_profile(Path::new("C:/Users/ThomasX"), home, true).is_some());
-    }
-
-    #[test]
-    fn a_directory_elsewhere_or_above_the_profile_is_refused() {
-        let home = Path::new(HOME);
-        assert!(outside_profile(Path::new("D:/work/ctl"), home, true).is_some());
-        assert!(outside_profile(Path::new("C:/Users"), home, true).is_some());
-        assert!(outside_profile(Path::new("C:/Temp/ctl"), home, true).is_some());
-    }
-
-    #[test]
-    fn names_are_compared_case_insensitively_on_windows_only() {
-        let home = Path::new(HOME);
-        let spelled = Path::new("c:/users/THOMAS/ctl");
-        assert_eq!(outside_profile(spelled, home, true), None);
-        assert!(outside_profile(spelled, home, false).is_some());
-    }
-
-    #[test]
-    fn an_empty_profile_path_refuses_everything() {
-        assert!(outside_profile(Path::new("C:/Users/Thomas/ctl"), Path::new(""), true).is_some());
-    }
-}
-
-/// Control-directory tests (Unix: the owner and mode check).
-#[cfg(all(test, unix))]
-mod control_tests {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    use std::path::PathBuf;
-
-    use super::control_refusal_for;
-
-    /// A directory under the system temp dir with `mode`, removed on drop.
-    struct Dir(PathBuf);
-
-    impl Dir {
-        fn new(tag: &str, mode: u32) -> Dir {
-            let path =
-                std::env::temp_dir().join(format!("nautilus-control-{}-{tag}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&path);
-            std::fs::create_dir(&path).unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
-            Dir(path)
-        }
-    }
-
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn a_directory_only_its_owner_can_write_is_accepted() {
-        let dir = Dir::new("owner-only", 0o700);
-        let meta = std::fs::metadata(&dir.0).unwrap();
-        assert_eq!(control_refusal_for(&meta, meta.uid()), None);
-    }
-
-    #[test]
-    fn a_directory_readable_but_not_writable_by_others_is_accepted() {
-        let dir = Dir::new("read-only-for-others", 0o755);
-        let meta = std::fs::metadata(&dir.0).unwrap();
-        assert_eq!(control_refusal_for(&meta, meta.uid()), None);
-    }
-
-    #[test]
-    fn a_directory_writable_by_its_group_or_others_is_refused() {
-        for (tag, mode) in [
-            ("group-write", 0o770),
-            ("other-write", 0o702),
-            ("open", 0o777),
-        ] {
-            let dir = Dir::new(tag, mode);
-            let meta = std::fs::metadata(&dir.0).unwrap();
-            let refusal = control_refusal_for(&meta, meta.uid());
-            assert!(
-                refusal
-                    .as_deref()
-                    .is_some_and(|r| r.contains("writable by its group or others")),
-                "mode {mode:o} should be refused, got {refusal:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_directory_owned_by_another_user_is_refused() {
-        let dir = Dir::new("other-owner", 0o700);
-        let meta = std::fs::metadata(&dir.0).unwrap();
-        let refusal = control_refusal_for(&meta, meta.uid().wrapping_add(1));
-        assert!(
-            refusal
-                .as_deref()
-                .is_some_and(|r| r.contains("belongs to uid")),
-            "got {refusal:?}"
-        );
-    }
-
-    #[test]
-    fn something_that_is_not_a_directory_is_refused() {
-        let dir = Dir::new("not-a-dir", 0o700);
-        let file = dir.0.join("plain-file");
-        std::fs::write(&file, b"x").unwrap();
-        let meta = std::fs::metadata(&file).unwrap();
-        assert_eq!(
-            control_refusal_for(&meta, meta.uid()),
-            Some("it is not a directory".to_string())
-        );
     }
 }
 

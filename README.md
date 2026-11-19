@@ -207,7 +207,8 @@ belongs to one running Nautilus at a time.
   and routing tests live in osmena.
 - `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo fmt --all --check` — what CI runs.
-- `ci/side-panel/run.sh spike` (macOS, needs the bundle) — the scripted
+- `ci/side-panel/run.sh spike` (macOS, needs the bundle built with
+  `cargo xtask bundle-mac --features test-hooks`) — the scripted
   run of the extension bridge: installs a test extension through the
   bridge's rewrite on a throwaway profile, restarts, and checks the
   bridge in its worker, an action click (sent through the test control,
@@ -227,7 +228,7 @@ belongs to one running Nautilus at a time.
   is still up 120 s after its `--exit-after`, or logs a panic, a fatal
   runtime error, a RefCell borrowed twice ("already borrowed" or "already
   mutably borrowed"), or browsers still open at shutdown fails the run.
-- `python3 ci/side-panel/phase5.py` (macOS, needs the bundle, about
+- `python3 ci/side-panel/phase5.py` (macOS, needs the same bundle, about
   five minutes; judge it by its exit status, not through a pipe) — the
   scripted run of `chrome.tabs` and `chrome.windows` over the bridge. Its
   test extension (`ci/side-panel/ext/phase5.js`) listens for the tab and
@@ -250,7 +251,10 @@ belongs to one running Nautilus at a time.
   extension, `click` an action, send a raw DevTools message on the
   management browser's browser-wide channel (its answers go to
   `devtools.log`, which records that browser's DevTools traffic), and
-  `table`. The hook is compiled into release builds and is powerful while
+  `table`. The hook exists only in a build with the `test-hooks` cargo
+  feature (`cargo xtask bundle-mac --features test-hooks`; no packaged
+  build has it, nor `NAUTILUS_TEST_PAGE_SCRIPT`, `NAUTILUS_PUMP_LOG` or
+  `NAUTILUS_PUMP_TICK_MS`) and is powerful while
   set, so use it only on a directory only you can write (on Unix the
   engine refuses one owned by another user or writable by its group or
   others, with a warning, and the hook stays off). On Windows the

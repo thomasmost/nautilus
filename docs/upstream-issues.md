@@ -281,7 +281,7 @@ CEF's DevTools-agent callback, which fires for the engine's own
 hidden. The run that showed it logged, for each tab, `C1PROBE attached
 TabId(1) hidden=false` and then `hide TabId(1) dev_tools_attached=true
 was_hidden(1)=false` (2026-11-18, three tabs). No upstream report was
-looked for. `NAUTILUS_PUMP_TICK_MS=0`
+looked for. In a build with the `test-hooks` feature, `NAUTILUS_PUMP_TICK_MS=0`
 switches the tick off to reproduce; `NAUTILUS_PUMP_LOG=1` reports a pump
 that has not spun. The idle cost of the tick was about 0.5 % CPU and
 416 wake-ups against 0.0 % and 201 without it (sampled in the session;

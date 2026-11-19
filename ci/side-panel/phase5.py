@@ -2,7 +2,7 @@
 """The scripted run for chrome.tabs and chrome.windows over the bridge.
 
     export CEF_PATH=~/.local/share/cef
-    cargo xtask bundle-mac
+    cargo xtask bundle-mac --features test-hooks
     python3 ci/side-panel/phase5.py
 
 Launches the bundle twice on a throwaway profile with the test extension
@@ -442,7 +442,7 @@ def judge_restore(code, log):
 def main():
     global WORK, WATCHER
     if not APP.exists():
-        sys.exit(f"{APP} is missing: cargo xtask bundle-mac")
+        sys.exit(f"{APP} is missing: cargo xtask bundle-mac --features test-hooks")
     WORK = Path(tempfile.mkdtemp(prefix="nautilus-p5-"))
     shutil.rmtree(PROFILE_DIR, ignore_errors=True)
     server = HTTPServer(("127.0.0.1", PORT), Handler)

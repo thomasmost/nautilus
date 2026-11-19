@@ -146,6 +146,7 @@ impl DelegateState {
 
     /// The tab focused last, which is the tab an extension's action
     /// click is about.
+    #[cfg(feature = "test-hooks")]
     pub(crate) fn last_focused(&self) -> Option<TabId> {
         self.last_focused.get()
     }
@@ -1229,6 +1230,11 @@ wrap_load_handler! {
             can_go_back: ::std::os::raw::c_int,
             can_go_forward: ::std::os::raw::c_int,
         ) {
+            // A scripted run's page script (a build with the `test-hooks`
+            // feature only).
+            #[cfg(not(feature = "test-hooks"))]
+            let _ = browser;
+            #[cfg(feature = "test-hooks")]
             if is_loading == 0
                 && let Ok(script) = std::env::var("NAUTILUS_TEST_PAGE_SCRIPT")
                 && let Some(frame) = browser.and_then(|b| b.main_frame())

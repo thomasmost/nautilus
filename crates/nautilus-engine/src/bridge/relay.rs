@@ -345,6 +345,7 @@ enum Pending {
     Ask { extension: String, change: u32 },
     /// A test control's expression in a relay page, whose value is logged
     /// as `label` (`inspect_relay`).
+    #[cfg(feature = "test-hooks")]
     Inspect { label: String },
     /// A relay's `next()`: the worker's requests, when it has some.
     Poll,
@@ -723,6 +724,7 @@ impl Bridge {
 
     /// Any tab the table could name, for a test click when no tab has
     /// had the focus yet.
+    #[cfg(feature = "test-hooks")]
     pub(crate) fn any_tab(&self) -> Option<TabId> {
         self.inner.borrow().tabs.keys().min().copied()
     }
@@ -2009,6 +2011,7 @@ impl Bridge {
                     self.decide_ask(&extension, change, Answered::Unanswered);
                 }
             },
+            #[cfg(feature = "test-hooks")]
             Pending::Inspect { label } => match value {
                 Ok(answer) => log::info!("bridge: relay {key} answers {label}: {answer}"),
                 Err(e) => log::info!("bridge: relay {key} answers {label} with an error: {e}"),
@@ -2137,6 +2140,7 @@ impl Bridge {
     /// Evaluate `expression` in `extension`'s relay page and log its value as
     /// `label` (a test control's inspection, `TEST HOOK: relay_eval`). Nothing
     /// else reads the answer.
+    #[cfg(feature = "test-hooks")]
     pub(crate) fn inspect_relay(&self, extension: &str, label: &str, expression: &str) {
         if !self.evaluate(
             extension,
@@ -2150,6 +2154,7 @@ impl Bridge {
     }
 
     /// The table, for a scripted run's log.
+    #[cfg(feature = "test-hooks")]
     pub(crate) fn log_table(&self) {
         let inner = self.inner.borrow();
         for row in inner.table.rows() {

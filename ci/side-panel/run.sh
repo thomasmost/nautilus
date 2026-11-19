@@ -2,6 +2,10 @@
 # The scripted run of the extension bridge (macOS).
 #
 # usage: ci/side-panel/run.sh [spike|pump|reload|zombie|broken|stop|idle]
+#
+# Needs a bundle with the test hooks, which no packaged build has:
+#   cargo xtask bundle-mac --features test-hooks
+#
 #   spike  two launches on one throwaway profile: install the test
 #          extension through the bridge's rewrite, then restart and
 #          check the bridge, a click on a stopped worker, tabs.query
@@ -42,7 +46,7 @@ set -eu
 mode=${1:-spike}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 app="$root/target/release/Nautilus.app/Contents/MacOS/Nautilus"
-[ -x "$app" ] || { echo "no bundle: run cargo xtask bundle-mac first" >&2; exit 2; }
+[ -x "$app" ] || { echo "no bundle: run cargo xtask bundle-mac --features test-hooks first" >&2; exit 2; }
 case "$mode" in
   spike|pump|reload|zombie|broken|stop|idle) ;;
   *) echo "usage: $0 [spike|pump|reload|zombie|broken|stop|idle]" >&2; exit 2 ;;

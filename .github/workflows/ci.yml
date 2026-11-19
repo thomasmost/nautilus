@@ -81,6 +81,10 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+      # The scripted runs' hooks (the `test-hooks` feature) are in no
+      # packaged build, so they are linted and tested here.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
 
       # tiny-skia's output is not guaranteed identical across CPU
       # architectures, so only the Apple Silicon runner diffs the icons.
@@ -196,6 +200,17 @@ jobs:
       # every launch go up with the bundle.
       - if: runner.os == 'macOS'
         run: cargo xtask bundle-mac
+      # Every hook of a scripted run logs a line that starts so; a
+      # binary built without the `test-hooks` feature holds none.
+      - name: No test hooks in the packaged binary
+        shell: bash
+        run: |
+          binary=target/release/nautilus
+          [ -f "$binary.exe" ] && binary="$binary.exe"
+          if grep -a -q -F 'TEST HOOK' "$binary"; then
+            echo "::error::$binary was built with the test hooks"
+            exit 1
+          fi
       - if: runner.os == 'macOS'
         name: Symbols
         run: dsymutil target/release/nautilus -o target/release/Nautilus.dSYM

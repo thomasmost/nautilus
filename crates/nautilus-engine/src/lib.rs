@@ -33,6 +33,9 @@ mod keycodes;
 mod mac_app;
 mod popup;
 mod store;
+// A scripted run's control: only in a build made for one.
+#[cfg(feature = "test-hooks")]
+mod test_control;
 
 pub use crate::engine::{Engine, INFO, run_helper, run_subprocess};
 pub use crate::extensions::web_store_item_id;

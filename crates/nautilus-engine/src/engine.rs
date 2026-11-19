@@ -4,7 +4,9 @@
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(feature = "test-hooks")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -291,7 +293,9 @@ impl osmena_engine::Engine for Engine {
         // Store downloads unpacked on worker threads are loaded here, on
         // the UI thread.
         self.extensions.poll_unpacked();
-        // A scripted run's next command, if NAUTILUS_TEST_CONTROL is set.
+        // A scripted run's next command, if NAUTILUS_TEST_CONTROL is set
+        // (a build with the `test-hooks` feature only).
+        #[cfg(feature = "test-hooks")]
         self.extensions.poll_control();
         // The bridge's relay pages that closed underneath are opened again
         // here, never from a CEF callback.
@@ -495,7 +499,6 @@ struct PumpScheduler {
     changed: Condvar,
     started: AtomicBool,
     interval: Option<Duration>,
-    started_at: Instant,
     stats: PumpStats,
 }
 
@@ -508,12 +511,13 @@ const MAX_PUMP_INTERVAL: Duration = Duration::from_millis(1000 / 30);
 /// of it ("The application must also schedule CefDoMessageLoopWork()
 /// calls when no callback is received", `cef_browser_process_handler.h`),
 /// and without the tick extension calls stalled for seconds (C14 in
-/// `docs/upstream-issues.md`). `NAUTILUS_PUMP_TICK_MS=0` switches it off
-/// to reproduce that.
+/// `docs/upstream-issues.md`). In a build with the `test-hooks` feature,
+/// `NAUTILUS_PUMP_TICK_MS=0` switches it off to reproduce that.
 const DEFAULT_PUMP_INTERVAL: Option<Duration> = Some(MAX_PUMP_INTERVAL);
 
 /// The pump's interval: `NAUTILUS_PUMP_TICK_MS` in milliseconds when a
 /// scripted run sets it (0 switches the fallback off), else `default`.
+#[cfg(feature = "test-hooks")]
 fn pump_interval(setting: Option<&str>, default: Option<Duration>) -> Option<Duration> {
     match setting.map(str::trim).map(str::parse::<u64>) {
         Some(Ok(0)) => None,
@@ -561,9 +565,11 @@ fn armed_after_spin(
 
 /// Counters that say why CEF's work is not being run, read by the
 /// watch thread (`NAUTILUS_PUMP_LOG`). Times are milliseconds since
-/// the scheduler was made.
-#[derive(Default)]
+/// the scheduler was made. Only a build with the `test-hooks` feature
+/// counts; any other build has the empty `PumpStats` below.
+#[cfg(feature = "test-hooks")]
 struct PumpStats {
+    started_at: Instant,
     asked_now: AtomicU64,
     asked_later: AtomicU64,
     dropped_later: AtomicU64,
@@ -578,21 +584,21 @@ struct PumpStats {
     latest_timer_ms: AtomicU64,
 }
 
-impl PumpScheduler {
-    fn new(waker: Arc<dyn Waker>) -> PumpScheduler {
-        let interval = pump_interval(
-            std::env::var("NAUTILUS_PUMP_TICK_MS").ok().as_deref(),
-            DEFAULT_PUMP_INTERVAL,
-        );
-        log::info!("pump: fallback interval {interval:?}");
-        PumpScheduler {
-            waker,
-            deadline: Mutex::new(None),
-            changed: Condvar::new(),
-            started: AtomicBool::new(false),
-            interval,
+#[cfg(feature = "test-hooks")]
+impl PumpStats {
+    fn new() -> PumpStats {
+        PumpStats {
             started_at: Instant::now(),
-            stats: PumpStats::default(),
+            asked_now: AtomicU64::new(0),
+            asked_later: AtomicU64::new(0),
+            dropped_later: AtomicU64::new(0),
+            wakes: AtomicU64::new(0),
+            spins: AtomicU64::new(0),
+            last_ask_ms: AtomicU64::new(0),
+            last_spin_end_ms: AtomicU64::new(0),
+            asked_at_spin_end: AtomicU64::new(0),
+            longest_spin_us: AtomicU64::new(0),
+            latest_timer_ms: AtomicU64::new(0),
         }
     }
 
@@ -600,8 +606,88 @@ impl PumpScheduler {
         self.started_at.elapsed().as_millis() as u64
     }
 
+    /// CEF asked for work, at once (`now`) or after a delay.
+    fn asked(&self, now: bool) {
+        self.last_ask_ms.store(self.now_ms(), Ordering::Relaxed);
+        let counter = if now {
+            &self.asked_now
+        } else {
+            &self.asked_later
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A delayed request was lost behind an earlier one.
+    fn dropped(&self) {
+        self.dropped_later.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn woke(&self) {
+        self.wakes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn spin_ended(&self, took: Duration) {
+        self.spins.fetch_add(1, Ordering::Relaxed);
+        self.last_spin_end_ms
+            .store(self.now_ms(), Ordering::Relaxed);
+        self.asked_at_spin_end.store(
+            self.asked_now.load(Ordering::Relaxed) + self.asked_later.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.longest_spin_us
+            .fetch_max(took.as_micros() as u64, Ordering::Relaxed);
+    }
+
+    /// The timer thread fired `late` after its deadline.
+    fn timer_fired(&self, late: Duration) {
+        self.latest_timer_ms
+            .fetch_max(late.as_millis() as u64, Ordering::Relaxed);
+    }
+}
+
+/// A build without the `test-hooks` feature counts nothing.
+#[cfg(not(feature = "test-hooks"))]
+struct PumpStats;
+
+#[cfg(not(feature = "test-hooks"))]
+impl PumpStats {
+    fn new() -> PumpStats {
+        PumpStats
+    }
+
+    fn asked(&self, _now: bool) {}
+
+    fn dropped(&self) {}
+
+    fn woke(&self) {}
+
+    fn spin_ended(&self, _took: Duration) {}
+
+    fn timer_fired(&self, _late: Duration) {}
+}
+
+impl PumpScheduler {
+    fn new(waker: Arc<dyn Waker>) -> PumpScheduler {
+        #[cfg(feature = "test-hooks")]
+        let interval = pump_interval(
+            std::env::var("NAUTILUS_PUMP_TICK_MS").ok().as_deref(),
+            DEFAULT_PUMP_INTERVAL,
+        );
+        #[cfg(not(feature = "test-hooks"))]
+        let interval = DEFAULT_PUMP_INTERVAL;
+        log::info!("pump: fallback interval {interval:?}");
+        PumpScheduler {
+            waker,
+            deadline: Mutex::new(None),
+            changed: Condvar::new(),
+            started: AtomicBool::new(false),
+            interval,
+            stats: PumpStats::new(),
+        }
+    }
+
     fn wake(&self) {
-        self.stats.wakes.fetch_add(1, Ordering::Relaxed);
+        self.stats.woke();
         self.waker.wake();
     }
 
@@ -609,18 +695,7 @@ impl PumpScheduler {
     /// armed at the interval when nothing else is pending: CEF does not
     /// promise to ask for every piece of work.
     fn after_spin(&self, took: Duration) {
-        let stats = &self.stats;
-        stats.spins.fetch_add(1, Ordering::Relaxed);
-        stats
-            .last_spin_end_ms
-            .store(self.now_ms(), Ordering::Relaxed);
-        stats.asked_at_spin_end.store(
-            stats.asked_now.load(Ordering::Relaxed) + stats.asked_later.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-        stats
-            .longest_spin_us
-            .fetch_max(took.as_micros() as u64, Ordering::Relaxed);
+        self.stats.spin_ended(took);
         let mut deadline = self
             .deadline
             .lock()
@@ -637,12 +712,13 @@ impl PumpScheduler {
     /// half a second, say what the pump last heard. An idle browser
     /// prints these too; they mean a stall only while something is
     /// waiting on Chromium (the scripted run's timestamps say when).
+    #[cfg(feature = "test-hooks")]
     fn watch(&self) {
         let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         loop {
             std::thread::sleep(Duration::from_secs(1));
             let stats = &self.stats;
-            let now = self.now_ms();
+            let now = stats.now_ms();
             let idle = now.saturating_sub(load(&stats.last_spin_end_ms));
             if idle < 500 {
                 continue;
@@ -680,6 +756,7 @@ impl PumpScheduler {
         let _ = std::thread::Builder::new()
             .name("CefPumpTimer".to_string())
             .spawn(move || scheduler.run());
+        #[cfg(feature = "test-hooks")]
         if std::env::var_os("NAUTILUS_PUMP_LOG").is_some() {
             let scheduler = Arc::clone(self);
             let _ = std::thread::Builder::new()
@@ -705,9 +782,7 @@ impl PumpScheduler {
                     let now = Instant::now();
                     if at <= now {
                         *deadline = None;
-                        self.stats
-                            .latest_timer_ms
-                            .fetch_max((now - at).as_millis() as u64, Ordering::Relaxed);
+                        self.stats.timer_fired(now - at);
                         self.wake();
                     } else {
                         deadline = self
@@ -722,15 +797,11 @@ impl PumpScheduler {
     }
 
     fn schedule(&self, delay_ms: i64) {
-        self.stats
-            .last_ask_ms
-            .store(self.now_ms(), Ordering::Relaxed);
+        self.stats.asked(delay_ms <= 0);
         if delay_ms <= 0 {
-            self.stats.asked_now.fetch_add(1, Ordering::Relaxed);
             self.wake();
             return;
         }
-        self.stats.asked_later.fetch_add(1, Ordering::Relaxed);
         let mut deadline = self
             .deadline
             .lock()
@@ -742,7 +813,7 @@ impl PumpScheduler {
             self.interval,
         );
         if dropped {
-            self.stats.dropped_later.fetch_add(1, Ordering::Relaxed);
+            self.stats.dropped();
         }
         if next != *deadline {
             *deadline = next;
@@ -939,7 +1010,9 @@ wrap_display_handler! {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{armed_after_spin, next_deadline, pump_interval};
+    #[cfg(feature = "test-hooks")]
+    use super::pump_interval;
+    use super::{armed_after_spin, next_deadline};
 
     const TICK: Option<Duration> = Some(Duration::from_millis(33));
 
@@ -969,6 +1042,7 @@ mod tests {
         assert_eq!(armed_after_spin(pending, now, None), pending);
     }
 
+    #[cfg(feature = "test-hooks")]
     #[test]
     fn the_pumps_interval_comes_from_the_setting_or_the_default() {
         assert_eq!(pump_interval(None, TICK), TICK);

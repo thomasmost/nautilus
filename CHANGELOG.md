@@ -8,6 +8,12 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- The hooks scripted runs drive the browser with are in no packaged
+  build: `NAUTILUS_TEST_CONTROL`, `NAUTILUS_TEST_PAGE_SCRIPT`,
+  `NAUTILUS_PUMP_LOG` and `NAUTILUS_PUMP_TICK_MS` do nothing unless the
+  browser was built with the `test-hooks` cargo feature (`cargo run
+  --features test-hooks`, `cargo xtask bundle-mac --features
+  test-hooks`). A build without it logs a warning when one is set.
 - The chrome's look, after Thorium with Zen's softness (osmena): the
   toolbar's Back, Forward, Reload and Stop are painted glyphs in round
   buttons that fill only under the pointer and fade when they cannot

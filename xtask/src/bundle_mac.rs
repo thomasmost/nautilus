@@ -66,12 +66,18 @@ const WEB_BROWSER_TYPES: &str = "\t<key>CFBundleURLTypes</key>
 /// Chromium's process kinds, as helper app suffixes (CEF's layout).
 const HELPERS: [&str; 5] = ["", " (GPU)", " (Renderer)", " (Plugin)", " (Alerts)"];
 
-pub fn bundle_mac(root: &Path, version: &str) -> Result<PathBuf, String> {
+/// `features`: the binary's cargo features to build with (`test-hooks`, for
+/// a bundle a scripted run drives). A bundle that is packaged has none.
+pub fn bundle_mac(root: &Path, version: &str, features: Option<&str>) -> Result<PathBuf, String> {
     if !cfg!(target_os = "macos") {
         return Err("the macOS bundle is built on macOS (the binaries and the CEF framework are macOS builds)".to_string());
     }
+    let mut build = vec!["build", "--release", "-p", "nautilus"];
+    if let Some(features) = features {
+        build.extend(["--features", features]);
+    }
     let status = Command::new(cargo())
-        .args(["build", "--release", "-p", "nautilus"])
+        .args(&build)
         .current_dir(root)
         .status()
         .map_err(|e| format!("running cargo build: {e}"))?;
