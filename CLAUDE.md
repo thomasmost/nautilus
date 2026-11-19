@@ -538,9 +538,9 @@ silent-listener assertion (it expected `undefined` to the sender), and the
 file-page rows of the pattern table (`<all_urls>` and `file:///tmp/*` now match
 no file page). The node harness's page context answers its calls by default now.
 
-Still open: `#[allow(dead_code)]` appears 17 more times on this branch than on
-`origin/main` (in `extensions.rs`, `lib.rs`, `delegate.rs`), which the review did
-not name; Windows was not built (only the Apple Silicon target is installed);
+Still open: `#[allow(dead_code)]` appears 16 times on this branch, 11 more than
+on `origin/main` (in `extensions.rs`, `lib.rs`, `delegate.rs`), which the review
+did not name; Windows was not built (only the Apple Silicon target is installed);
 the scripted runs were not clicked by hand; the keyed extension's migration
 (a user folder with a `key`) was not run on the bundle.
 
