@@ -32,10 +32,13 @@ fn main() -> ExitCode {
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
+    // One Chromium for every profile opened in this process; it shuts
+    // down when the shell drops the closure, after the last engine.
+    let chromium = nautilus_engine::Runtime::new();
     osmena_shell::run(Launch {
         brand: &brand::BRAND,
         engine: &nautilus_engine::INFO,
         args: cli.base,
-        start_engine: Box::new(nautilus_engine::Engine::new),
+        start_engine: Box::new(move |profile, waker| chromium.start(profile, waker)),
     })
 }

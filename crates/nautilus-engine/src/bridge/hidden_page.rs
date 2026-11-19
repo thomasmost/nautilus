@@ -69,13 +69,14 @@ impl HiddenPage {
             windowless_frame_rate: 1,
             ..BrowserSettings::default()
         };
+        let mut context = bridge.delegate.request_context();
         let browser = cef::browser_host_create_browser_sync(
             Some(&window_info),
             Some(&mut client),
             Some(&CefString::from(url)),
             Some(&settings),
             None,
-            None,
+            context.as_mut(),
         )?;
         let mut observer = PageDevTools::new(bridge.clone(), key.to_string(), generation);
         let devtools = browser

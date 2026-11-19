@@ -22,17 +22,18 @@ use cef::{
     ImplContextMenuParams, ImplDialogHandler, ImplDisplayHandler, ImplDownloadHandler,
     ImplDownloadImageCallback, ImplDownloadItem, ImplDragData, ImplFileDialogCallback,
     ImplFindHandler, ImplFrame, ImplImage, ImplKeyboardHandler, ImplLifeSpanHandler,
-    ImplLoadHandler, ImplPermissionHandler, ImplRenderHandler, ImplRequest, ImplRequestHandler,
-    ImplRunContextMenuCallback, KeyEvent, KeyEventType, KeyboardHandler, LifeSpanHandler,
-    LoadHandler, LogSeverity, MediaAccessCallback, MenuModel, PaintElementType, PermissionHandler,
-    ProcessId, ProcessMessage, Rect, RenderHandler, Request, RequestHandler,
-    RunContextMenuCallback, ScreenInfo, TerminationStatus, TransitionType, WindowOpenDisposition,
-    WrapClient, WrapContextMenuHandler, WrapDialogHandler, WrapDisplayHandler, WrapDownloadHandler,
-    WrapDownloadImageCallback, WrapFindHandler, WrapKeyboardHandler, WrapLifeSpanHandler,
-    WrapLoadHandler, WrapPermissionHandler, WrapRenderHandler, WrapRequestHandler, wrap_client,
-    wrap_context_menu_handler, wrap_dialog_handler, wrap_display_handler, wrap_download_handler,
-    wrap_download_image_callback, wrap_find_handler, wrap_keyboard_handler, wrap_life_span_handler,
-    wrap_load_handler, wrap_permission_handler, wrap_render_handler, wrap_request_handler,
+    ImplLoadHandler, ImplPermissionHandler, ImplRenderHandler, ImplRequest, ImplRequestContext,
+    ImplRequestHandler, ImplRunContextMenuCallback, KeyEvent, KeyEventType, KeyboardHandler,
+    LifeSpanHandler, LoadHandler, LogSeverity, MediaAccessCallback, MenuModel, PaintElementType,
+    PermissionHandler, ProcessId, ProcessMessage, Rect, RenderHandler, Request, RequestContext,
+    RequestHandler, RunContextMenuCallback, ScreenInfo, TerminationStatus, TransitionType,
+    WindowOpenDisposition, WrapClient, WrapContextMenuHandler, WrapDialogHandler,
+    WrapDisplayHandler, WrapDownloadHandler, WrapDownloadImageCallback, WrapFindHandler,
+    WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, WrapPermissionHandler,
+    WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_context_menu_handler,
+    wrap_dialog_handler, wrap_display_handler, wrap_download_handler, wrap_download_image_callback,
+    wrap_find_handler, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
+    wrap_permission_handler, wrap_render_handler, wrap_request_handler,
 };
 use osmena_core::{
     BlockedSites, Cursor, DownloadPolicy, DownloadReport, DownloadState, EditState, EngineEvent,
@@ -67,11 +68,16 @@ type NativeCursor = *mut u8;
 #[cfg(not(target_os = "macos"))]
 type NativeCursor = cef::CursorHandle;
 
-/// Shared by every tab of the process: the event queue and the tabs page
+/// Shared by every tab of one profile: the event queue and the tabs page
 /// content asked for.
 #[derive(Default)]
 pub(crate) struct DelegateState {
     events: RefCell<VecDeque<EngineEvent>>,
+    /// The profile's request context (its cookies, storage, cache and
+    /// extensions), which every browser of the profile is created in.
+    /// `None` for the default profile, whose context is Chromium's
+    /// global one.
+    context: RefCell<Option<RequestContext>>,
     /// Tabs page content asked for (`window.open`, middle-click), held
     /// until the model adopts them.
     pending: RefCell<HashMap<PendingTab, Pending>>,
@@ -126,6 +132,26 @@ impl DelegateState {
 
     pub(crate) fn push(&self, event: EngineEvent) {
         self.events.borrow_mut().push_back(event);
+    }
+
+    /// The profile's browsers are created in `context` from now on.
+    pub(crate) fn set_request_context(&self, context: Option<RequestContext>) {
+        let displaced = self.context.replace(context);
+        drop(displaced);
+    }
+
+    /// The request context to create a browser of this profile in:
+    /// `None` is Chromium's global one.
+    pub(crate) fn request_context(&self) -> Option<RequestContext> {
+        self.context.borrow().clone()
+    }
+
+    /// Whether `context` is this profile's.
+    pub(crate) fn owns_context(&self, context: &mut RequestContext) -> bool {
+        match self.context.borrow().as_ref() {
+            Some(own) => own.is_same(Some(context)) == 1,
+            None => context.is_global() == 1,
+        }
     }
 
     pub(crate) fn take_pending(&self, pending: PendingTab) -> Option<Pending> {

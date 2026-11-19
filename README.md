@@ -40,15 +40,23 @@ this repository holds only what is Chromium's.
   toolbar's end opens the Profiles menu (also in the macOS menu bar),
   shaped like Chromium's: Edit… customises the current profile, the
   other profiles sit under "Other Nautilus Profiles" and open in a
-  window of their own, Add Nautilus Profile… makes one (name it, pick
+  window of their own (every profile's windows belong to the one
+  Nautilus: one Dock icon, one menu bar that follows the profile in
+  front, and Cmd+` goes through all of them), Add Nautilus Profile…
+  makes one (name it, pick
   its theme colour and an avatar from the sea-creature or the assorted
   palette, choose whether to share the default profile's bookmarks and
   whether to copy the default profile's extensions; history is never
-  shared), Open Guest Profile starts a throwaway "Guest" browser whose
+  shared), Open Guest Profile opens a throwaway "Guest" window whose
   profile is deleted when it closes, and Manage Profiles… lists every
-  profile to open, edit or delete. `--profile <dir>` picks one on the
-  command line, and a tab can be handed to another profile from its
-  context menu.
+  profile to open, edit or delete. Closing a profile's last window
+  closes that profile and leaves the others; Quit quits them all, and
+  the next start opens the profile that was in front (and the others
+  that were open, when they bring their windows back). `--profile
+  <dir>` picks one on the command line, and a tab can be handed to
+  another profile from its context menu. Starting Nautilus while it
+  runs opens a window (or the named profile, or the addresses) in the
+  running one.
 - **Your colour.** The profile dialog and the settings window offer a row
   of swatches that tint the tab strip and toolbar per profile.
 - **Sleek by default.** No system title bar: the tab strip is the title
@@ -196,9 +204,19 @@ target/release/Nautilus.app/Contents/MacOS/Nautilus --profile dev https://exampl
 
 Profiles live in `~/Library/Application Support/Nautilus/profiles/<name>/`
 on macOS and `%APPDATA%\Nautilus\profiles\<name>\` on Windows, holding
-`settings.toml` (homepage, new-tab URL, chrome colour) and Chromium's
-`chromium/` directory (cookies, local storage, cache). A profile directory
-belongs to one running Nautilus at a time.
+`settings.toml` (homepage, new-tab URL, chrome colour) and a `chromium/`
+directory. One Chromium runs every profile, and it keeps them all under
+one directory, the default profile's `chromium/`: the default profile's
+cookies, storage and cache are that directory's `Default/`, and another
+profile's are `profiles/default/chromium/profile-<name>/`. A profile's
+own `chromium/` holds its extensions (`chromium/extensions/`). A build
+from before this (one Nautilus process per profile) kept each profile's
+Chromium data in its own `chromium/Default/`; it is moved to its new
+place the first time the profile opens, which on Windows signs the
+profile out of websites once (Chromium encrypts cookies with a key kept
+beside its root directory, and the profile changes roots). One Nautilus
+runs per data directory: the hidden `--data-dir <dir>` keeps profiles
+under `<dir>` instead, for a second Nautilus beside the first.
 
 ## Tests
 
@@ -306,8 +324,8 @@ engine glue. Each item must pass.
    second window: both appear at the end of its strip (reloaded, with the
    previously active one active) and leave the first. Drag a tab onto the
    desktop: it opens in a new window. Dropping within the same window does
-   nothing. "Open tab in profile" starts a second Nautilus for that profile
-   with the tab's URL and closes the tab here. Both this menu and the "☰"
+   nothing. "Open tab in profile" opens that profile's window (or a tab
+   in it, if it is open) with the tab's URL and closes the tab here. Both this menu and the "☰"
    menu are the system's own popup menus.
 5. **Crashed tab.** Open `chrome://crash` in a tab: the tab's error panel
    says the renderer process crashed, the other tabs keep working, and the
@@ -451,13 +469,20 @@ engine glue. Each item must pass.
     `[profile]` with the name, `avatar = "whale"` and `share_bookmarks
     = true`. "Add Profile…", type Work Stuff and tick "Copy extensions from the Default profile", Add: a second window
     opens for the new profile (its own colour and avatar, title "– Work
-    Stuff"), and `profiles/work-stuff/settings.toml` exists. From the
+    Stuff"), and `profiles/work-stuff/settings.toml` exists. On macOS
+    the Dock still shows one Nautilus, Cmd+` moves between the two
+    profiles' windows, the menu bar's Profiles menu checks whichever
+    is in front, and Activity Monitor lists one Nautilus. Close the new
+    profile's window: the first stays; open the profile again from the
+    menu: its window comes back. With both open, Cmd+Q closes both and
+    the next start brings back the one that was in front. From the
     first window, Delete Profile → Work Stuff asks "Delete “Work
     Stuff” and everything it holds?"; with the second window still
     open, Delete reports in the status area that the profile is open in
     another window; close it and delete again: the directory is gone
     and the menu no longer lists it. Edit… → "Delete profile…" on a
-    non-default profile hands over to the Default profile and quits.
+    non-default profile closes its windows and removes it; when it was
+    the only profile open, the Default profile opens in its place.
 15. **Find in page.** On example.com press Ctrl+F: a pill opens at the
     page's top right with the keyboard in its field. Type `domain`: the
     page highlights both matches, the first in orange, and the bar reads

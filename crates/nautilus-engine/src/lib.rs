@@ -40,7 +40,7 @@ mod store;
 #[cfg(feature = "test-hooks")]
 mod test_control;
 
-pub use crate::engine::{Engine, INFO, run_helper, run_subprocess};
+pub use crate::engine::{Engine, INFO, Runtime, run_helper, run_subprocess};
 pub use crate::extensions::web_store_item_id;
 pub use crate::frame::Frame;
 pub use crate::host::TabHost;

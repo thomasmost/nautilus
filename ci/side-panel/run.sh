@@ -55,7 +55,6 @@ esac
 # Set before the trap so that cleanup can read them whatever happened.
 work=""
 profile=side-panel-test
-profile_dir="$HOME/Library/Application Support/Nautilus/profiles/$profile"
 driver=""
 finder=""
 app_pid=""
@@ -76,7 +75,6 @@ cleanup() {
     fi
     rm -rf "$work"
   fi
-  rm -rf "$profile_dir"
   exit "$code"
 }
 # A signal exits through the EXIT trap, so cleanup runs for it too.
@@ -86,7 +84,12 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/nautilus-side-panel.XXXXXX")
-rm -rf "$profile_dir"
+# A data directory of its own (--data-dir): one browser process runs every
+# profile of a data directory, so a launch on the user's own would be handed
+# to the browser they have open, or would start their default profile's
+# Chromium under the test.
+data="$work/data"
+profile_dir="$data/Nautilus/profiles/$profile"
 # Control directories are private: the engine refuses one that another user
 # owns or that group or others can write (NAUTILUS_TEST_CONTROL).
 mkdir -p -m 700 "$work/ctl-1" "$work/ctl-2"
@@ -119,7 +122,7 @@ launch() {
   ( sleep 6; open -a Finder ) &
   finder=$!
   RUST_LOG="info,nautilus_engine=debug" NAUTILUS_PUMP_LOG=1 NAUTILUS_TEST_CONTROL="$work/ctl-$n" \
-    "$app" --profile "$profile" --exit-after "$2" https://example.com/ https://example.org/ \
+    "$app" --data-dir "$data" --profile "$profile" --exit-after "$2" https://example.com/ https://example.org/ \
     > "$work/run-$n.log" 2>&1 &
   app_pid=$!
   # The watchdog: only a browser still up at $grace seconds is killed. The

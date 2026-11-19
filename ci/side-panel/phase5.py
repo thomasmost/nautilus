@@ -37,7 +37,10 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 APP = REPO / "target/release/Nautilus.app/Contents/MacOS/Nautilus"
 PROFILE = "side-panel-p5"
-PROFILE_DIR = Path.home() / "Library/Application Support/Nautilus/profiles" / PROFILE
+# The launches keep their profiles under the work directory (--data-dir): one
+# browser process runs every profile of a data directory, so a launch on the
+# user's own would be handed to the browser they have open.
+DATA = None
 PORT = 47615
 SYNTHETIC_BASE = 2_000_000_000
 INT32_MAX = 2**31 - 1
@@ -210,7 +213,8 @@ def launch(suite, args, seconds, log_path, load_extension, watch):
     if load_extension:
         write_command(control, 1, {"load": str(HERE / "ext")})
     CONTROL.update({"dir": str(control), "next": 2, "relay_asked": False})
-    command = [str(APP), "--profile", PROFILE, "--exit-after", str(seconds), *args]
+    command = [str(APP), "--data-dir", str(DATA), "--profile", PROFILE,
+               "--exit-after", str(seconds), *args]
     windows_path = WORK / f"windows-{suite}.txt"
     with open(log_path, "wb") as log:
         process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)
@@ -440,11 +444,11 @@ def judge_restore(code, log):
 
 
 def main():
-    global WORK, WATCHER
+    global WORK, WATCHER, DATA
     if not APP.exists():
         sys.exit(f"{APP} is missing: cargo xtask bundle-mac --features test-hooks")
     WORK = Path(tempfile.mkdtemp(prefix="nautilus-p5-"))
-    shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+    DATA = WORK / "data"
     server = HTTPServer(("127.0.0.1", PORT), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     WATCHER = WORK / "p5-windows"
@@ -457,7 +461,7 @@ def main():
         judge_restore(code, log)
     finally:
         server.shutdown()
-        shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+        shutil.rmtree(DATA, ignore_errors=True)
     print(f"logs: {WORK}")
     print("phase 5: " + ("all checks passed" if not failures else f"{len(failures)} check(s) FAILED"), flush=True)
     sys.exit(1 if failures else 0)

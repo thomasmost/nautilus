@@ -2,8 +2,8 @@
 //! to the application's event loop, and the event queue.
 
 use std::cell::{Cell, RefCell};
-use std::path::Path;
-use std::rc::Rc;
+use std::path::{Path, PathBuf};
+use std::rc::{Rc, Weak};
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,14 +17,16 @@ use cef::{
     App, Browser, BrowserProcessHandler, CefString, Client, CommandLine, DialogHandler,
     DisplayHandler, Frame as CefFrame, ImplApp, ImplBrowser, ImplBrowserHost,
     ImplBrowserProcessHandler, ImplClient, ImplCommandLine, ImplDisplayHandler, ImplFrame,
-    ImplLifeSpanHandler, LifeSpanHandler, LogSeverity, RenderProcessHandler, Settings, WrapApp,
-    WrapBrowserProcessHandler, WrapClient, WrapDisplayHandler, WrapLifeSpanHandler, api_hash,
-    wrap_app, wrap_browser_process_handler, wrap_client, wrap_display_handler,
-    wrap_life_span_handler,
+    ImplLifeSpanHandler, ImplRequestContext, ImplRequestContextHandler, LifeSpanHandler,
+    LogSeverity, RenderProcessHandler, RequestContext, RequestContextHandler,
+    RequestContextSettings, Settings, WrapApp, WrapBrowserProcessHandler, WrapClient,
+    WrapDisplayHandler, WrapLifeSpanHandler, WrapRequestContextHandler, api_hash, wrap_app,
+    wrap_browser_process_handler, wrap_client, wrap_display_handler, wrap_life_span_handler,
+    wrap_request_context_handler,
 };
 use osmena_core::{
     BlockedSites, DownloadPolicy, EngineEvent, EngineInfo, ExtensionReply, ExtensionSource,
-    ExtensionSupport, PageTools, PendingTab,
+    ExtensionSupport, PageTools, PendingTab, Profile,
 };
 use osmena_engine::raw_window_handle::{DisplayHandle, WindowHandle};
 use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker, WindowStrip};
@@ -67,6 +69,9 @@ pub static INFO: EngineInfo = EngineInfo {
     // Downloads, the clipboard, printing, `view-source:` pages, and the
     // developer tools are all Chromium's.
     page_tools: PageTools::ALL,
+    // One Chromium runs every profile, each in a request context of its
+    // own (`Runtime`).
+    profiles_in_process: true,
 };
 
 /// Run this process as one of Chromium's helper processes if it is one.
@@ -82,7 +87,7 @@ pub fn run_subprocess() -> Option<i32> {
     load_framework(false);
     let _ = api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
     let args = Args::new();
-    let mut app = NautilusApp::new(None, Rc::new(RefCell::new(None)));
+    let mut app = NautilusApp::new(None, Rc::default());
     let code = cef::execute_process(
         Some(args.as_main_args()),
         Some(&mut app),
@@ -98,7 +103,7 @@ pub fn run_helper() -> i32 {
     load_framework(true);
     let _ = api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
     let args = Args::new();
-    let mut app = NautilusApp::new(None, Rc::new(RefCell::new(None)));
+    let mut app = NautilusApp::new(None, Rc::default());
     cef::execute_process(
         Some(args.as_main_args()),
         Some(&mut app),
@@ -128,46 +133,81 @@ fn load_framework(helper: bool) {
 #[cfg(not(target_os = "macos"))]
 fn load_framework(_helper: bool) {}
 
-/// One CEF instance. CEF is process-global, so build exactly one `Engine`
-/// per process, after [`run_subprocess`] returned `None`.
-pub struct Engine {
-    delegate: Rc<DelegateState>,
-    extensions: Rc<ExtensionManager>,
-    /// True while inside `do_message_loop_work`, whose callbacks may ask
-    /// for another spin; that request is served on the next call.
-    spinning: Cell<bool>,
-    pump: Arc<PumpScheduler>,
+/// How long a profile's request context may take to load before its
+/// engine gives up.
+const CONTEXT_PATIENCE: Duration = Duration::from_secs(15);
+
+/// Chromium, once per process: build one `Runtime` in `main`, after
+/// [`run_subprocess`] returned `None`, and start an [`Engine`] from it for
+/// each profile the shell opens. CEF is initialised for the first profile
+/// and shut down when the runtime and every engine it started are gone;
+/// it cannot be started again after that.
+#[derive(Default)]
+pub struct Runtime {
+    shared: RefCell<Option<Rc<Shared>>>,
 }
 
-impl Engine {
-    /// Start Chromium with its cookies, local storage, and HTTP cache under
-    /// `engine_dir` (the profile's `chromium/` directory).
+impl Runtime {
+    pub fn new() -> Runtime {
+        Runtime::default()
+    }
+
+    /// Start an engine for `profile`: Chromium itself first, if this is
+    /// the first profile of the process.
+    ///
+    /// Chromium keeps every profile it runs under one directory, the
+    /// default profile's `chromium/` (`Profile::shared_engine_dir`): the
+    /// default profile's data is that directory's own (`Default/`, as it
+    /// always was), and another profile's is `profile-<name>/` inside it
+    /// (`Profile::shared_engine_data`), moved there from the profile's
+    /// own `chromium/Default/` the first time. A profile's extensions
+    /// stay under its own `chromium/extensions/`.
     ///
     /// Each tab's page runs in one of Chromium's renderer processes, so a
     /// renderer that crashes costs that tab its page (reported as an
     /// `EngineEvent::TabCrashed`) and nothing else. The renderer processes
     /// run without Chromium's sandbox for now (see README.md, Known
     /// limitations).
-    pub fn new(engine_dir: &Path, waker: Arc<dyn Waker>) -> Result<Engine, EngineError> {
-        std::fs::create_dir_all(engine_dir).map_err(|e| {
-            EngineError(format!(
-                "creating engine directory {}: {e}",
-                engine_dir.display()
-            ))
-        })?;
-        // Absolute, but not canonical: on Windows `canonicalize` yields a
-        // verbatim `\\?\` path, and Chromium's LevelDB (IndexedDB) then
-        // fails to take its lock file in it.
-        let engine_dir = std::path::absolute(engine_dir).map_err(|e| {
-            EngineError(format!(
-                "resolving engine directory {}: {e}",
-                engine_dir.display()
-            ))
-        })?;
-        forget_chromium_session(&engine_dir);
+    pub fn start(&self, profile: &Profile, waker: Arc<dyn Waker>) -> Result<Engine, EngineError> {
+        let running = self.shared.borrow().clone();
+        let shared = match running {
+            Some(shared) => shared,
+            None => {
+                let shared = Rc::new(Shared::initialize(
+                    &profile.shared_engine_dir(),
+                    waker.clone(),
+                )?);
+                *self.shared.borrow_mut() = Some(shared.clone());
+                shared
+            }
+        };
+        Engine::open(shared, profile, waker)
+    }
+}
+
+/// What every engine of the process shares: CEF itself, its message
+/// pump, and the list of open profiles. Dropping the last reference
+/// shuts CEF down.
+struct Shared {
+    /// Chromium's user-data directory, absolute.
+    root: PathBuf,
+    /// True while inside `do_message_loop_work`, whose callbacks may ask
+    /// for another spin; that request is served on the next call.
+    spinning: Cell<bool>,
+    pump: Arc<PumpScheduler>,
+    /// The event queue of every open profile, for the browsers Chromium
+    /// creates on its own.
+    delegates: Rc<Delegates>,
+}
+
+impl Shared {
+    /// Start Chromium with `root` as its user-data directory.
+    fn initialize(root: &Path, waker: Arc<dyn Waker>) -> Result<Shared, EngineError> {
+        let root = resolved_dir(root)?;
+        forget_chromium_session(&root.join("Default"));
         #[cfg(target_os = "macos")]
         crate::mac_app::adopt_cef_app_protocol();
-        let cache_path = CefString::from(engine_dir.to_string_lossy().as_ref());
+        let cache_path = CefString::from(root.to_string_lossy().as_ref());
         let settings = Settings {
             no_sandbox: 1,
             // Tabs paint off-screen into frames the window uploads.
@@ -194,11 +234,9 @@ impl Engine {
                 .unwrap_or_default(),
             ..Settings::default()
         };
-        let pump = Arc::new(PumpScheduler::new(waker.clone()));
-        // Filled in once the engine exists, for the browsers Chromium
-        // creates on its own.
-        let shared_delegate = Rc::new(RefCell::new(None));
-        let mut app = NautilusApp::new(Some(pump.clone()), shared_delegate.clone());
+        let pump = Arc::new(PumpScheduler::new(waker));
+        let delegates = Rc::new(Delegates::default());
+        let mut app = NautilusApp::new(Some(pump.clone()), delegates.clone());
         let args = Args::new();
         if cef::initialize(
             Some(args.as_main_args()),
@@ -211,12 +249,219 @@ impl Engine {
                 "Chromium failed to initialise (the CEF log on stderr has the reason)".to_string(),
             ));
         }
+        log::info!("Chromium's data is under {}", root.display());
+        Ok(Shared {
+            root,
+            spinning: Cell::new(false),
+            pump,
+            delegates,
+        })
+    }
+
+    /// A request context whose profile is the directory `data`, a direct
+    /// child of the root, loaded and ready for browsers.
+    fn context_at(&self, data: &Path) -> Result<RequestContext, EngineError> {
+        let ready = Rc::new(Cell::new(false));
+        let mut handler = ContextReady::new(ready.clone());
+        let settings = RequestContextSettings {
+            cache_path: CefString::from(data.to_string_lossy().as_ref()),
+            persist_session_cookies: 1,
+            ..RequestContextSettings::default()
+        };
+        let context = cef::request_context_create_context(Some(&settings), Some(&mut handler))
+            .ok_or_else(|| {
+                EngineError(format!(
+                    "Chromium could not make a profile at {}",
+                    data.display()
+                ))
+            })?;
+        // Chromium loads the profile on its message loop, and a browser
+        // cannot be created in it before that.
+        let was_spinning = self.spinning.replace(true);
+        let deadline = Instant::now() + CONTEXT_PATIENCE;
+        while !ready.get() && Instant::now() < deadline {
+            cef::do_message_loop_work();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        self.spinning.set(was_spinning);
+        if !ready.get() {
+            return Err(EngineError(format!(
+                "Chromium did not load the profile at {} in {} s",
+                data.display(),
+                CONTEXT_PATIENCE.as_secs()
+            )));
+        }
+        // A directory Chromium does not accept (one it does not see as
+        // inside its root) is answered with a profile kept in memory:
+        // the profile's data would seem gone, and nothing would be kept.
+        let kept = CefString::from(&context.cache_path()).to_string();
+        if kept.is_empty() {
+            return Err(EngineError(format!(
+                "Chromium would not keep a profile at {} (its log on stderr has the reason)",
+                data.display()
+            )));
+        }
+        Ok(context)
+    }
+}
+
+impl Drop for Shared {
+    /// Every engine is gone, and with each of them its browsers (see
+    /// `Engine::drop`): CEF may shut down.
+    fn drop(&mut self) {
+        cef::shutdown();
+    }
+}
+
+wrap_request_context_handler! {
+    struct ContextReady {
+        ready: Rc<Cell<bool>>,
+    }
+
+    impl RequestContextHandler {
+        fn on_request_context_initialized(&self, _request_context: Option<&mut RequestContext>) {
+            self.ready.set(true);
+        }
+    }
+}
+
+/// The event queues of the open profiles.
+#[derive(Default)]
+struct Delegates(RefCell<Vec<Weak<DelegateState>>>);
+
+impl Delegates {
+    fn add(&self, delegate: &Rc<DelegateState>) {
+        let mut all = self.0.borrow_mut();
+        all.retain(|d| d.strong_count() > 0);
+        all.push(Rc::downgrade(delegate));
+    }
+
+    fn live(&self) -> Vec<Rc<DelegateState>> {
+        self.0.borrow().iter().filter_map(Weak::upgrade).collect()
+    }
+
+    /// The profile `browser` was created in: the one whose request
+    /// context it has, else the one opened first.
+    fn of(&self, browser: Option<&mut Browser>) -> Option<Rc<DelegateState>> {
+        let live = self.live();
+        let mut context = browser
+            .and_then(|b| b.host())
+            .and_then(|host| host.request_context());
+        if let Some(context) = context.as_mut()
+            && let Some(owner) = live.iter().find(|d| d.owns_context(context))
+        {
+            return Some(owner.clone());
+        }
+        live.into_iter().next()
+    }
+}
+
+/// A directory Chromium is given, made if it is not there, as Chromium
+/// itself will name it: with symbolic links resolved where it resolves
+/// them (`/var` is one on macOS). It takes a profile's directory only
+/// when that path starts with its root's, and it reports the paths of
+/// extensions resolved. On Windows the path is left absolute and
+/// unresolved, as for [`absolute_dir`].
+fn resolved_dir(dir: &Path) -> Result<PathBuf, EngineError> {
+    let dir = absolute_dir(dir)?;
+    if cfg!(windows) {
+        return Ok(dir);
+    }
+    std::fs::canonicalize(&dir)
+        .map_err(|e| EngineError(format!("resolving engine directory {}: {e}", dir.display())))
+}
+
+/// `dir`, made if it is not there, as an absolute path. Not canonical:
+/// on Windows `canonicalize` yields a verbatim `\\?\` path, and
+/// Chromium's LevelDB (IndexedDB) then fails to take its lock file in
+/// it.
+fn absolute_dir(dir: &Path) -> Result<PathBuf, EngineError> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| EngineError(format!("creating engine directory {}: {e}", dir.display())))?;
+    std::path::absolute(dir)
+        .map_err(|e| EngineError(format!("resolving engine directory {}: {e}", dir.display())))
+}
+
+/// Where a profile's Chromium data is to be, given where an earlier
+/// build (one browser process per profile) left it: `Some((from, to))`
+/// when `own` (the profile's `chromium/Default`) is there and `shared`
+/// (its `profile-<name>` under the root) is not yet.
+fn data_to_adopt(own_exists: bool, shared_exists: bool) -> bool {
+    own_exists && !shared_exists
+}
+
+/// Move the Chromium data an earlier build kept in the profile's own
+/// `chromium/Default` to `data`, where one Chromium for every profile
+/// keeps it. A rename: both are under the brand's data directory.
+fn adopt_profile_data(engine_dir: &Path, data: &Path) -> Result<(), EngineError> {
+    let own = engine_dir.join("Default");
+    if !data_to_adopt(own.is_dir(), data.exists()) {
+        return Ok(());
+    }
+    std::fs::rename(&own, data).map_err(|e| {
+        EngineError(format!(
+            "moving the profile's Chromium data from {} to {}: {e}",
+            own.display(),
+            data.display()
+        ))
+    })?;
+    log::info!(
+        "moved the profile's Chromium data from {} to {}",
+        own.display(),
+        data.display()
+    );
+    Ok(())
+}
+
+/// One profile's engine: its event queue, its extensions, and, for any
+/// profile but the default one, its request context in the process's
+/// Chromium. Started by [`Runtime::start`].
+pub struct Engine {
+    delegate: Rc<DelegateState>,
+    extensions: Rc<ExtensionManager>,
+    // Last: CEF may only shut down once this profile's browsers are gone.
+    shared: Rc<Shared>,
+}
+
+impl Engine {
+    fn open(
+        shared: Rc<Shared>,
+        profile: &Profile,
+        waker: Arc<dyn Waker>,
+    ) -> Result<Engine, EngineError> {
+        // Resolved like the root: Chromium names an extension's directory
+        // with its links resolved, and the extension manager tells its own
+        // copies (under this directory) from a user's folder by the path.
+        let engine_dir = resolved_dir(&profile.engine_dir)?;
         let delegate = Rc::new(DelegateState::default());
-        *shared_delegate.borrow_mut() = Some(delegate.clone());
+        if let Some(data) = profile.shared_engine_data() {
+            // Under the root as Chromium names it, which the profile's
+            // own idea of the shared directory must be.
+            let theirs = resolved_dir(&profile.shared_engine_dir())?;
+            let name = data.file_name().filter(|_| theirs == shared.root);
+            let Some(name) = name else {
+                return Err(EngineError(format!(
+                    "profile {:?} keeps its Chromium data at {}, outside this browser's {}",
+                    profile.name,
+                    data.display(),
+                    shared.root.display()
+                )));
+            };
+            let data = shared.root.join(name);
+            adopt_profile_data(&engine_dir, &data)?;
+            forget_chromium_session(&data);
+            delegate.set_request_context(Some(shared.context_at(&data)?));
+            log::info!(
+                "profile {:?}: Chromium data at {}",
+                profile.name,
+                data.display()
+            );
+        }
+        shared.delegates.add(&delegate);
         // The bridge asks for another turn of the pump while it has
         // something to wait for.
         let nudge = {
-            let pump = pump.clone();
+            let pump = shared.pump.clone();
             Box::new(move || pump.schedule(50))
         };
         let extensions = ExtensionManager::start(
@@ -229,8 +474,7 @@ impl Engine {
         Ok(Engine {
             delegate,
             extensions,
-            spinning: Cell::new(false),
-            pump,
+            shared,
         })
     }
 
@@ -252,7 +496,7 @@ impl osmena_engine::Engine for Engine {
     /// Run the work CEF has queued for the main thread: it delivers the
     /// handler callbacks (which become [`EngineEvent`]s) and paints.
     fn spin(&self) {
-        if self.spinning.replace(true) {
+        if self.shared.spinning.replace(true) {
             return;
         }
         // Store downloads unpacked on worker threads are loaded here, on
@@ -269,8 +513,8 @@ impl osmena_engine::Engine for Engine {
         cef::do_message_loop_work();
         // Strips held for a tab's id, and answers held for a strip.
         self.extensions.tick_bridge();
-        self.pump.after_spin(started.elapsed());
-        self.spinning.set(false);
+        self.shared.pump.after_spin(started.elapsed());
+        self.shared.spinning.set(false);
     }
 
     fn drain_events(&self) -> Vec<EngineEvent> {
@@ -353,11 +597,12 @@ impl osmena_engine::Engine for Engine {
 }
 
 impl Drop for Engine {
-    /// Every browser must be closed before CEF shuts down. The tab hosts
-    /// drop before the engine and ask their browsers (and popups) to
-    /// close; the extension manager's goes here; closing completes on the
-    /// message loop, so pump it until the last one is gone (or give up
-    /// after a moment).
+    /// Every browser of the profile must be closed before its request
+    /// context goes, and every browser of every profile before CEF shuts
+    /// down (`Shared::drop`). The tab hosts drop before the engine and
+    /// ask their browsers (and popups) to close; the extension manager's
+    /// goes here; closing completes on the message loop, so pump it
+    /// until the last one is gone (or give up after a moment).
     fn drop(&mut self) {
         self.extensions.release_bridge();
         // A recent extension change is still only in memory; see
@@ -384,7 +629,7 @@ impl Drop for Engine {
                 self.extensions.is_closed()
             );
         }
-        cef::shutdown();
+        self.delegate.set_request_context(None);
     }
 }
 
@@ -428,9 +673,10 @@ fn helper_path() -> Option<std::path::PathBuf> {
 /// is a Chrome window to its session service) and, if the browser did not
 /// exit cleanly, restores it as a visible Chromium window at the next
 /// launch. Nautilus never wants Chromium's session restore (the shell has
-/// its own), so the saved session goes before Chromium starts.
-fn forget_chromium_session(engine_dir: &Path) {
-    let sessions = engine_dir.join("Default").join("Sessions");
+/// its own), so the saved session goes before Chromium loads the profile
+/// whose directory is `profile_dir`.
+fn forget_chromium_session(profile_dir: &Path) {
+    let sessions = profile_dir.join("Sessions");
     if !sessions.is_dir() {
         return;
     }
@@ -780,9 +1026,9 @@ impl PumpScheduler {
 wrap_app! {
     struct NautilusApp {
         pump: Option<Arc<PumpScheduler>>,
-        // The event queue, once the engine exists, for the browsers
-        // Chromium creates on its own.
-        delegate: Rc<RefCell<Option<Rc<DelegateState>>>>,
+        // The open profiles' event queues, for the browsers Chromium
+        // creates on its own.
+        delegates: Rc<Delegates>,
     }
 
     impl App {
@@ -854,7 +1100,7 @@ wrap_app! {
             if !pump.started.swap(true, Ordering::AcqRel) {
                 pump.start_timer_thread();
             }
-            Some(NautilusBrowserProcessHandler::new(pump, self.delegate.clone()))
+            Some(NautilusBrowserProcessHandler::new(pump, self.delegates.clone()))
         }
     }
 }
@@ -862,7 +1108,7 @@ wrap_app! {
 wrap_browser_process_handler! {
     struct NautilusBrowserProcessHandler {
         pump: Arc<PumpScheduler>,
-        delegate: Rc<RefCell<Option<Rc<DelegateState>>>>,
+        delegates: Rc<Delegates>,
     }
 
     impl BrowserProcessHandler {
@@ -873,14 +1119,17 @@ wrap_browser_process_handler! {
         /// The client of a browser Chromium creates on its own (an
         /// extension's `chrome.tabs.create`, a link the extension
         /// manager's page opens): a browser Nautilus cannot show, so its
-        /// URL becomes a tab of the last focused window and it closes.
+        /// URL becomes a tab of the last focused window of its profile
+        /// and it closes. Which profile is known once the browser
+        /// exists (`StrayLife::on_after_created`).
         fn default_client(&self) -> Option<Client> {
-            let delegate = self.delegate.borrow().clone()?;
+            let first = self.delegates.live().into_iter().next()?;
             log::debug!("Chromium asked for a client for a browser of its own");
+            let owner = Rc::new(RefCell::new(None));
             Some(StrayClient::new(
-                StrayLife::new(delegate.clone()),
-                StrayDisplay::new(delegate.clone(), Cell::new(false)),
-                delegate.dialog_handler(),
+                StrayLife::new(self.delegates.clone(), owner.clone()),
+                StrayDisplay::new(owner, Cell::new(false)),
+                first.dialog_handler(),
             ))
         }
     }
@@ -910,23 +1159,32 @@ wrap_client! {
 
 wrap_life_span_handler! {
     struct StrayLife {
-        delegate: Rc<DelegateState>,
+        delegates: Rc<Delegates>,
+        // The profile the browser turned out to be in, shared with the
+        // display handler.
+        owner: Rc<RefCell<Option<Rc<DelegateState>>>>,
     }
 
     impl LifeSpanHandler {
-        fn on_after_created(&self, _browser: Option<&mut Browser>) {
-            self.delegate.add_live(1);
+        fn on_after_created(&self, browser: Option<&mut Browser>) {
+            let owner = self.delegates.of(browser);
+            if let Some(owner) = &owner {
+                owner.add_live(1);
+            }
+            *self.owner.borrow_mut() = owner;
         }
 
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
-            self.delegate.add_live(-1);
+            if let Some(owner) = self.owner.borrow_mut().take() {
+                owner.add_live(-1);
+            }
         }
     }
 }
 
 wrap_display_handler! {
     struct StrayDisplay {
-        delegate: Rc<DelegateState>,
+        owner: Rc<RefCell<Option<Rc<DelegateState>>>>,
         handled: Cell<bool>,
     }
 
@@ -948,7 +1206,8 @@ wrap_display_handler! {
             }
             self.handled.set(true);
             log::info!("Chromium opened {url} on its own; moving it to a tab");
-            if !self.delegate.request_tab_without_opener(url) {
+            let owner = self.owner.borrow().clone();
+            if !owner.is_some_and(|owner| owner.request_tab_without_opener(url)) {
                 log::warn!("no window to show it in");
             }
             if let Some(host) = browser.and_then(|b| b.host()) {
@@ -964,9 +1223,21 @@ mod tests {
 
     #[cfg(feature = "test-hooks")]
     use super::pump_interval;
-    use super::{armed_after_spin, next_deadline};
+    use super::{armed_after_spin, data_to_adopt, next_deadline};
 
     const TICK: Option<Duration> = Some(Duration::from_millis(33));
+
+    #[test]
+    fn a_profiles_own_chromium_data_is_moved_once_and_never_over_what_is_there() {
+        // An earlier build's data, nothing under the root yet: moved.
+        assert!(data_to_adopt(true, false));
+        // Moved already, or a profile made by this build.
+        assert!(!data_to_adopt(false, true));
+        assert!(!data_to_adopt(false, false));
+        // Both there (an older build ran again in between): what the
+        // profile has been using since stays.
+        assert!(!data_to_adopt(true, true));
+    }
 
     #[test]
     fn after_a_spin_with_nothing_pending_the_timer_arms_at_the_interval() {

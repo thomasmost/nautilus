@@ -619,12 +619,13 @@ mod native {
                 ManagerLife::new(manager.clone()),
             );
             let mut view_delegate = ManagerViewDelegate::new();
+            let mut context = manager.delegate.request_context();
             let browser_view = cef::browser_view_create(
                 Some(&mut client),
                 Some(&CefString::from("chrome://extensions")),
                 Some(&BrowserSettings::default()),
                 None,
-                None,
+                context.as_mut(),
                 Some(&mut view_delegate),
             );
             let Some(browser_view) = browser_view else {

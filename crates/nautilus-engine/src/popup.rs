@@ -197,13 +197,14 @@ mod native {
                 background_color: 0xFFFF_FFFF,
                 ..BrowserSettings::default()
             };
+            let mut context = self.delegate.request_context();
             let browser = cef::browser_host_create_browser_sync(
                 Some(&window_info),
                 Some(&mut client),
                 Some(&CefString::from(url)),
                 Some(&settings),
                 None,
-                None,
+                context.as_mut(),
             );
             let Some(browser) = browser else {
                 log::error!("Chromium could not open the popup of extension {id}");

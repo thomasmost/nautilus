@@ -335,13 +335,14 @@ impl TabHostApi for TabHost {
         let window_info = WindowInfo::default().set_as_windowless(self.parent);
         let mut settings = BrowserSettings::default();
         apply_tab_settings(&mut settings);
+        let mut context = self.delegate.request_context();
         let browser = cef::browser_host_create_browser_sync(
             Some(&window_info),
             Some(&mut client),
             Some(&CefString::from(url.as_str())),
             Some(&settings),
             None,
-            None,
+            context.as_mut(),
         );
         match browser {
             Some(browser) => {

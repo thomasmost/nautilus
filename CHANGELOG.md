@@ -8,6 +8,38 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- Every profile is a window of the one Nautilus. Opening another
+  profile (the Profiles menu, "Open in profile", a new or guest
+  profile) no longer starts a second Nautilus: its window opens in the
+  running one, so on macOS there is one Dock icon and one entry under
+  Cmd+Tab, the menu bar follows the profile in front, and Cmd+` moves
+  between the windows of all profiles. A profile that is open already
+  comes forward. Closing a profile's last window closes that profile
+  and leaves the others; Quit quits them all (each asks first while it
+  has downloads going), and the next start opens the profile that was
+  in front, with the others that were open when their settings bring
+  their windows back. Starting Nautilus while it runs (from a
+  terminal, a shortcut, with or without `--profile` and addresses)
+  hands the request to the running one and exits. Each profile still
+  has its own cookies, storage, cache and extensions.
+- Where Chromium keeps a profile's data: one Chromium now runs every
+  profile, with the default profile's `chromium/` directory as its
+  root. The default profile's data stays where it was. Any other
+  profile's cookies, storage and cache move, the first time it opens,
+  from its own `chromium/Default/` to
+  `profiles/default/chromium/profile-<name>/`; its extensions stay in
+  its own `chromium/extensions/`. On Windows this signs such a profile
+  out of websites once: Chromium encrypts cookies with a key kept
+  beside its root directory, and the profile changes roots. Going back
+  to an older build after the move shows those profiles empty (their
+  data is in the new place); the default profile is unaffected.
+- A profile cannot be opened while a Nautilus from before this change
+  still has it open: quit that one first (the message says so).
+- The scripted runs (`ci/side-panel/run.sh`, `phase5.py`) keep their
+  profiles in a data directory of their own (`--data-dir`), so they no
+  longer touch the profiles of the Nautilus in use, and are not handed
+  to it.
+
 - A strip with more tabs than fit says which way the rest are: the
   row fades into the strip at an end with tabs scrolled out of sight
   beyond it, instead of being cut off (osmena).
