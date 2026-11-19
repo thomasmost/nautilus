@@ -351,32 +351,104 @@ enum Pending {
     Poll,
     /// An answer handed to a relay; only a failure is of interest.
     Reply,
-    /// A delivery to an extension's worker.
-    Deliver {
-        tab: TabId,
-        attempt: u8,
-        delivery: u64,
-    },
-    /// An event for an extension's worker (`Job::Emit`), kept to retry it.
-    Emit {
+    /// A delivery handed to an extension's relay, kept to send it again.
+    Deliver(Delivery),
+}
+
+/// What a delivery carries to an extension's worker.
+enum Payload {
+    /// A click on the extension's action for `tab`.
+    Click { tab: TabId },
+    /// A listener's event, or `bridge.wake`. `instance` is the worker
+    /// instance the extension was known to have when the event was queued
+    /// (`None`: before any hello).
+    Event {
         event: String,
         args: Vec<Value>,
-        attempt: u8,
-        delivery: u64,
         instance: Option<String>,
     },
 }
 
+/// One delivery to an extension's worker. `id` is what the worker sees,
+/// the same on every attempt, so a worker instance that already ran it
+/// ignores the repeat. `attempt` counts from 0.
+struct Delivery {
+    id: u64,
+    attempt: u8,
+    payload: Payload,
+}
+
+impl Delivery {
+    /// How the log names it: `delivery 7` for a click, `event tabs.onCreated
+    /// (delivery 7)` for an event.
+    fn label(&self) -> String {
+        match &self.payload {
+            Payload::Click { .. } => format!("delivery {}", self.id),
+            Payload::Event { event, .. } => format!("event {event} (delivery {})", self.id),
+        }
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use osmena_core::TabId;
+
+    use super::{Delivery, Job, Payload};
+    use crate::bridge::policy::JobKind;
+
+    fn click() -> Delivery {
+        Delivery {
+            id: 7,
+            attempt: 0,
+            payload: Payload::Click { tab: TabId(3) },
+        }
+    }
+
+    fn event() -> Delivery {
+        Delivery {
+            id: 8,
+            attempt: 1,
+            payload: Payload::Event {
+                event: "tabs.onCreated".to_string(),
+                args: Vec::new(),
+                instance: None,
+            },
+        }
+    }
+
+    // The scripted runs read these words in the log (`ci/side-panel`).
+    #[test]
+    fn a_click_is_logged_by_its_delivery_and_an_event_by_its_name_too() {
+        assert_eq!(click().label(), "delivery 7");
+        assert_eq!(event().label(), "event tabs.onCreated (delivery 8)");
+    }
+
+    #[test]
+    fn the_queue_reads_a_deliverys_kind_from_what_it_carries() {
+        let job = |delivery| Job::Deliver {
+            extension: "abcdefghijklmnopabcdefghijklmnop".to_string(),
+            delivery,
+        };
+        assert_eq!(job(click()).kind(), JobKind::Click);
+        assert_eq!(job(event()).kind(), JobKind::Emit);
+    }
+}
+
+/// Why a delivery was not queued (`Bridge::deliver`).
+enum Undeliverable {
+    /// The extension's relay, or the helper's page, was given up.
+    GivenUp,
+    /// The extension is not bridged and on.
+    NotWanted,
+}
+
 /// Work that waits for a fresh table, or for its relay to be ready.
 enum Job {
-    /// Deliver a click on `extension`'s action for `tab`. `delivery` is
-    /// the id the worker will see, kept for every attempt so a worker
-    /// instance that already ran it ignores the repeat.
-    Click {
+    /// Hand `delivery` to `extension`'s worker: a click on its action, or
+    /// an event.
+    Deliver {
         extension: String,
-        tab: TabId,
-        attempt: u8,
-        delivery: u64,
+        delivery: Delivery,
     },
     /// `extension`'s worker attached (or detached) its debugger to
     /// `debuggee`; the worker waits for `call`, made by `instance`.
@@ -387,37 +459,23 @@ enum Job {
         debuggee: Debuggee,
         attach: bool,
     },
-    /// Deliver `event` with `args` to `extension`'s worker: a listener's
-    /// event, or `bridge.wake`. `delivery` is its id, the same on every
-    /// attempt (a worker instance that ran it ignores the repeat).
-    /// `instance` is the worker instance the extension was known to have
-    /// when the event was queued (`None`: before any hello).
-    Emit {
-        extension: String,
-        event: String,
-        args: Vec<Value>,
-        attempt: u8,
-        delivery: u64,
-        instance: Option<String>,
-    },
 }
 
-/// `Job::Emit` (an event for an extension's worker) sits in the queue with
-/// the fields of its delivery; the kind is what the queue's rules read.
 impl Job {
     fn extension(&self) -> &str {
         match self {
-            Job::Click { extension, .. }
-            | Job::Debugger { extension, .. }
-            | Job::Emit { extension, .. } => extension,
+            Job::Deliver { extension, .. } | Job::Debugger { extension, .. } => extension,
         }
     }
 
+    /// What the queue's rules read (`policy`).
     fn kind(&self) -> JobKind {
         match self {
-            Job::Click { .. } => JobKind::Click,
+            Job::Deliver { delivery, .. } => match delivery.payload {
+                Payload::Click { .. } => JobKind::Click,
+                Payload::Event { .. } => JobKind::Emit,
+            },
             Job::Debugger { .. } => JobKind::Debugger,
-            Job::Emit { .. } => JobKind::Emit,
         }
     }
 }
@@ -1344,29 +1402,49 @@ impl Bridge {
     /// `extension`'s action was clicked for `tab`. False when the
     /// extension is not wanted a relay (it is not bridged, or is off).
     pub(crate) fn click(&self, extension: &str, tab: TabId) -> bool {
-        if self.given_up(extension) || self.given_up(HELPER_KEY) {
-            log::warn!("bridge: the click on {extension} is refused: its page did not load");
-            return false;
-        }
-        {
-            let mut inner = self.inner.borrow_mut();
-            // A wanted relay that closed underneath is reopened on the next
-            // turn, and its click waits for it (`job_turn`).
-            if !inner.wanted.iter().any(|id| id == extension) {
-                return false;
+        match self.deliver(extension, |_| Payload::Click { tab }) {
+            Ok(()) => true,
+            Err(Undeliverable::GivenUp) => {
+                log::warn!("bridge: the click on {extension} is refused: its page did not load");
+                false
             }
-            let delivery = inner.next_delivery;
-            inner.next_delivery += 1;
-            drop(inner);
-            self.queue(Job::Click {
-                extension: extension.to_string(),
-                tab,
-                attempt: 0,
-                delivery,
-            });
+            Err(Undeliverable::NotWanted) => false,
         }
+    }
+
+    /// Queue a delivery to `extension`'s worker; `payload` is given the
+    /// worker instance the extension is known to have. An extension that
+    /// is not bridged and on, or whose relay (or the helper's page) has
+    /// been given up, has nothing to deliver to. A wanted relay that
+    /// closed underneath is reopened on the next turn, and the delivery
+    /// waits for it (`job_turn`).
+    fn deliver(
+        &self,
+        extension: &str,
+        payload: impl FnOnce(Option<String>) -> Payload,
+    ) -> Result<(), Undeliverable> {
+        if self.given_up(extension) || self.given_up(HELPER_KEY) {
+            return Err(Undeliverable::GivenUp);
+        }
+        let delivery = {
+            let mut inner = self.inner.borrow_mut();
+            if !inner.wanted.iter().any(|id| id == extension) {
+                return Err(Undeliverable::NotWanted);
+            }
+            let id = inner.next_delivery;
+            inner.next_delivery += 1;
+            Delivery {
+                id,
+                attempt: 0,
+                payload: payload(inner.identities.get(extension).cloned()),
+            }
+        };
+        self.queue(Job::Deliver {
+            extension: extension.to_string(),
+            delivery,
+        });
         self.refresh();
-        true
+        Ok(())
     }
 
     /// One request of `extension`'s worker, as the relay passed it on. The
@@ -1607,12 +1685,10 @@ impl Bridge {
             );
         }
         for job in stale {
-            if let Job::Emit {
-                event, delivery, ..
-            } = job
-            {
+            if let Job::Deliver { delivery, .. } = job {
                 log::warn!(
-                    "bridge: {extension}: event {event} (delivery {delivery}) is dropped: its worker instance was replaced"
+                    "bridge: {extension}: {} is dropped: its worker instance was replaced",
+                    delivery.label()
                 );
             }
         }
@@ -1734,26 +1810,19 @@ impl Bridge {
     fn fail_jobs(&self, jobs: Vec<Job>, why: &str) {
         for job in jobs {
             match job {
-                Job::Emit {
+                Job::Deliver {
                     extension,
-                    event,
                     delivery,
-                    ..
-                } => {
-                    log::warn!(
-                        "bridge: {extension}: event {event} (delivery {delivery}) is dropped: {why}"
-                    );
-                }
-                Job::Click {
-                    extension,
-                    tab,
-                    delivery,
-                    ..
-                } => {
-                    log::warn!(
-                        "bridge: {extension}: the click on {tab:?} (delivery {delivery}) is dropped: {why}"
-                    );
-                }
+                } => match delivery.payload {
+                    Payload::Click { tab } => log::warn!(
+                        "bridge: {extension}: the click on {tab:?} (delivery {}) is dropped: {why}",
+                        delivery.id
+                    ),
+                    Payload::Event { .. } => log::warn!(
+                        "bridge: {extension}: {} is dropped: {why}",
+                        delivery.label()
+                    ),
+                },
                 Job::Debugger {
                     extension,
                     call,
@@ -1770,60 +1839,53 @@ impl Bridge {
         }
     }
 
-    fn run(&self, job: Job) {
-        match job {
-            Job::Emit {
-                extension,
-                event,
-                args,
-                attempt,
-                delivery,
-                instance,
-            } => {
-                let message = json!({"id": delivery, "event": event, "args": args});
-                let expression = format!("nautilusRelay.deliver({message})");
-                let pending = Pending::Emit {
-                    event: event.clone(),
-                    args,
-                    attempt,
-                    delivery,
-                    instance,
-                };
-                if self.evaluate(&extension, &expression, pending) {
-                    log::debug!("bridge: {extension}: event {event} (delivery {delivery}) sent");
-                } else {
-                    log::warn!("bridge: cannot reach the relay of {extension} for {event}");
-                }
-            }
-            Job::Click {
-                extension,
-                tab,
-                attempt,
-                delivery,
-            } => {
-                let chromium = self.inner.borrow().table.chromium(tab);
+    /// Hand `delivery` to `extension`'s relay, which passes it to the
+    /// worker. A click names its tab by Chromium's id, read from the table
+    /// now; a click on a tab the table cannot name is dropped.
+    fn send(&self, extension: &str, delivery: Delivery) {
+        let id = delivery.id;
+        let (message, sent, unreachable) = match &delivery.payload {
+            Payload::Click { tab } => {
+                let chromium = self.inner.borrow().table.chromium(*tab);
                 let Some(chromium) = chromium else {
                     log::warn!(
                         "bridge: no Chromium tab id for {tab:?}; the click on {extension} is dropped"
                     );
                     return;
                 };
-                let message =
-                    json!({"id": delivery, "event": "action.onClicked", "tabId": chromium});
-                let expression = format!("nautilusRelay.deliver({message})");
-                let pending = Pending::Deliver {
-                    tab,
-                    attempt,
-                    delivery,
-                };
-                if self.evaluate(&extension, &expression, pending) {
-                    log::info!(
-                        "bridge: {extension}: delivery {delivery} (action.onClicked, tab {chromium}) sent"
-                    );
-                } else {
-                    log::warn!("bridge: cannot reach the relay of {extension}");
-                }
+                (
+                    json!({"id": id, "event": "action.onClicked", "tabId": chromium}),
+                    format!(
+                        "bridge: {extension}: delivery {id} (action.onClicked, tab {chromium}) sent"
+                    ),
+                    format!("bridge: cannot reach the relay of {extension}"),
+                )
             }
+            Payload::Event { event, args, .. } => (
+                json!({"id": id, "event": event, "args": args}),
+                format!("bridge: {extension}: event {event} (delivery {id}) sent"),
+                format!("bridge: cannot reach the relay of {extension} for {event}"),
+            ),
+        };
+        // A click's sending is part of a run's record; an event's is not.
+        let level = match delivery.payload {
+            Payload::Click { .. } => log::Level::Info,
+            Payload::Event { .. } => log::Level::Debug,
+        };
+        let expression = format!("nautilusRelay.deliver({message})");
+        if self.evaluate(extension, &expression, Pending::Deliver(delivery)) {
+            log::log!(level, "{sent}");
+        } else {
+            log::warn!("{unreachable}");
+        }
+    }
+
+    fn run(&self, job: Job) {
+        match job {
+            Job::Deliver {
+                extension,
+                delivery,
+            } => self.send(&extension, delivery),
             Job::Debugger {
                 extension,
                 call,
@@ -2039,87 +2101,54 @@ impl Bridge {
                     log::warn!("bridge: an answer to {key} was lost: {e}");
                 }
             }
-            Pending::Deliver {
-                tab,
-                attempt,
-                delivery,
-            } => match after_delivery(&value, attempt) {
-                Next::Finished => {
-                    let attempts = value
+            Pending::Deliver(delivery) => self.delivered(key, delivery, &value),
+        }
+    }
+
+    /// The relay of `extension` answered a delivery (`policy::after_delivery`).
+    fn delivered(&self, extension: &str, mut delivery: Delivery, outcome: &Result<Value, String>) {
+        let label = delivery.label();
+        match after_delivery(outcome, delivery.attempt) {
+            Next::Finished => match delivery.payload {
+                Payload::Click { .. } => {
+                    let attempts = outcome
                         .as_ref()
                         .ok()
                         .and_then(|v| v.get("attempts"))
                         .and_then(Value::as_u64)
                         .unwrap_or(0);
                     log::info!(
-                        "bridge: {key}: delivery {delivery} taken by the worker after {attempts} attempt(s)"
+                        "bridge: {extension}: {label} taken by the worker after {attempts} attempt(s)"
                     );
                 }
-                Next::Retry => {
-                    log::warn!(
-                        "bridge: {key}: delivery {delivery} was not acknowledged ({}); trying once more with a fresh relay",
-                        describe(&value)
-                    );
-                    // Closed here, reopened by the next turn (`reopen`): a
-                    // callback creates no browser.
-                    self.close_relay(key);
-                    self.queue(Job::Click {
-                        extension: key.to_string(),
-                        tab,
-                        attempt: attempt + 1,
-                        delivery,
-                    });
-                }
-                Next::Abandon { reopen } => {
-                    log::warn!(
-                        "bridge: {key}: delivery {delivery} dropped: {}",
-                        describe(&value)
-                    );
-                    if reopen {
-                        self.close_relay(key);
-                    }
+                Payload::Event { .. } => {
+                    log::debug!("bridge: {extension}: {label} taken by the worker");
                 }
             },
-            Pending::Emit {
-                event,
-                args,
-                attempt,
-                delivery,
-                instance,
-            } => match after_delivery(&value, attempt) {
-                Next::Finished => {
-                    log::debug!(
-                        "bridge: {key}: event {event} (delivery {delivery}) taken by the worker"
-                    );
+            Next::Retry => {
+                log::warn!(
+                    "bridge: {extension}: {label} was not acknowledged ({}); trying once more with a fresh relay",
+                    describe(outcome)
+                );
+                // Closed here, reopened by the next turn (`reopen`): a
+                // callback creates no browser. The id is kept, so an
+                // instance that ran the delivery ignores the repeat.
+                self.close_relay(extension);
+                delivery.attempt += 1;
+                self.queue(Job::Deliver {
+                    extension: extension.to_string(),
+                    delivery,
+                });
+            }
+            Next::Abandon { reopen } => {
+                log::warn!(
+                    "bridge: {extension}: {label} dropped: {}",
+                    describe(outcome)
+                );
+                if reopen {
+                    self.close_relay(extension);
                 }
-                Next::Retry => {
-                    log::warn!(
-                        "bridge: {key}: event {event} (delivery {delivery}) was not acknowledged ({}); trying once more with a fresh relay",
-                        describe(&value)
-                    );
-                    // Closed here, reopened by the next turn (`reopen`): a
-                    // callback creates no browser. The id is kept, so an
-                    // instance that ran the event ignores the repeat.
-                    self.close_relay(key);
-                    self.queue(Job::Emit {
-                        extension: key.to_string(),
-                        event,
-                        args,
-                        attempt: attempt + 1,
-                        delivery,
-                        instance,
-                    });
-                }
-                Next::Abandon { reopen } => {
-                    log::warn!(
-                        "bridge: {key}: event {event} (delivery {delivery}) dropped: {}",
-                        describe(&value)
-                    );
-                    if reopen {
-                        self.close_relay(key);
-                    }
-                }
-            },
+            }
         }
     }
 
@@ -2186,31 +2215,20 @@ impl Bridge {
     /// on, or whose relay has given up, has nothing to deliver to: the event is
     /// dropped (logged) and never retried, as an undeliverable click is.
     fn event(&self, extension: &str, event: &str, args: &[Value]) {
-        if self.given_up(extension) || self.given_up(HELPER_KEY) {
-            log::warn!("bridge: {event} for {extension} is dropped: its page did not load");
-            return;
-        }
-        let (delivery, instance) = {
-            let mut inner = self.inner.borrow_mut();
-            if !inner.wanted.iter().any(|id| id == extension) {
-                log::debug!(
-                    "bridge: {event} for {extension} is not delivered: it is not bridged and on"
-                );
-                return;
-            }
-            let delivery = inner.next_delivery;
-            inner.next_delivery += 1;
-            (delivery, inner.identities.get(extension).cloned())
-        };
-        self.queue(Job::Emit {
-            extension: extension.to_string(),
+        let queued = self.deliver(extension, |instance| Payload::Event {
             event: event.to_string(),
             args: args.to_vec(),
-            attempt: 0,
-            delivery,
             instance,
         });
-        self.refresh();
+        match queued {
+            Ok(()) => {}
+            Err(Undeliverable::GivenUp) => {
+                log::warn!("bridge: {event} for {extension} is dropped: its page did not load");
+            }
+            Err(Undeliverable::NotWanted) => log::debug!(
+                "bridge: {event} for {extension} is not delivered: it is not bridged and on"
+            ),
+        }
     }
 }
 
@@ -2243,10 +2261,17 @@ impl BridgeTransport for Bridge {
 /// instance `current` makes stale (`policy::job_kept`).
 fn is_stale_event(job: &Job, extension: &str, current: &str) -> bool {
     match job {
-        Job::Emit {
+        Job::Deliver {
             extension: e,
-            instance: Some(instance),
-            ..
+            delivery:
+                Delivery {
+                    payload:
+                        Payload::Event {
+                            instance: Some(instance),
+                            ..
+                        },
+                    ..
+                },
         } => e.as_str() == extension && !job_kept(JobKind::Emit, instance, current),
         _ => false,
     }
@@ -2255,16 +2280,8 @@ fn is_stale_event(job: &Job, extension: &str, current: &str) -> bool {
 /// Log a pending evaluation that is lost with its page: a delivery or an
 /// event among them is unknown to the engine from now on.
 fn log_lost(key: &str, pending: &Pending, why: &str) {
-    match pending {
-        Pending::Deliver { delivery, .. } => {
-            log::warn!("bridge: {key}: delivery {delivery} is unknown ({why})");
-        }
-        Pending::Emit {
-            event, delivery, ..
-        } => {
-            log::warn!("bridge: {key}: event {event} (delivery {delivery}) is unknown ({why})");
-        }
-        _ => {}
+    if let Pending::Deliver(delivery) = pending {
+        log::warn!("bridge: {key}: {} is unknown ({why})", delivery.label());
     }
 }
 
