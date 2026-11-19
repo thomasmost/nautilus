@@ -904,7 +904,7 @@ impl Bridge {
 
     /// Ask `extension`'s relay which worker instance it reaches, for the change
     /// numbered `change` (`WorkerWatch::observe`). Only a change asks, so the
-    /// ask wakes nothing that an idle stop had put to sleep (I15). The answer
+    /// ask wakes nothing that an idle stop had put to sleep. The answer
     /// comes to `Pending::Ask`.
     fn ask(&self, extension: &str, change: u32) {
         log::info!(
@@ -963,7 +963,7 @@ impl Bridge {
             }
             let since = opener.last.map(|at| now.saturating_duration_since(at));
             // A relay that passed its probe and then could not reach its worker
-            // is a failed opening too (I12): it counts until its worker says who
+            // is a failed opening too: it counts until its worker says who
             // it is.
             let turn = next_opening(opener.failed + opener.unreached, since);
             match turn {
@@ -1676,7 +1676,7 @@ impl Bridge {
     }
 
     /// A relay passed its probe and then could not reach its worker: the
-    /// opening is a failed one for the schedule (I12). Its relay is closed by
+    /// opening is a failed one for the schedule. Its relay is closed by
     /// the caller; its debuggers and queued jobs are kept.
     fn unreached(&self, extension: &str) {
         self.inner
@@ -2027,7 +2027,7 @@ impl Bridge {
                             // The worker's port went: it stopped (an idle stop,
                             // which keeps its sessions) or was reloaded. Nothing
                             // is asked: asking would start a stopped worker
-                            // (I15). A reload is seen by the worker target
+                            // A reload is seen by the worker target
                             // (`check_worker_targets`), and the next port's
                             // hello says the rest.
                             log::debug!("bridge: {key}'s worker port closed; nothing is asked");

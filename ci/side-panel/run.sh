@@ -9,13 +9,13 @@
 #   pump   one launch: only the latency run, started with the worker.
 #   reload one launch: the worker debugs a background tab, reloads the
 #          extension; the tab must end hidden only if no session survives.
-#   zombie as reload, with the extension list held during the reload (I10 b):
+#   zombie as reload, with the extension list held during the reload:
 #          the worker-target detector must be the path that sees it.
 #   broken one launch: the relay page is damaged; the give-up keeps a
-#          debugged tab shown (I14).
+#          debugged tab shown.
 #   stop   one launch: the worker is stopped over DevTools with a debugger held.
 #   idle   one launch: the worker debugs a background tab and idles; the engine
-#          must not start it again for 90 s after Chromium stops it (I15).
+#          must not start it again for 90 s after Chromium stops it.
 #
 # Each launch is judged by the browser, not only by the driver. A launch
 # fails when the browser exits with a non-zero status (a signal included:

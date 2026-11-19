@@ -599,7 +599,7 @@ mod tests {
         let (copy, bridged) = bridge_source(source.path(), store.path(), "v1").unwrap();
         assert_eq!(bridged, Bridged::Yes);
         assert_eq!(copy.parent(), Some(store.path()));
-        // The name is Phase 1's scheme, of the absolute path.
+        // The name hashes the absolute path.
         assert_eq!(
             copy.file_name().unwrap().to_string_lossy(),
             copy_name(&std::path::absolute(source.path()).unwrap())
@@ -658,7 +658,7 @@ mod tests {
         assert_eq!(fs::read_dir(store.path()).unwrap().count(), 0);
     }
 
-    /// Phase 1's rewrite, through the marker: applying it again (a new
+    /// The rewrite, through the marker: applying it again (a new
     /// script version) must not wrap the loader in a loader, and must
     /// leave the worker's file the current script.
     #[test]

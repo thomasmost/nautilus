@@ -3,9 +3,9 @@
 //! its worker makes (`js/bridge.js`); the engine keeps the set here and
 //! un-hides a debugged tab, hiding it again when its last debugger goes.
 //!
-//! Phase 7 of the side-panel plan extends this module (`chrome.debugger`'s
-//! commands and events). It builds on this set rather than keeping a
-//! second one beside it. Pure: no CEF types, so the tests run anywhere.
+//! The commands and events of `chrome.debugger` extend this module, and build
+//! on this set rather than keeping a second one beside it. Pure: no CEF
+//! types, so the tests run anywhere.
 
 use std::collections::{BTreeMap, BTreeSet};
 

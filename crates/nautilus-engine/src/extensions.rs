@@ -101,12 +101,12 @@ pub(crate) struct ManifestFacts {
     pub worker: Option<String>,
     /// `background.type` is `"module"`.
     pub module_worker: bool,
-    /// `side_panel.default_path`. Read by Phase 6, whose step that first
-    /// reads it removes the `allow` below.
+    /// `side_panel.default_path`. Nothing reads it yet; the first reader
+    /// removes the `allow` below.
     #[allow(dead_code)]
     pub side_panel: Option<String>,
-    /// `commands`, by name. Read by Phase 7, whose step that first reads
-    /// it removes the `allow` below.
+    /// `commands`, by name. Nothing reads it yet; the first reader removes
+    /// the `allow` below.
     #[allow(dead_code)]
     pub commands: Vec<CommandFacts>,
 }
@@ -923,13 +923,13 @@ mod native {
                 log::info!("TEST HOOK: command {number}: table");
                 self.bridge.log_table();
             } else if let Some(seconds) = command.get("hold_list").and_then(|v| v.as_u64()) {
-                // I10 (b): the extension list is not read for this long, so the
+                // The extension list is not read for this long, so the
                 // engine's sync sees no change while the extension reloads.
                 log::info!("TEST HOOK: command {number}: hold_list {seconds} s");
                 self.inner.borrow_mut().list_hold =
                     Some(Instant::now() + std::time::Duration::from_secs(seconds));
             } else if let Some(relay) = command.get("relay_eval") {
-                // I10 (b): the relay page's own answer to an expression, logged.
+                // The relay page's own answer to an expression, logged.
                 let extension = relay
                     .get("extension")
                     .and_then(|v| v.as_str())

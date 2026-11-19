@@ -1065,7 +1065,7 @@ mod tests {
                 "{asker:?}"
             );
         }
-        // A panel's view names its window (Phase 6 shows one).
+        // A panel's view names its window.
         let mut world = World::two_windows();
         world.snapshot.windows[1].panel_view = Some(TabId(9));
         let outcome = world.ask(Asker::View(TabId(9)), "tabs", "query", active_current);

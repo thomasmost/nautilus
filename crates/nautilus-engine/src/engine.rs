@@ -223,8 +223,8 @@ impl Engine {
             ExtensionManager::start(delegate.clone(), &engine_dir, UnpackQueue::new(waker));
         delegate.set_extensions(&extensions);
         // The hub: the bridge's CEF-facing half. Its worker lane is the relay
-        // bridge, whose table says which Chromium tab id each tab has. Extension
-        // pages have no lane yet (Task 12).
+        // bridge, whose table says which Chromium tab id each tab has. The
+        // extension pages' lane is made with the hub, below.
         #[cfg(any(windows, target_os = "macos"))]
         let hub = {
             let bridge = extensions.bridge();

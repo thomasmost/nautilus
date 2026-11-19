@@ -279,13 +279,13 @@ pub(crate) enum AfterAsk {
 /// Whether a worker target asks its relay which worker it reaches. Only a
 /// change asks, and only through an open relay: a change means a worker has just
 /// started, so the ask wakes nothing, while an absence (an idle stop) and a
-/// first target never ask (I15). With no relay open, the reopened relay's own
+/// first target never ask. With no relay open, the reopened relay's own
 /// identify covers the change.
 pub(crate) fn asks_on(target: WorkerTarget, relay_open: bool) -> bool {
     relay_open && target == WorkerTarget::Changed
 }
 
-/// What the answer to a change's ask does (review cycle 6, I17). A live answer
+/// What the answer to a change's ask does. A live answer
 /// keeps the relay whatever else happened. A failed answer closes it only when
 /// its ask is the latest change's (`latest`): an earlier change's failure is
 /// no verdict on the newest one, whose own ask decides. Nothing else decides a
@@ -789,7 +789,7 @@ mod tests {
         assert_eq!(openings.len() as u32, MAX_OPENINGS);
     }
 
-    // The ask (review cycle 6, I17). A changed worker target asks its relay which
+    // The ask. A changed worker target asks its relay which
     // worker it reaches; the answer decides, and no hello does. `ask_of` is the
     // engine's step for one table refresh: the change's number when it asks.
     fn ask_of(watch: &mut WorkerWatch, listed: Option<&str>) -> Option<u32> {
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn a_restart_is_kept_by_the_answer_to_its_ask_with_no_close() {
-        // I17: an idle stop (A absent), then a click restarts the worker as B.
+        // An idle stop (A absent), then a click restarts the worker as B.
         // The relay reaches B; B's hello may have reached the engine before the
         // table showed B. That hello decides nothing: the ask does, and a live
         // answer keeps the relay, so nothing in flight on it is failed.
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn a_restart_then_a_reload_in_one_window_closes_the_zombie_relay_by_its_ask() {
-        // I16: A absent; B restarts through relay R and reloads to C before the
+        // A absent; B restarts through relay R and reloads to C before the
         // table shows B. The detector sees A to C: its ask goes to R, a zombie,
         // which cannot answer. B's hello through R, from before the change, is
         // not an input, so it cannot keep R.

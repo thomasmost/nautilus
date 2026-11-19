@@ -51,7 +51,7 @@ async function listedTabs() {
   }
 }
 
-// I10 (identity, by a stop): this worker attaches a debugger to the background
+// Identity, by a stop: this worker attaches a debugger to the background
 // tab and reports it. The driver then stops the worker over DevTools; the
 // engine restarts it through the relay to ask who it is, and the restarted
 // worker checks whether its own debugger session survived the stop.
@@ -67,21 +67,21 @@ async function afterStop(tabId) {
   const target = { tabId: tabId };
   // A bridged call first: the worker opens its own port, and its hello tells
   // the engine that a new instance runs (the engine asks for no identity on a
-  // `gone` any more, I15). The answer is not needed here.
+  // `gone` any more). The answer is not needed here.
   await timed(RUN, 'afterstop.tabs.query', () => chrome.tabs.query({}).then((list) => list.length), {});
   const check = await timed(RUN, 'afterstop.debugger.sendCommand', () =>
     chrome.debugger.sendCommand(target, 'Runtime.evaluate', { expression: 'location.href', returnByValue: true }).then((r) => r.result.value), { tabId: tabId });
   await post('after-stop', { run: RUN, tabId: tabId, ok: check.ok === true, error: check.error || null });
 }
 
-// I10: the debugger's session is seen from the worker it belongs to. Any
+// The debugger's session is seen from the worker it belongs to. Any
 // detach Chromium makes (the reload's included) is posted here, if this
 // worker still runs to hear it.
 chrome.debugger.onDetach.addListener((source, reason) => {
   post('event', { run: RUN, name: 'debugger.onDetach', source, reason });
 });
 
-// I10 provocation: this worker attaches a debugger to the background tab
+// Provocation: this worker attaches a debugger to the background tab
 // (the bridge reports it, and the engine must show the tab), then reloads
 // the extension. The driver clears provokeReload when 'reloading' arrives,
 // so the worker that the reload starts does not reload again.
@@ -110,7 +110,7 @@ async function checks() {
       chrome.debugger.sendCommand(target, 'Runtime.evaluate', { expression: 'location.href', returnByValue: true }).then((r) => r.result.value), about);
     await timed(RUN, 'debugger.detach', () => chrome.debugger.detach(target).then(() => 'detached'), about);
   }
-  // I8: the attach that names the tab by its DevTools target id, once for
+  // The attach that names the tab by its DevTools target id, once for
   // the first tab, with its detach.
   const first = (query.result || [])[0];
   if (first) {

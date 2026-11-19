@@ -57,7 +57,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(WORK, 'results.jsonl'), 'a') as out:
                 out.write(json.dumps(record) + '\n')
             if record.get('kind') == 'provoke' and cfg.get('holdList'):
-                # I10 (b), the zombie provocation: the extension list is held
+                # The zombie provocation: the extension list is held
                 # before the worker asks for its reload, so no list read during
                 # the reload can show the extension off (`sync` sees nothing).
                 Control(os.path.join(WORK, 'ctl-1')).send({'hold_list': cfg['holdList']})
@@ -217,7 +217,7 @@ def tabs_work(label, mark):
         check('%s (c): the debugger evaluates in that tab' % label,
               evaluate.get('ok') and evaluate.get('result') == tab['url'], evaluate.get('error') or evaluate.get('result'))
         if tab is tabs[0]:
-            # I8: the attach and the detach that name the tab by its target id.
+            # The attach and the detach that name the tab by its target id.
             by_target = calls.get('debugger.attach({targetId})')
             check('%s (I8): debugger.attach({targetId}) accepts the first tab' % label,
                   bool(by_target and by_target.get('ok')),
@@ -283,7 +283,7 @@ def first_index(lines, text, after=-1):
 
 
 def check_debugged_tab(label, launch, chromium):
-    """(I7) The tab the latency run debugged was logged hidden before the
+    """The tab the latency run debugged was logged hidden before the
     attach and shown at it, and hidden again after the detach. The tab is
     named by Chromium's id, through the table's rows in the same log."""
     lines = engine_lines(launch)
@@ -335,7 +335,7 @@ def engine_wait_after(launch, after, text, secs):
 
 
 def relay_recovery(control, ext_id, launch):
-    """(I9, M10) A relay page closed underneath (Target.closeTarget through the
+    """A relay page closed underneath (Target.closeTarget through the
     test control's DevTools channel) is logged gone, opened again by the
     engine's next turn, and a click after that is delivered to the worker."""
     answer = control.devtools('Target.getTargets')
@@ -447,7 +447,7 @@ CLOSE_MARKS = ('closed and opened again', 'could not say which worker', 'stopped
 
 
 def change_checks(label, lines, ext_id):
-    """(I17) Each worker-target change of the extension is asked of its relay,
+    """Each worker-target change of the extension is asked of its relay,
     and a live relay answers and is kept: after the change, up to the next one,
     no close of the relay and no reopen (`page <id> ready`). Run for a restart,
     which must not cost a relay; the zombie run has its own checks."""
@@ -470,7 +470,7 @@ def change_checks(label, lines, ext_id):
 
 
 def reload_provocation(ext, zombie=False):
-    """(I10) The worker attaches a debugger to the background tab, then the
+    """The worker attaches a debugger to the background tab, then the
     extension reloads itself (chrome.runtime.reload). The engine must show the
     tab for the attach; after the reload, with no debugger left on it, the tab
     must be hidden again. Whatever the engine logs is kept in run-1.log.
@@ -516,7 +516,7 @@ def reload_provocation(ext, zombie=False):
     new_start = wait_for(0, 'sw-start', 40, lambda d: d.get('run') != old_run)
     check('reload: the extension restarted with a new worker',
           new_start is not None, None if new_start else 'no sw-start after the reload')
-    # I10 (b), the guess: what `chrome.runtime` says in the relay page that
+    # The guess: what `chrome.runtime` says in the relay page that
     # survived the reload. Logged as INFO by the engine (`relay_eval`); it is
     # not a verdict. It is sent now, before the engine's refresh can close the
     # relay that has to answer it.
@@ -571,7 +571,7 @@ def reload_provocation(ext, zombie=False):
 
 
 def zombie_checks(after, start, tab, chromium, lines_at_reload):
-    """(I10 (b)) The zombie path, REQUIRED in this run: the extension list was
+    """The zombie path, REQUIRED in this run: the extension list was
     held during the reload (no sync line in the hold), the worker-target
     detector saw the reload, the relay was opened again after it, the new
     worker's hello forgot the tab, and the tab is hidden. The sync path cannot
@@ -599,7 +599,7 @@ def zombie_checks(after, start, tab, chromium, lines_at_reload):
         return
     at = detector[0]
     print('INFO zombie: the detector line: ' + log_all[at], flush=True)
-    # I17: the change is asked of its relay, and the zombie cannot answer: the
+    # The change is asked of its relay, and the zombie cannot answer: the
     # ask fails, the relay is closed, and it was not kept by any answer.
     asked = first_index(log_all, 'asks its relay which worker it reaches', at)
     failed = first_index(log_all, 'could not say which worker it reaches', at)
@@ -630,7 +630,7 @@ def zombie_checks(after, start, tab, chromium, lines_at_reload):
 
 
 def idle_provocation(ext):
-    """(I15) The worker debugs the background tab and then does nothing. Chromium
+    """The worker debugs the background tab and then does nothing. Chromium
     stops the idle worker (its listing goes absent), and the engine must not
     start it: no engine request for its identity (`identify`) and no restart by
     the engine ("runs a new worker instance") for 90 s after the stop is seen,
@@ -701,13 +701,13 @@ def idle_provocation(ext):
 
 
 def broken_relay(ext):
-    """(I11) The loaded extension's stored relay page is replaced, inside the
+    """The loaded extension's stored relay page is replaced, inside the
     throwaway profile, with a page that has no relay, and the relay is closed.
     Every opening then fails its first poll and is closed again. The engine
     must open the relay a bounded number of times, log the give-up once, open
     nothing more for 12 s after it, refuse a click for the extension, and the
     browser must still exit by itself (run.sh judges the exit)."""
-    # I14: the worker first attaches its debugger to the background tab (the
+    # The worker first attaches its debugger to the background tab (the
     # stop provocation's attach), so the give-up meets a debugged tab.
     with lock:
         cfg['provokeStop'] = True
@@ -776,7 +776,7 @@ SENT = re.compile(r'event (\S+) \(delivery \d+\) sent')
 
 
 def started_by_delivery(quiet):
-    """(I15, since Phase 5) For the lines a stopped worker's quiet window logged:
+    """For the lines a stopped worker's quiet window logged:
     returns (every restart is explained, every identity ask is explained). A
     restart or an ask is explained only when a delivery the engine sent (an
     event the worker listens for, or a click) comes before it in the window.
@@ -793,7 +793,7 @@ def started_by_delivery(quiet):
 
 
 def stop_provocation(ext):
-    """(I10, identity) The worker debugs the background tab; the driver stops
+    """The worker debugs the background tab; the driver stops
     it over DevTools (ServiceWorker.stopAllWorkers). The engine restarts the
     worker through the relay to learn who it is, and the restarted worker
     reports whether its own debugger session survived the stop. The engine
@@ -824,9 +824,9 @@ def stop_provocation(ext):
     control.devtools('ServiceWorker.enable', secs=5)
     stopped = control.devtools('ServiceWorker.stopAllWorkers', secs=5)
     check('stop: ServiceWorker.stopAllWorkers was answered', stopped is not None, stopped)
-    # I15: for 90 s the engine starts the stopped worker only for a delivery
-    # (Phase 5: the test worker listens for tab and window events, and a
-    # delivered event starts a stopped worker, the plan's emit contract). A
+    # For 90 s the engine starts the stopped worker only for a delivery
+    # (the test worker listens for tab and window events, and a delivered
+    # event starts a stopped worker). A
     # restart or an identity request with no delivery before it fails. Only
     # then does a click (the engine's own delivery) start it again, and its
     # check runs.

@@ -23,7 +23,7 @@ pub(crate) enum Asker {
 pub(crate) struct BridgeCall {
     /// The lane's id for the call; the hub replaces it with its own and keeps
     /// the lane's id (`Hub::routes`). For a worker call the lane's id is the
-    /// Bridge-local id from `CallIds` (Task 11, Step 1a).
+    /// Bridge-local id from `CallIds`.
     pub id: CallId,
     /// The calling extension's id.
     pub extension: String,
