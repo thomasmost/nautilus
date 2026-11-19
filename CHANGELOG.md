@@ -104,6 +104,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- The Launch Panel opens a typed address as typed (osmena). Typing
+  `docs.rs`, or a whole URL, and pressing Enter went to the most
+  visited page starting with it, often one deep inside the site; the
+  field now completes only the host still being typed, or the very
+  page typed, and never adds a path to an address.
 - The extension switch on the manager's list did nothing: the engine sent a
   property Chromium rejects (`enabled`), so an extension was never switched on
   or off. It now uses `chrome.management.setEnabled`.
