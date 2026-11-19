@@ -68,6 +68,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- The Launch Panel's field asks as well as searches (osmena): tap
+  Shift twice and the field's text becomes a question, opened by
+  Enter in Claude or ChatGPT, whichever the Launch Settings' new
+  "Ask with" row names; the chip at the field's right end says which.
+  Shift twice again goes back to searching.
 - Extensions see the browser's own tabs and windows. `chrome.tabs` and
   `chrome.windows` are answered from the tab strip in service workers and
   in extension pages (a tab or an action popup): `tabs.query` lists every
