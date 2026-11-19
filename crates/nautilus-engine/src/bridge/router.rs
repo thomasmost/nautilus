@@ -241,7 +241,31 @@ fn window_for<'a>(view: &View<'a>, asker: &Asker, id: i64) -> Result<&'a SnapWin
         .ok_or_else(|| no_window(id))
 }
 
+/// The methods a forward names (`Outcome::Forward`): Chromium's own function
+/// is called with the same name. The bridge's script takes an answer's
+/// forward only for these (`js/core.js`, `FORWARDED`); a test keeps the two
+/// lists equal.
+pub(crate) const FORWARDED: &[&str] = &[
+    "get",
+    "update",
+    "setZoom",
+    "reload",
+    "goBack",
+    "goForward",
+    "getZoom",
+    "getZoomSettings",
+    "setZoomSettings",
+    "detectLanguage",
+    "executeScript",
+    "insertCSS",
+    "removeCSS",
+];
+
 fn forward_live(view: &View, found: &Found, method: &str, rest: &[Value]) -> Outcome {
+    debug_assert!(
+        FORWARDED.contains(&method),
+        "{method} is forwarded but not in FORWARDED"
+    );
     let mut args = vec![json!(found.ext)];
     args.extend(rest.iter().cloned());
     let mut strip = Map::new();
@@ -1799,6 +1823,20 @@ mod tests {
             rejected(world.tabs("captureVisibleTab", json!([]))),
             "Either the '<all_urls>' or 'activeTab' permission is required."
         );
+    }
+
+    #[test]
+    fn the_forwards_the_script_accepts_are_the_ones_the_router_makes() {
+        let core = include_str!("js/core.js");
+        let open = "var FORWARDED = [";
+        let start = core.find(open).expect("core.js names its forwards") + open.len();
+        let end = start + core[start..].find(']').expect("the list is closed");
+        let listed: Vec<&str> = core[start..end]
+            .split(',')
+            .map(|name| name.trim().trim_matches('\''))
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert_eq!(listed, FORWARDED);
     }
 
     #[test]

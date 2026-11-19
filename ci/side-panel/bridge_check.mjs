@@ -128,6 +128,13 @@ for (const viaPage of [false, true]) {
   assert.deepEqual(await chrome.tabs.get(7), { id: 7, index: 3, windowId: 1, active: true, url: 'https://x.example/' });
   assert.deepEqual(w.reached, ['tabs.get']);
 
+  // A forward names a method the engine never forwards: it is refused, and
+  // Chromium's function of that name is not called.
+  w.reached.length = 0;
+  w.answers.set('tabs.get', () => ({ __forward: { method: 'group', args: [7], strip: {} } }));
+  await assert.rejects(chrome.tabs.get(7), /tabs\.group is not supported\./);
+  assert.deepEqual(w.reached, [], 'a forward the engine never makes reached Chromium');
+
   // The callback style, with runtime.lastError on failure.
   const got = await new Promise((resolve) => chrome.tabs.query({}, resolve));
   assert.deepEqual(got, [{ id: 7, index: 0 }]);
@@ -173,18 +180,20 @@ for (const viaPage of [false, true]) {
   await tick(); await tick();
   assert.deepEqual(senders, [1]);
   assert.deepEqual(responses, ['answer']);
-  // Nobody answers: the sender is let go with undefined.
+  // Nobody here answers: this context says nothing, so it cannot send the
+  // sender an undefined that beats an answer from another context (a popup,
+  // an offscreen document) that comes later.
   w.messages.fire('other', { tab: { id: 8, windowId: -1 } }, (v) => responses.push(['closed', v]));
   await tick(); await tick();
-  assert.deepEqual(responses[1], ['closed', undefined]);
+  assert.deepEqual(responses, ['answer'], 'a silent listener answered the sender');
   // No tab: straight through, synchronously.
   assert.deepEqual(w.messages.fire('ask', {}, (v) => responses.push(v)), [false]);
-  assert.equal(responses[2], 'answer');
+  assert.equal(responses[1], 'answer');
   // An asynchronous listener keeps the channel.
   chrome.runtime.onMessage.addListener((message) => (message === 'later' ? Promise.resolve('promised') : undefined));
   assert.deepEqual(w.messages.fire('later', {}, (v) => responses.push(v)), [true]);
   await tick();
-  assert.equal(responses[3], 'promised');
+  assert.equal(responses[2], 'promised');
 }
 // An extension page's context, as pages.rs composes it: the transport when
 // the context is created, the namespaces (page_defer.js around them) at the
@@ -325,6 +334,8 @@ function workerWorld() {
   const served = []; // the methods each page was asked
   let lastError;
   const runtime = {
+    id: 'x',
+    getURL: (path) => `chrome-extension://x/${path}`,
     onConnect: nativeEvent(),
     get lastError() { return lastError; },
     connect({ name }) {
@@ -444,5 +455,67 @@ function loadWorker(runtime) {
   await wait(1100);
   assert.equal(silent.sent.length, 1, 'the bound passed, and the call went');
   assert.deepEqual(silent.reports, []);
+}
+{
+  // The worker adopts its bridge port only from this extension's relay page. A
+  // port named the same from a content script (it has a tab) is never adopted,
+  // and no call goes out on it.
+  const w = workerWorld();
+  const worker = loadWorker(w.runtime);
+  const forged = portEnd('nautilus-bridge-1');
+  forged.sender = { id: 'x', tab: { id: 3 }, url: 'https://web.example/' };
+  const forgedSent = [];
+  forged.postMessage = (message) => { forgedSent.push(message); };
+  w.runtime.onConnect.fire(forged);
+  w.pages.push(listeningRelay(w.served));
+  assert.equal(await worker.__bridgeCall('tabs', 'query', [{}]), 'answer to tabs.query');
+  assert.deepEqual(forgedSent, [], 'a call went out on a content script port');
+  assert.deepEqual(w.served, ['tabs.query']);
+}
+{
+  // A port from the relay page is adopted, and the worker's call travels on it.
+  const w = workerWorld();
+  const worker = loadWorker(w.runtime);
+  const relayed = portEnd('nautilus-bridge-1');
+  relayed.sender = { id: 'x', url: 'chrome-extension://x/nautilus-bridge/relay.html' };
+  const relayEnd = portEnd('nautilus-bridge-1');
+  relayed.peer = relayEnd;
+  relayEnd.peer = relayed;
+  listeningRelay(w.served)(relayEnd);
+  w.runtime.onConnect.fire(relayed);
+  assert.equal(await worker.__bridgeCall('tabs', 'query', [{}]), 'answer to tabs.query');
+  assert.deepEqual(w.served, ['tabs.query']);
+}
+{
+  // The relay adopts its worker's port: a port from a content script (with a
+  // tab), or from another extension, is ignored, and what it sends never
+  // reaches the relay's calls.
+  const runtime = { id: 'x', lastError: undefined, onConnect: nativeEvent(), connect: () => { throw new Error('connect is not expected'); } };
+  const sandbox = { chrome: { runtime }, console: { error() {}, log() {} }, Promise, Map, JSON, Object, Array, Error, String, setTimeout, clearTimeout };
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read('relay.js'), sandbox);
+  const forgedFrom = (sender) => {
+    const port = portEnd('nautilus-bridge-1');
+    port.sender = sender;
+    port.peer = portEnd('nautilus-bridge-1');
+    port.peer.peer = port;
+    return port;
+  };
+  const content = forgedFrom({ id: 'x', tab: { id: 3 }, url: 'https://web.example/' });
+  runtime.onConnect.fire(content);
+  content.peer.postMessage({ call: { id: 1, method: 'group', args: [] } });
+  const seen = await Promise.race([sandbox.nautilusRelay.next(), wait(30).then(() => 'nothing')]);
+  assert.equal(seen, 'nothing', 'a content script port was adopted by the relay');
+  const other = forgedFrom({ id: 'y' });
+  runtime.onConnect.fire(other);
+  other.peer.postMessage({ call: { id: 2, method: 'query', args: [] } });
+  assert.equal(await Promise.race([sandbox.nautilusRelay.next(), wait(30).then(() => 'nothing')]), 'nothing');
+  // The worker's own port (from this extension, no tab) is adopted.
+  const worker = forgedFrom({ id: 'x' });
+  runtime.onConnect.fire(worker);
+  worker.peer.postMessage({ call: { id: 3, method: 'query', args: [] } });
+  assert.equal(JSON.stringify(await sandbox.nautilusRelay.next()), JSON.stringify([{ call: { id: 3, method: 'query', args: [] } }]));
 }
 console.log('bridge scripts: ok');

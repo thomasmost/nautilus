@@ -20,6 +20,9 @@
   // and event objects, for forwarded calls.
   var native = {};
   var events = new Map();
+  // The methods the engine answers with a forward (`__forward`), in every
+  // namespace. The Rust router holds the same list (`router::FORWARDED`).
+  var FORWARDED = ['get', 'update', 'setZoom', 'reload', 'goBack', 'goForward', 'getZoom', 'getZoomSettings', 'setZoomSettings', 'detectLanguage', 'executeScript', 'insertCSS', 'removeCSS'];
 
   function isEvent(value) {
     return !!value && typeof value === 'object' && typeof value.addListener === 'function';
@@ -136,6 +139,13 @@
     return call(namespace, method, list).then(function (answer) {
       var forward = answer && typeof answer === 'object' && answer.__forward;
       if (forward) {
+        // Only the methods the engine forwards (`router::FORWARDED`, which a
+        // test keeps equal to this list): an answer naming any other method
+        // comes from something that is not the engine, and Chromium's function
+        // is not called for it.
+        if (FORWARDED.indexOf(forward.method) < 0) {
+          throw new Error(namespace + '.' + forward.method + ' is not supported.');
+        }
         return callNative(namespace, forward.method, forward.args).then(function (result) {
           return patchTabs(result, forward.strip || {});
         });

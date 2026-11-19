@@ -28,21 +28,24 @@
         result.then(respond, function (e) { console.error(e); respond(); });
       }
     });
-    return { open: open, done: function () { return done; } };
+    return open;
   }
 
   function onNative(message, sender, sendResponse) {
     var tab = sender && sender.tab;
     if (!tab || typeof tab.id !== 'number') {
-      return deliver(message, sender, sendResponse).open;
+      return deliver(message, sender, sendResponse);
     }
+    // The channel is held from here, because the strip's fields are fetched
+    // before the listeners run. A listener of this context that answers does
+    // so through `sendResponse`; when none does, this context sends nothing:
+    // the first answer the sender gets is another context's, and an answer
+    // from no context leaves the channel to close as Chromium closes one.
     bridge.call('tabs', 'stripOf', [tab.id]).then(
       function (strip) { if (strip) { Object.assign(tab, strip); } },
       function () {}
     ).then(function () {
-      var state = deliver(message, sender, sendResponse);
-      // Nobody answered and nobody will: let the sender go.
-      if (!state.open && !state.done()) { sendResponse(); }
+      deliver(message, sender, sendResponse);
     });
     return true;
   }

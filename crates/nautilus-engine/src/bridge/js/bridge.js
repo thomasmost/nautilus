@@ -166,8 +166,15 @@
   // Registered in the first evaluation, so a connect from the relay page
   // starts a stopped worker and lands here. Kept as a named function so
   // hasListener can recognise it.
+  // Only the relay page of this extension opens the bridge's port: a port
+  // with a sender tab is a content script's, and any other sender is some
+  // other context. Checked by the fields Chromium gives a port's sender.
+  var RELAY_URL = runtime.getURL('nautilus-bridge/relay.html');
+  function fromRelay(sender) {
+    return !!sender && sender.id === runtime.id && !sender.tab && sender.url === RELAY_URL;
+  }
   var bridgeListener = function (newPort) {
-    if (newPort.name === PORT) { adopt(newPort); }
+    if (newPort.name === PORT && fromRelay(newPort.sender)) { adopt(newPort); }
   };
   nativeAdd(bridgeListener);
 
