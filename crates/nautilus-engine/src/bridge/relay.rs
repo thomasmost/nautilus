@@ -543,9 +543,9 @@ struct Inner {
     tabs: HashMap<TabId, TabRecord>,
     /// Which extensions are debugging which tab (`bridge::debugger`).
     debuggers: Debuggers,
-    helper: Option<HiddenPage>,
-    /// The relay page of each bridged, enabled extension, by its id.
-    relays: HashMap<String, HiddenPage>,
+    /// The hidden pages, by key: the relay page of each bridged, enabled
+    /// extension under its id, and the helper's page under `HELPER_KEY`.
+    pages: HashMap<String, HiddenPage>,
     /// The extensions the last `sync` wanted a relay for.
     wanted: Vec<String>,
     /// Whether the helper extension is loaded, as the last `sync` said.
@@ -593,25 +593,25 @@ fn is_current(inner: &Inner, key: &str, generation: u64) -> bool {
 }
 
 fn page_ref<'a>(inner: &'a Inner, key: &str) -> Option<&'a HiddenPage> {
-    if key == HELPER_KEY {
-        inner.helper.as_ref()
-    } else {
-        inner.relays.get(key)
-    }
+    inner.pages.get(key)
 }
 
 /// Remove the page under `key` if it has `generation`.
 fn take_page(inner: &mut Inner, key: &str, generation: u64) -> Option<HiddenPage> {
-    if key == HELPER_KEY {
-        return match &inner.helper {
-            Some(page) if page.generation == generation => inner.helper.take(),
-            _ => None,
-        };
-    }
-    match inner.relays.get(key) {
-        Some(page) if page.generation == generation => inner.relays.remove(key),
+    match inner.pages.get(key) {
+        Some(page) if page.generation == generation => inner.pages.remove(key),
         _ => None,
     }
+}
+
+/// The extensions whose relay page is open.
+fn open_relays(inner: &Inner) -> Vec<String> {
+    inner
+        .pages
+        .keys()
+        .filter(|key| key.as_str() != HELPER_KEY)
+        .cloned()
+        .collect()
 }
 
 /// The browser and view of a tracked tab.
@@ -748,7 +748,7 @@ impl Bridge {
                 inner.openers.remove(HELPER_KEY);
             }
             inner.helper_loaded = helper_loaded;
-            let open: Vec<String> = inner.relays.keys().cloned().collect();
+            let open = open_relays(&inner);
             let open: Vec<&str> = open.iter().map(String::as_str).collect();
             let (_, mut to_close) = relay_changes(&open, bridged);
             // Every extension that is off or gone, open relay or not, is no
@@ -763,20 +763,12 @@ impl Bridge {
                 inner.watches.remove(id);
                 inner.pending_sessions.remove(id);
             }
-            let close_helper = bridged.is_empty() && inner.helper.is_some();
+            let close_helper = bridged.is_empty() && inner.pages.contains_key(HELPER_KEY);
             (close_helper, to_close)
         };
         if close_helper {
             log::info!("bridge: no bridged extension is on; the helper's page closes");
-            let page = {
-                let mut inner = self.inner.borrow_mut();
-                drop_pending(&mut inner, HELPER_KEY, "the helper's page closed");
-                inner.refreshing = false;
-                inner.helper.take()
-            };
-            if let Some(page) = page {
-                page.close();
-            }
+            self.close_relay(HELPER_KEY);
         }
         for id in to_close {
             self.close_relay(&id);
@@ -800,12 +792,11 @@ impl Bridge {
         }
         let (helper_loaded, wanted, helper_open, open) = {
             let inner = self.inner.borrow();
-            let open: Vec<String> = inner.relays.keys().cloned().collect();
             (
                 inner.helper_loaded,
                 inner.wanted.clone(),
-                inner.helper.is_some(),
-                open,
+                inner.pages.contains_key(HELPER_KEY),
+                open_relays(&inner),
             )
         };
         if wanted.is_empty() {
@@ -818,18 +809,10 @@ impl Bridge {
                 relay_changes(&open, &wanted).0,
             )
         };
-        if helper_wanted && self.opening_due(HELPER_KEY, now) {
-            let url = format!("chrome-extension://{HELPER_ID}/helper.html");
-            let generation = self.next_generation();
-            let page = HiddenPage::open(self, HELPER_KEY, &url, generation);
-            if page.is_none() {
-                log::error!("bridge: Chromium could not create the helper's page");
-            }
-            self.inner.borrow_mut().helper = page;
-        }
-        for id in relays_wanted {
-            if self.opening_due(&id, now) {
-                self.open_relay(&id);
+        let helper = helper_wanted.then(|| HELPER_KEY.to_string());
+        for key in helper.into_iter().chain(relays_wanted) {
+            if self.opening_due(&key, now) {
+                self.open_page(&key);
             }
         }
     }
@@ -841,7 +824,7 @@ impl Bridge {
     /// So a reload is seen within a bounded time, tab activity or not.
     fn refresh_due(&self, now: std::time::Instant) -> bool {
         let mut inner = self.inner.borrow_mut();
-        if inner.relays.is_empty() {
+        if open_relays(&inner).is_empty() {
             return false;
         }
         let since = inner
@@ -870,7 +853,7 @@ impl Bridge {
             let mut inner = self.inner.borrow_mut();
             for extension in inner.wanted.clone() {
                 let listed = worker_target_of(targets, &extension);
-                let relay_open = inner.relays.contains_key(&extension);
+                let relay_open = inner.pages.contains_key(&extension);
                 let watch = inner.watches.entry(extension.clone()).or_default();
                 let recorded = watch.recorded().map(str::to_string);
                 let (target, change) = watch.observe(listed.as_deref());
@@ -1037,17 +1020,24 @@ impl Bridge {
         generation
     }
 
-    fn open_relay(self: &Rc<Self>, extension: &str) {
-        let url = format!("chrome-extension://{extension}{RELAY_PATH}");
+    /// Open the hidden page under `key`: the helper's, or an extension's
+    /// relay.
+    fn open_page(self: &Rc<Self>, key: &str) {
+        let is_helper = key == HELPER_KEY;
+        let url = if is_helper {
+            format!("chrome-extension://{HELPER_ID}/helper.html")
+        } else {
+            format!("chrome-extension://{key}{RELAY_PATH}")
+        };
         let generation = self.next_generation();
-        match HiddenPage::open(self, extension, &url, generation) {
+        match HiddenPage::open(self, key, &url, generation) {
             Some(page) => {
-                self.inner
-                    .borrow_mut()
-                    .relays
-                    .insert(extension.to_string(), page);
+                self.inner.borrow_mut().pages.insert(key.to_string(), page);
             }
-            None => log::error!("bridge: Chromium could not create the relay of {extension}"),
+            None if is_helper => {
+                log::error!("bridge: Chromium could not create the helper's page");
+            }
+            None => log::error!("bridge: Chromium could not create the relay of {key}"),
         }
     }
 
@@ -1057,14 +1047,11 @@ impl Bridge {
     fn close_relay(&self, extension: &str) {
         let page = {
             let mut inner = self.inner.borrow_mut();
-            let page = if extension == HELPER_KEY {
+            if extension == HELPER_KEY {
                 inner.refreshing = false;
-                inner.helper.take()
-            } else {
-                inner.relays.remove(extension)
-            };
+            }
             drop_pending(&mut inner, extension, "its page was closed");
-            page
+            inner.pages.remove(extension)
         };
         if let Some(page) = page {
             page.close();
@@ -1139,8 +1126,7 @@ impl Bridge {
             inner.pending.clear();
             inner.jobs.clear();
             inner.wanted.clear();
-            let mut pages: Vec<HiddenPage> = inner.helper.take().into_iter().collect();
-            pages.extend(inner.relays.drain().map(|(_, page)| page));
+            let pages: Vec<HiddenPage> = inner.pages.drain().map(|(_, page)| page).collect();
             (pages, tabs)
         };
         // The tabs' records and the pages are let go with no borrow held.
