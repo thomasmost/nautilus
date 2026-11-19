@@ -3,6 +3,12 @@
 use serde_json::Value;
 use url::Url;
 
+/// Whether a manifest entry is a host pattern: `<all_urls>`, or a match
+/// pattern with a scheme.
+fn is_host(entry: &str) -> bool {
+    entry == "<all_urls>" || entry.contains("://")
+}
+
 /// Whether `text` matches `pattern`, in which `*` stands for any run of
 /// characters and everything else for itself, case-sensitively (the rule
 /// for `tabs.query`'s `title` and for the path of a match pattern).
@@ -26,22 +32,31 @@ pub(crate) fn glob(pattern: &str, text: &str) -> bool {
     rest.ends_with(last)
 }
 
-/// The schemes `<all_urls>` covers for a tab's address.
-const ALL_URLS_SCHEMES: [&str; 6] = ["http", "https", "file", "ftp", "ws", "wss"];
+/// The schemes `<all_urls>` covers for a tab's address. `file` is not among
+/// them: a file page is covered only with the extension's file access, which
+/// the bridge does not grant (`matches_url`).
+const ALL_URLS_SCHEMES: [&str; 5] = ["http", "https", "ftp", "ws", "wss"];
 
 /// Whether `url` falls under the match pattern `pattern`
 /// (`<scheme>://<host><path>`, or `<all_urls>`). A scheme of `*` is `http`
 /// or `https`; a host of `*` is any, `*.x` is `x` and its subdomains; a
 /// port in the pattern is not compared; the path is a glob over the URL's
-/// path and query. Anything that is no pattern matches nothing.
+/// path and query; the scheme and the host compare case-insensitively. Anything
+/// that is no pattern matches nothing. A file page matches nothing: this browser
+/// grants no file access, and Chrome's file access is a switch of the extension
+/// that the bridge cannot read.
 pub(crate) fn matches_url(pattern: &str, url: &Url) -> bool {
+    if url.scheme() == "file" {
+        return false;
+    }
     if pattern == "<all_urls>" {
         return ALL_URLS_SCHEMES.contains(&url.scheme());
     }
     let Some((scheme, rest)) = pattern.split_once("://") else {
         return false;
     };
-    let scheme_matches = match scheme {
+    let scheme = scheme.to_ascii_lowercase();
+    let scheme_matches = match scheme.as_str() {
         "*" => matches!(url.scheme(), "http" | "https"),
         other => other == url.scheme(),
     };
@@ -52,9 +67,13 @@ pub(crate) fn matches_url(pattern: &str, url: &Url) -> bool {
         return false;
     };
     let (host, path) = rest.split_at(slash);
-    let host = host.split(':').next().unwrap_or_default();
+    let host = host
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     let have = url.host_str().unwrap_or_default();
-    let host_matches = if host == "*" || (scheme == "file" && host.is_empty()) {
+    let host_matches = if host == "*" {
         true
     } else if let Some(domain) = host.strip_prefix("*.") {
         have == domain || have.ends_with(&format!(".{domain}"))
@@ -84,8 +103,10 @@ pub(crate) struct Grants {
 }
 
 impl Grants {
-    /// Read from a parsed `manifest.json`: `permissions` (which in
-    /// Manifest V2 also lists host patterns) and `host_permissions`.
+    /// Read from a parsed `manifest.json`: `permissions` and
+    /// `host_permissions`. A host pattern counts under `permissions` only in
+    /// Manifest V2, where Chrome reads it there; in Manifest V3 Chrome reads
+    /// host patterns from `host_permissions` alone and ignores the others.
     /// Optional permissions are not counted, nor is `activeTab`: neither
     /// is in effect without something the bridge cannot see.
     pub(crate) fn from_manifest(manifest: &Value) -> Grants {
@@ -96,11 +117,16 @@ impl Grants {
                 .map(|items| items.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default()
         };
+        let manifest_v3 = manifest.get("manifest_version").and_then(Value::as_u64) == Some(3);
         let permissions = list("permissions");
         let hosts: Vec<String> = permissions
             .iter()
-            .chain(list("host_permissions").iter())
-            .filter(|entry| **entry == "<all_urls>" || entry.contains("://"))
+            .filter(|entry| !manifest_v3 && is_host(entry))
+            .chain(
+                list("host_permissions")
+                    .iter()
+                    .filter(|entry| is_host(entry)),
+            )
             .map(|entry| entry.to_string())
             .collect();
         Grants {
@@ -153,7 +179,8 @@ mod tests {
     fn match_patterns_follow_chromes_rules() {
         for (pattern, page, expected) in [
             ("<all_urls>", "https://example.com/a", true),
-            ("<all_urls>", "file:///tmp/x.html", true),
+            // No file access is granted here, so no pattern reads a file page.
+            ("<all_urls>", "file:///tmp/x.html", false),
             ("<all_urls>", "chrome://extensions/", false),
             ("<all_urls>", "about:blank", false),
             ("*://*/*", "http://example.com/", true),
@@ -171,7 +198,10 @@ mod tests {
             ("https://example.com/a", "https://example.com/abc", false),
             ("https://example.com/*", "https://example.com:8443/x", true),
             ("https://*/foo?bar=*", "https://x.test/foo?bar=1", true),
-            ("file:///tmp/*", "file:///tmp/x.html", true),
+            ("file:///tmp/*", "file:///tmp/x.html", false),
+            // Chrome compares hosts case-insensitively.
+            ("https://EXAMPLE.com/*", "https://example.com/", true),
+            ("*://*.Example.COM/*", "https://www.example.com/a", true),
             (
                 "chrome-extension://*/*",
                 "chrome-extension://abcdefghijklmnopabcdefghijklmnop/p.html",
@@ -217,6 +247,23 @@ mod tests {
             }
         );
         assert_eq!(Grants::from_manifest(&json!("nonsense")), Grants::default());
+    }
+
+    #[test]
+    fn manifest_version_3_takes_host_patterns_only_from_host_permissions() {
+        let v3 = Grants::from_manifest(&json!({
+            "manifest_version": 3,
+            "permissions": ["tabs", "https://a.example/*", "<all_urls>"],
+            "host_permissions": ["https://b.example/*"]
+        }));
+        assert_eq!(
+            v3,
+            Grants {
+                tabs: true,
+                all_urls: false,
+                hosts: vec!["https://b.example/*".to_string()]
+            }
+        );
     }
 
     #[test]
