@@ -345,6 +345,8 @@ impl TabHostApi for TabHost {
         );
         match browser {
             Some(browser) => {
+                self.delegate.register_view(tab, &browser);
+                self.extensions.track_tab(tab, &browser, view.clone());
                 self.tabs.insert(tab, TabEntry { browser, view });
             }
             None => log::error!("Chromium could not create a browser for {tab:?} at {url}"),
@@ -373,6 +375,8 @@ impl TabHostApi for TabHost {
                     host.was_resized();
                 }
                 view.adopt(tab);
+                self.delegate.register_view(tab, &browser);
+                self.extensions.track_tab(tab, &browser, view.clone());
                 self.tabs.insert(tab, TabEntry { browser, view });
                 true
             }
@@ -383,6 +387,8 @@ impl TabHostApi for TabHost {
     /// open. It finishes closing on the message loop.
     fn close_tab(&mut self, tab: TabId) {
         if let Some(entry) = self.tabs.remove(&tab) {
+            self.delegate.unregister_view(tab);
+            self.extensions.untrack_tab(tab);
             entry.view.closing.set(true);
             // A button pressed in this tab is released nowhere (the
             // shell delivers a release only to the tab that got the
@@ -451,18 +457,30 @@ impl TabHostApi for TabHost {
 
     /// The tab is the window's visible tab: paint it.
     fn show(&self, tab: TabId) {
+        if let Some(entry) = self.tabs.get(&tab) {
+            entry.view.hidden.set(false);
+        }
         self.with_host(tab, |host| {
             host.was_hidden(0);
             host.invalidate(cef::PaintElementType::VIEW);
         });
     }
 
-    /// The tab is behind another: stop painting it.
+    /// The tab is behind another: stop painting it, unless an extension is
+    /// debugging it (a hidden renderer answers no input, and the debugger
+    /// waits on that answer; `bridge::debugger` decides).
     fn hide(&self, tab: TabId) {
-        self.with_host(tab, |host| host.was_hidden(1));
+        let Some(entry) = self.tabs.get(&tab) else {
+            return;
+        };
+        entry.view.hidden.set(true);
+        let hidden = entry.view.wants_hidden();
+        log::debug!("tab {tab:?}: hidden, painting stopped = {hidden}");
+        self.with_host(tab, |host| host.was_hidden(i32::from(hidden)));
     }
 
     fn set_focused(&self, tab: TabId, focused: bool) {
+        log::debug!("tab {tab:?}: focus = {focused}");
         if let Some(entry) = self.tabs.get(&tab) {
             entry.view.focused.set(focused);
             if focused {
@@ -634,11 +652,21 @@ impl TabHostApi for TabHost {
         }
     }
 
-    /// Open the popup page of `extension`'s action under its button.
-    fn open_extension_action(&self, _tab: TabId, extension: &str, anchor: ScreenRect) {
+    /// A click on `extension`'s toolbar action: its popup under the
+    /// button if it has one, otherwise the click itself, delivered
+    /// to the extension's worker for `tab` through the bridge.
+    fn open_extension_action(&self, tab: TabId, extension: &str, anchor: ScreenRect) {
         match self.extensions.popup_url(extension) {
-            Some(url) => self.popups.open(extension, &url, anchor, self.scale.get()),
-            None => log::warn!("extension {extension} has no popup to open"),
+            Some(url) => self
+                .popups
+                .open(extension, &url, anchor, self.scale.get(), tab),
+            None => {
+                if !self.extensions.click_action(extension, tab) {
+                    log::warn!(
+                        "extension {extension} has no popup and no bridge: its action does nothing yet"
+                    );
+                }
+            }
         }
     }
 

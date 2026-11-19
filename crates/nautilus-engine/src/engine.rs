@@ -4,6 +4,8 @@
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
+#[cfg(feature = "test-hooks")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -21,13 +23,18 @@ use cef::{
     wrap_life_span_handler,
 };
 use osmena_core::{
-    BlockedSites, DownloadPolicy, EngineEvent, EngineInfo, ExtensionSource, ExtensionSupport,
-    PageTools, PendingTab,
+    BlockedSites, DownloadPolicy, EngineEvent, EngineInfo, ExtensionReply, ExtensionSource,
+    ExtensionSupport, PageTools, PendingTab, TabId,
 };
 use osmena_engine::raw_window_handle::{DisplayHandle, WindowHandle};
-use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker};
+use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker, WindowStrip};
 use url::Url;
 
+#[cfg(any(windows, target_os = "macos"))]
+use crate::bridge::hub::{Hub, Reporter};
+use crate::bridge::pages::PageLane;
+#[cfg(any(windows, target_os = "macos"))]
+use crate::bridge::transport::BridgeTransport;
 use crate::delegate::DelegateState;
 use crate::extensions::{ExtensionManager, UnpackQueue};
 use crate::host::TabHost;
@@ -54,6 +61,10 @@ pub static INFO: EngineInfo = EngineInfo {
             store_name: "Chrome Web Store",
             store_url: "https://chromewebstore.google.com/",
             store_item_id: crate::extensions::web_store_item_id,
+            // The docked panel arrives in a later change; until then
+            // osmena draws none. The strip is sent regardless: the shell
+            // sends it to every engine that runs extensions.
+            side_panels: false,
         })
     } else {
         None
@@ -127,9 +138,13 @@ fn load_framework(_helper: bool) {}
 pub struct Engine {
     delegate: Rc<DelegateState>,
     extensions: Rc<ExtensionManager>,
+    /// The bridge between extension contexts and the model.
+    #[cfg(any(windows, target_os = "macos"))]
+    hub: Rc<Hub>,
     /// True while inside `do_message_loop_work`, whose callbacks may ask
     /// for another spin; that request is served on the next call.
     spinning: Cell<bool>,
+    pump: Arc<PumpScheduler>,
 }
 
 impl Engine {
@@ -191,7 +206,7 @@ impl Engine {
         // Filled in once the engine exists, for the browsers Chromium
         // creates on its own.
         let shared_delegate = Rc::new(RefCell::new(None));
-        let mut app = NautilusApp::new(Some(pump), shared_delegate.clone());
+        let mut app = NautilusApp::new(Some(pump.clone()), shared_delegate.clone());
         let args = Args::new();
         if cef::initialize(
             Some(args.as_main_args()),
@@ -209,10 +224,48 @@ impl Engine {
         let extensions =
             ExtensionManager::start(delegate.clone(), &engine_dir, UnpackQueue::new(waker));
         delegate.set_extensions(&extensions);
+        // The hub: the bridge's CEF-facing half. Its worker lane is the relay
+        // bridge, whose table says which Chromium tab id each tab has. The
+        // extension pages' lane is made with the hub, below.
+        #[cfg(any(windows, target_os = "macos"))]
+        let hub = {
+            let bridge = extensions.bridge();
+            let table = {
+                let bridge = bridge.clone();
+                Box::new(move |tab: TabId| bridge.chromium_id(tab))
+            };
+            let nudge = {
+                let pump = pump.clone();
+                Box::new(move || pump.schedule(50))
+            };
+            // Extension pages call the bridge on their own lane (`pages.rs`);
+            // the delegate holds it too, for the tabs' process messages.
+            let page_lane = Rc::new(PageLane::default());
+            delegate.set_page_lane(&page_lane);
+            let reporter: Reporter = {
+                let bridge = bridge.clone();
+                Box::new(move |tab, chromium, extension| {
+                    bridge.report_tab(tab, chromium, extension)
+                })
+            };
+            let hub = Hub::new(
+                &delegate,
+                bridge.clone() as Rc<dyn BridgeTransport>,
+                Some(page_lane.clone()),
+                table,
+                reporter,
+                nudge,
+            );
+            delegate.set_hub(&hub);
+            hub
+        };
         Ok(Engine {
             delegate,
             extensions,
+            #[cfg(any(windows, target_os = "macos"))]
+            hub,
             spinning: Cell::new(false),
+            pump,
         })
     }
 
@@ -240,7 +293,19 @@ impl osmena_engine::Engine for Engine {
         // Store downloads unpacked on worker threads are loaded here, on
         // the UI thread.
         self.extensions.poll_unpacked();
+        // A scripted run's next command, if NAUTILUS_TEST_CONTROL is set
+        // (a build with the `test-hooks` feature only).
+        #[cfg(feature = "test-hooks")]
+        self.extensions.poll_control();
+        // The bridge's relay pages that closed underneath are opened again
+        // here, never from a CEF callback.
+        self.extensions.poll_bridge();
+        let started = Instant::now();
         cef::do_message_loop_work();
+        // Strips held for a tab's id, and answers held for a strip.
+        #[cfg(any(windows, target_os = "macos"))]
+        self.hub.tick();
+        self.pump.after_spin(started.elapsed());
         self.spinning.set(false);
     }
 
@@ -293,6 +358,23 @@ impl osmena_engine::Engine for Engine {
         self.delegate.set_blocked_sites(sites);
     }
 
+    /// The strip changed: extensions' queries are answered from it, and its
+    /// differences become their tab and window events.
+    fn strip_changed(&self, windows: &[WindowStrip<'_>]) {
+        #[cfg(any(windows, target_os = "macos"))]
+        self.hub.strip_changed(windows);
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let _ = windows;
+    }
+
+    /// The model's answer to an extension's request.
+    fn extension_reply(&self, token: u64, reply: ExtensionReply) {
+        #[cfg(any(windows, target_os = "macos"))]
+        self.hub.extension_reply(token, reply);
+        #[cfg(not(any(windows, target_os = "macos")))]
+        let _ = (token, reply);
+    }
+
     fn cancel_download(&self, id: u32) {
         if let Some(callback) = self.delegate.download_callback(id) {
             callback.cancel();
@@ -319,6 +401,13 @@ impl Drop for Engine {
     /// message loop, so pump it until the last one is gone (or give up
     /// after a moment).
     fn drop(&mut self) {
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            self.hub.shutdown();
+            if let Some(lane) = self.delegate.page_lane() {
+                lane.clear();
+            }
+        }
         // A recent extension change is still only in memory; see
         // `ExtensionManager::settle_deadline`.
         if let Some(settle) = self.extensions.settle_deadline() {
@@ -399,23 +488,266 @@ fn forget_chromium_session(engine_dir: &Path) {
 }
 
 /// Turns CEF's "do work in `delay` ms" requests, which arrive on any
-/// thread, into wakes of the application's event loop: immediately for a
-/// zero delay, otherwise from a timer thread at the earliest requested
-/// time.
+/// thread, into wakes of the application's event loop: a zero-delay
+/// request wakes at once; a delayed one replaces the pending one and is
+/// clamped to the interval; after every spin the timer is armed at the
+/// interval when nothing is pending, so CEF's work runs even when CEF
+/// does not ask for it.
 struct PumpScheduler {
     waker: Arc<dyn Waker>,
     deadline: Mutex<Option<Instant>>,
     changed: Condvar,
     started: AtomicBool,
+    interval: Option<Duration>,
+    stats: PumpStats,
+}
+
+/// The longest the pump goes without running CEF's work, when the
+/// fallback is on: cefclient's `kMaxTimerDelay`, 30 times a second.
+const MAX_PUMP_INTERVAL: Duration = Duration::from_millis(1000 / 30);
+
+/// The fallback is on: CEF asks for work through
+/// `on_schedule_message_pump_work` but does not promise to ask for all
+/// of it ("The application must also schedule CefDoMessageLoopWork()
+/// calls when no callback is received", `cef_browser_process_handler.h`),
+/// and without the tick extension calls stalled for seconds (C14 in
+/// `docs/upstream-issues.md`). In a build with the `test-hooks` feature,
+/// `NAUTILUS_PUMP_TICK_MS=0` switches it off to reproduce that.
+const DEFAULT_PUMP_INTERVAL: Option<Duration> = Some(MAX_PUMP_INTERVAL);
+
+/// The pump's interval: `NAUTILUS_PUMP_TICK_MS` in milliseconds when a
+/// scripted run sets it (0 switches the fallback off), else `default`.
+#[cfg(feature = "test-hooks")]
+fn pump_interval(setting: Option<&str>, default: Option<Duration>) -> Option<Duration> {
+    match setting.map(str::trim).map(str::parse::<u64>) {
+        Some(Ok(0)) => None,
+        Some(Ok(ms)) => Some(Duration::from_millis(ms)),
+        _ => default,
+    }
+}
+
+/// When the timer should next fire after CEF asked for work in `delay`,
+/// and whether the request was dropped. With an interval, the request
+/// replaces the pending one (CEF's contract: "any currently pending
+/// scheduled call should be cancelled") and is clamped to the
+/// interval. Without one, as this code did before: the earliest of the
+/// two is kept, so a later request behind an earlier one is lost once
+/// the earlier one fires.
+fn next_deadline(
+    now: Instant,
+    pending: Option<Instant>,
+    delay: Duration,
+    interval: Option<Duration>,
+) -> (Option<Instant>, bool) {
+    match interval {
+        Some(interval) => (Some(now + delay.min(interval)), false),
+        None => match pending {
+            Some(current) if current <= now + delay => (pending, true),
+            _ => (Some(now + delay), false),
+        },
+    }
+}
+
+/// The timer's deadline once a spin has ended. Something already pending
+/// is left alone; with nothing pending and the fallback on (an interval),
+/// the timer arms at `now + interval`; without an interval nothing arms.
+fn armed_after_spin(
+    pending: Option<Instant>,
+    now: Instant,
+    interval: Option<Duration>,
+) -> Option<Instant> {
+    match (pending, interval) {
+        (Some(_), _) => pending,
+        (None, Some(interval)) => Some(now + interval),
+        (None, None) => None,
+    }
+}
+
+/// Counters that say why CEF's work is not being run, read by the
+/// watch thread (`NAUTILUS_PUMP_LOG`). Times are milliseconds since
+/// the scheduler was made. Only a build with the `test-hooks` feature
+/// counts; any other build has the empty `PumpStats` below.
+#[cfg(feature = "test-hooks")]
+struct PumpStats {
+    started_at: Instant,
+    asked_now: AtomicU64,
+    asked_later: AtomicU64,
+    dropped_later: AtomicU64,
+    wakes: AtomicU64,
+    spins: AtomicU64,
+    last_ask_ms: AtomicU64,
+    last_spin_end_ms: AtomicU64,
+    /// `asked_now + asked_later` as it stood when the last spin ended.
+    asked_at_spin_end: AtomicU64,
+    longest_spin_us: AtomicU64,
+    /// The furthest behind its deadline the timer thread has fired.
+    latest_timer_ms: AtomicU64,
+}
+
+#[cfg(feature = "test-hooks")]
+impl PumpStats {
+    fn new() -> PumpStats {
+        PumpStats {
+            started_at: Instant::now(),
+            asked_now: AtomicU64::new(0),
+            asked_later: AtomicU64::new(0),
+            dropped_later: AtomicU64::new(0),
+            wakes: AtomicU64::new(0),
+            spins: AtomicU64::new(0),
+            last_ask_ms: AtomicU64::new(0),
+            last_spin_end_ms: AtomicU64::new(0),
+            asked_at_spin_end: AtomicU64::new(0),
+            longest_spin_us: AtomicU64::new(0),
+            latest_timer_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
+    }
+
+    /// CEF asked for work, at once (`now`) or after a delay.
+    fn asked(&self, now: bool) {
+        self.last_ask_ms.store(self.now_ms(), Ordering::Relaxed);
+        let counter = if now {
+            &self.asked_now
+        } else {
+            &self.asked_later
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A delayed request was lost behind an earlier one.
+    fn dropped(&self) {
+        self.dropped_later.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn woke(&self) {
+        self.wakes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn spin_ended(&self, took: Duration) {
+        self.spins.fetch_add(1, Ordering::Relaxed);
+        self.last_spin_end_ms
+            .store(self.now_ms(), Ordering::Relaxed);
+        self.asked_at_spin_end.store(
+            self.asked_now.load(Ordering::Relaxed) + self.asked_later.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        self.longest_spin_us
+            .fetch_max(took.as_micros() as u64, Ordering::Relaxed);
+    }
+
+    /// The timer thread fired `late` after its deadline.
+    fn timer_fired(&self, late: Duration) {
+        self.latest_timer_ms
+            .fetch_max(late.as_millis() as u64, Ordering::Relaxed);
+    }
+}
+
+/// A build without the `test-hooks` feature counts nothing.
+#[cfg(not(feature = "test-hooks"))]
+struct PumpStats;
+
+#[cfg(not(feature = "test-hooks"))]
+impl PumpStats {
+    fn new() -> PumpStats {
+        PumpStats
+    }
+
+    fn asked(&self, _now: bool) {}
+
+    fn dropped(&self) {}
+
+    fn woke(&self) {}
+
+    fn spin_ended(&self, _took: Duration) {}
+
+    fn timer_fired(&self, _late: Duration) {}
 }
 
 impl PumpScheduler {
     fn new(waker: Arc<dyn Waker>) -> PumpScheduler {
+        #[cfg(feature = "test-hooks")]
+        let interval = pump_interval(
+            std::env::var("NAUTILUS_PUMP_TICK_MS").ok().as_deref(),
+            DEFAULT_PUMP_INTERVAL,
+        );
+        #[cfg(not(feature = "test-hooks"))]
+        let interval = DEFAULT_PUMP_INTERVAL;
+        log::info!("pump: fallback interval {interval:?}");
         PumpScheduler {
             waker,
             deadline: Mutex::new(None),
             changed: Condvar::new(),
             started: AtomicBool::new(false),
+            interval,
+            stats: PumpStats::new(),
+        }
+    }
+
+    fn wake(&self) {
+        self.stats.woke();
+        self.waker.wake();
+    }
+
+    /// A spin ended after `took`. With the fallback on, the timer is
+    /// armed at the interval when nothing else is pending: CEF does not
+    /// promise to ask for every piece of work.
+    fn after_spin(&self, took: Duration) {
+        self.stats.spin_ended(took);
+        let mut deadline = self
+            .deadline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let was_pending = deadline.is_some();
+        let armed = armed_after_spin(*deadline, Instant::now(), self.interval);
+        *deadline = armed;
+        if !was_pending && armed.is_some() {
+            self.changed.notify_one();
+        }
+    }
+
+    /// `NAUTILUS_PUMP_LOG`: once a second while no spin has run for
+    /// half a second, say what the pump last heard. An idle browser
+    /// prints these too; they mean a stall only while something is
+    /// waiting on Chromium (the scripted run's timestamps say when).
+    #[cfg(feature = "test-hooks")]
+    fn watch(&self) {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let stats = &self.stats;
+            let now = stats.now_ms();
+            let idle = now.saturating_sub(load(&stats.last_spin_end_ms));
+            if idle < 500 {
+                continue;
+            }
+            let asked = load(&stats.asked_now) + load(&stats.asked_later);
+            let pending = self
+                .deadline
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_some();
+            let unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis());
+            log::info!(
+                target: "nautilus_engine::pump",
+                "at {unix_ms}: no spin for {idle} ms; CEF asked {} time(s) since it ended \
+                 (last {} ms ago; {} now, {} later, {} later dropped in all); \
+                 {} wake(s) for {} spin(s); timer pending: {pending}; \
+                 longest spin {} us; timer at most {} ms late",
+                asked - load(&stats.asked_at_spin_end),
+                now.saturating_sub(load(&stats.last_ask_ms)),
+                load(&stats.asked_now),
+                load(&stats.asked_later),
+                load(&stats.dropped_later),
+                load(&stats.wakes),
+                load(&stats.spins),
+                load(&stats.longest_spin_us),
+                load(&stats.latest_timer_ms),
+            );
         }
     }
 
@@ -424,6 +756,13 @@ impl PumpScheduler {
         let _ = std::thread::Builder::new()
             .name("CefPumpTimer".to_string())
             .spawn(move || scheduler.run());
+        #[cfg(feature = "test-hooks")]
+        if std::env::var_os("NAUTILUS_PUMP_LOG").is_some() {
+            let scheduler = Arc::clone(self);
+            let _ = std::thread::Builder::new()
+                .name("CefPumpWatch".to_string())
+                .spawn(move || scheduler.watch());
+        }
     }
 
     fn run(&self) {
@@ -443,7 +782,8 @@ impl PumpScheduler {
                     let now = Instant::now();
                     if at <= now {
                         *deadline = None;
-                        self.waker.wake();
+                        self.stats.timer_fired(now - at);
+                        self.wake();
                     } else {
                         deadline = self
                             .changed
@@ -457,17 +797,26 @@ impl PumpScheduler {
     }
 
     fn schedule(&self, delay_ms: i64) {
+        self.stats.asked(delay_ms <= 0);
         if delay_ms <= 0 {
-            self.waker.wake();
+            self.wake();
             return;
         }
-        let at = Instant::now() + Duration::from_millis(delay_ms as u64);
         let mut deadline = self
             .deadline
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if deadline.is_none_or(|current| at < current) {
-            *deadline = Some(at);
+        let (next, dropped) = next_deadline(
+            Instant::now(),
+            *deadline,
+            Duration::from_millis(delay_ms as u64),
+            self.interval,
+        );
+        if dropped {
+            self.stats.dropped();
+        }
+        if next != *deadline {
+            *deadline = next;
             self.changed.notify_one();
         }
     }
@@ -654,5 +1003,100 @@ wrap_display_handler! {
                 host.close_browser(1);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    #[cfg(feature = "test-hooks")]
+    use super::pump_interval;
+    use super::{armed_after_spin, next_deadline};
+
+    const TICK: Option<Duration> = Some(Duration::from_millis(33));
+
+    #[test]
+    fn after_a_spin_with_nothing_pending_the_timer_arms_at_the_interval() {
+        let now = Instant::now();
+        assert_eq!(
+            armed_after_spin(None, now, TICK),
+            Some(now + Duration::from_millis(33))
+        );
+    }
+
+    #[test]
+    fn after_a_spin_with_something_pending_the_pending_deadline_is_left_alone() {
+        let now = Instant::now();
+        let earlier = Some(now + Duration::from_millis(5));
+        let later = Some(now + Duration::from_millis(20));
+        assert_eq!(armed_after_spin(earlier, now, TICK), earlier);
+        assert_eq!(armed_after_spin(later, now, TICK), later);
+    }
+
+    #[test]
+    fn without_an_interval_a_spin_arms_nothing() {
+        let now = Instant::now();
+        assert_eq!(armed_after_spin(None, now, None), None);
+        let pending = Some(now + Duration::from_millis(5));
+        assert_eq!(armed_after_spin(pending, now, None), pending);
+    }
+
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn the_pumps_interval_comes_from_the_setting_or_the_default() {
+        assert_eq!(pump_interval(None, TICK), TICK);
+        assert_eq!(
+            pump_interval(Some("0"), TICK),
+            None,
+            "0 switches the fallback off"
+        );
+        assert_eq!(
+            pump_interval(Some("50"), None),
+            Some(Duration::from_millis(50))
+        );
+        assert_eq!(
+            pump_interval(Some(" 16 "), TICK),
+            Some(Duration::from_millis(16))
+        );
+        assert_eq!(
+            pump_interval(Some("fast"), TICK),
+            TICK,
+            "nonsense leaves the default"
+        );
+    }
+
+    #[test]
+    fn with_an_interval_a_later_request_replaces_the_pending_one_and_is_clamped() {
+        let now = Instant::now();
+        let pending = Some(now + Duration::from_millis(5));
+        // Replaced, though the pending one was earlier: CEF's contract.
+        assert_eq!(
+            next_deadline(now, pending, Duration::from_millis(20), TICK),
+            (Some(now + Duration::from_millis(20)), false)
+        );
+        // Clamped to the interval.
+        assert_eq!(
+            next_deadline(now, None, Duration::from_secs(60), TICK),
+            (Some(now + Duration::from_millis(33)), false)
+        );
+    }
+
+    #[test]
+    fn without_an_interval_the_earliest_request_is_kept_and_a_later_one_is_counted_as_dropped() {
+        let now = Instant::now();
+        let pending = Some(now + Duration::from_millis(5));
+        assert_eq!(
+            next_deadline(now, pending, Duration::from_millis(20), None),
+            (pending, true)
+        );
+        assert_eq!(
+            next_deadline(now, pending, Duration::from_millis(2), None),
+            (Some(now + Duration::from_millis(2)), false)
+        );
+        assert_eq!(
+            next_deadline(now, None, Duration::from_secs(60), None),
+            (Some(now + Duration::from_secs(60)), false)
+        );
     }
 }

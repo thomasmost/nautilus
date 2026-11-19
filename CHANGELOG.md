@@ -8,6 +8,12 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- The hooks scripted runs drive the browser with are in no packaged
+  build: `NAUTILUS_TEST_CONTROL`, `NAUTILUS_TEST_PAGE_SCRIPT`,
+  `NAUTILUS_PUMP_LOG` and `NAUTILUS_PUMP_TICK_MS` do nothing unless the
+  browser was built with the `test-hooks` cargo feature (`cargo run
+  --features test-hooks`, `cargo xtask bundle-mac --features
+  test-hooks`). A build without it logs a warning when one is set.
 - The chrome's look, after Thorium with Zen's softness (osmena): the
   toolbar's Back, Forward, Reload and Stop are painted glyphs in round
   buttons that fill only under the pointer and fade when they cannot
@@ -21,8 +27,55 @@ has no releases yet; `Unreleased` holds everything on `main`.
   a magnifier, its tiles are cards on rows as tall as their tallest
   tile, and Most visited is a shelf of shortcut discs across the
   panel, so the mosaic has no hole.
+- An extension's toolbar action with no popup now shows its button in
+  the toolbar and the puzzle menu; pressing it sends the click to the
+  extension's worker through the extension bridge.
+- A loaded unpacked extension's copy in the profile no longer includes
+  dot-files and dot-directories (`.git`, `.DS_Store`). An extension whose
+  worker's entry is under one fails to load, with a message that says so.
+- An unpacked extension that an earlier build loaded from the user's own
+  folder is moved into a copy in the profile without a gap: the original is
+  switched off while the copy is made, and the copy takes the state the
+  original had. An extension with a `key` keeps its id. An extension without
+  one gets a new id: the copy is listed beside the original, which stays in
+  the list switched off, and the data stored under the original's id stays
+  with it. Chromium does not let the engine remove the original, so it is
+  removed by hand. If the copy cannot be made, the original stays switched
+  off, with a message.
+- An extension whose bridge cannot be put in is switched off with a message,
+  and an extension page whose bridge cannot be put in refuses Chromium's
+  `tabs` and `windows` rather than leaving them callable.
+- `captureVisibleTab` captures only a web page (`http`, `https`, `ftp`,
+  `data`) or the extension's own pages. A browser page, another extension's
+  page or a file page is refused, with a message that names its address.
+- A message from a tab is delivered to an extension's listeners at once, with
+  the tab's strip fields from the context's cache. A context whose listeners
+  do not answer sends nothing, so a popup's or an offscreen document's answer
+  is the one the sender gets, and a message no context answers settles as
+  Chromium settles it. A worker's cache follows the tabs the browser opens,
+  renames and closes, so a tab opened after the worker started (an extension
+  page shown as a tab among them) carries its strip fields from its first
+  message.
 
 ### Added
+
+- Extensions see the browser's own tabs and windows. `chrome.tabs` and
+  `chrome.windows` are answered from the tab strip in service workers and
+  in extension pages (a tab or an action popup): `tabs.query` lists every
+  tab of every window in order with its window, index, active state and
+  folder; `tabs.create`, `remove`, `update({active})`, `move`, `duplicate`
+  and `windows.create` and `remove` act on the strip; the tab and window
+  events fire as the strip changes; and, for a tab that has loaded, a
+  tab's id is the one `chrome.scripting`, `chrome.debugger` and
+  `chrome.webNavigation` accept. A restored tab that has not loaded yet is
+  listed too and takes its real id when first shown (`tabs.onReplaced`).
+  `tabs.group` and `tabs.discard`, which used to crash the browser, now
+  answer without reaching Chromium. An unpacked extension is run from a
+  copy inside the profile: choose "Load unpacked…" on the same folder again
+  to pick up edits.
+- Each profile gets a small helper extension, written into it on start,
+  that the extension bridge uses to find DevTools targets. It is loaded
+  only while an extension bridged by the bridge is on.
 
 - The Launch Panel's field completes an address ahead of the typist
   (osmena). Before the first space, the most visited page whose
@@ -50,6 +103,37 @@ has no releases yet; `Unreleased` holds everything on `main`.
   `on_before_browse` and `location.replace` here).
 
 ### Fixed
+
+- The extension switch on the manager's list did nothing: the engine sent a
+  property Chromium rejects (`enabled`), so an extension was never switched on
+  or off. It now uses `chrome.management.setEnabled`.
+- `tabs.query` with a `url` filter finds a file page the extension may see
+  (`file:///*`, `<all_urls>`) when it has the `tabs` permission; before, a file
+  page was never found by that filter.
+- A page shown as a tab whose Chromium tab id is 2 000 000 000 or more gets its
+  row: the engine refused such an id as if it were one of its own, so the page's
+  `sender.tab` and its window were missing.
+- `captureVisibleTab` refuses the Chrome Web Store, as Chrome does.
+- An extension without a service worker (a popup-only extension, or one
+  with a background page) gets `chrome.tabs` and `chrome.windows` in its
+  pages. Its page calls used to be refused after a wait, and they queued behind
+  other extensions' calls.
+- A page's listeners receive only the events the page registered, and an
+  extension's worker is started by an event only when it listens for that
+  event.
+- An extension page's calls and screenshots fail after 10 seconds instead of
+  waiting for an answer that never comes.
+- Replacing an unpacked copy no longer deletes the working copy when the new
+  one cannot be moved in.
+- The bridge's worker port is taken only from the extension's relay page, and
+  the relay takes only its worker's port, so a content script cannot take the
+  bridge's calls. A forwarded answer is acted on only for the methods the
+  engine forwards.
+- A Manifest V3 host pattern under `permissions` no longer grants access, and
+  `<all_urls>` and host patterns no longer match file pages. Host names match
+  without regard to case.
+- A reply to an extension page's call goes only to the page of the extension
+  that asked.
 
 - Calls and recordings in pages work: a page that asks for the
   microphone or the camera gets a question from the system, "Allow
@@ -103,6 +187,61 @@ has no releases yet; `Unreleased` holds everything on `main`.
   enables (C9 in `docs/upstream-issues.md`).
 - A mouse button pressed in a tab that then closed stayed pressed for
   the window's other tabs until the next click.
+- Extensions' calls into the browser, and anything else waiting on
+  Chromium's main thread, could stop being answered for seconds at a
+  time, or until the next input, while the window was not in front.
+  Chromium does not ask an embedder for every piece of its work; the
+  message pump now also runs that work 30 times a second without being
+  asked, as CEF's own sample does.
+- Loading an unpacked extension no longer follows symlinks: a symlink
+  inside the extension's folder is skipped, where it was copied as its
+  target, and a folder that links to an ancestor (or that contains the
+  profile's extension store) no longer makes the load recurse forever.
+  A link skipped that way is logged as a warning that names it, and an
+  extension whose worker's entry is itself a link, or is missing, fails
+  to load with a message saying so (before, the worker simply failed).
+  A load that fails leaves no partial copy in the profile. A worker path
+  in an extension's manifest that names a drive, a stream or a Windows
+  device name is refused.
+- A tab that an extension is debugging (its `chrome.debugger`) and that
+  was behind another tab stopped answering input and screenshots, so
+  each of the debugger's calls to it waited about five seconds. Such a
+  tab is now kept painting while the extension debugs it, and hidden
+  again when the last debugger goes. For an extension the bridge reaches,
+  the bridge reports each attach and detach, by tab id or by target id
+  (`attach({targetId})`). In this build the bridge reaches the scripted
+  test extension only: a store-installed or "Load unpacked…" extension's
+  debugger is not reported yet, nor one called from an extension page.
+  A background tab that no reported debugger is on stays hidden as before.
+- A tab that an extension is debugging is hidden again when the extension
+  is reloaded and the browser sees its debugger session end. Before, a
+  reload could leave such a tab painted with nothing debugging it. The
+  browser now asks the extension's worker which debugger sessions still
+  answer after it starts again, and forgets the others. A worker that
+  stops and starts again keeps its sessions, so its tab stays painted.
+  A reload that leaves the extension's page open with no event is seen by
+  the extension's worker target, which the browser reads about every two
+  seconds while an extension's page is open; the page is opened again and
+  the worker's own answer decides the tab.
+- A tab that an extension is debugging stays painted when the browser can
+  no longer reach the extension's worker. The browser forgets a debugger
+  only when the worker says its session has ended, when the extension is
+  off or gone, or when the tab closes. A check that times out or fails
+  closes the page and keeps the debugger, and so does giving up on a page.
+  Before, giving up hid a debugged tab.
+- The browser no longer starts an extension's stopped worker to ask it who
+  it is when the worker's port closes. An idle worker stays stopped, as
+  Chromium's idle stop intends, and a debugged tab stays painted.
+- A page of the extension bridge that does not load (an extension's relay
+  page, or the helper's) is opened at most five times in a row, the gap
+  between its five openings 250, 500, 1000 and 2000 ms. Then the browser
+  gives up on it until its extension changes: it logs once that it has done
+  so, and the extension's clicks are refused. Before, such a page was
+  reopened four times a second for as long as the browser ran.
+- On Windows the scripted-run control directory (`NAUTILUS_TEST_CONTROL`,
+  for test runs only) must lie inside the user's profile folder; any
+  other directory, or one that cannot be found, is refused with a warning
+  and the hook stays off.
 
 ### Added
 

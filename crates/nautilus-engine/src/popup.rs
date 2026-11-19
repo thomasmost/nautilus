@@ -33,7 +33,14 @@ mod stub {
             Popups
         }
 
-        pub(crate) fn open(&self, _id: &str, _url: &str, _anchor: ScreenRect, _scale: f32) {
+        pub(crate) fn open(
+            &self,
+            _id: &str,
+            _url: &str,
+            _anchor: ScreenRect,
+            _scale: f32,
+            _over: osmena_core::TabId,
+        ) {
             log::warn!("extension popups are not available on this platform");
         }
 
@@ -52,10 +59,11 @@ mod native {
         Browser, BrowserSettings, CefString, Client, DisplayHandler, Frame, ImplBrowser,
         ImplBrowserHost, ImplClient, ImplDisplayHandler, ImplFrame, ImplKeyboardHandler,
         ImplLifeSpanHandler, ImplLoadHandler, KeyEvent, KeyEventType, KeyboardHandler,
-        LifeSpanHandler, LoadHandler, LogSeverity, WrapClient, WrapDisplayHandler,
-        WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, wrap_client,
+        LifeSpanHandler, LoadHandler, LogSeverity, ProcessId, ProcessMessage, WrapClient,
+        WrapDisplayHandler, WrapKeyboardHandler, WrapLifeSpanHandler, WrapLoadHandler, wrap_client,
         wrap_display_handler, wrap_keyboard_handler, wrap_life_span_handler, wrap_load_handler,
     };
+    use osmena_core::TabId;
     use osmena_engine::ScreenRect;
 
     use crate::delegate::DelegateState;
@@ -146,7 +154,14 @@ mod native {
 
         /// Open `url` as the popup of extension `id`, under `anchor`
         /// (physical screen pixels) at the window's `scale`.
-        pub(crate) fn open(&self, id: &str, url: &str, anchor: ScreenRect, scale: f32) {
+        pub(crate) fn open(
+            &self,
+            id: &str,
+            url: &str,
+            anchor: ScreenRect,
+            scale: f32,
+            over: osmena_core::TabId,
+        ) {
             {
                 let inner = self.inner.borrow();
                 if let Some((closed_id, at)) = &inner.closed
@@ -167,10 +182,16 @@ mod native {
                 return;
             };
             let mut client = PopupClient::new(
-                PopupLife::new(self.delegate.clone(), self.inner.clone(), id.to_string()),
+                PopupLife::new(
+                    self.delegate.clone(),
+                    self.inner.clone(),
+                    id.to_string(),
+                    over,
+                ),
                 PopupLoad::new(),
                 PopupDisplay::new(self.inner.clone()),
                 PopupKeys::new(),
+                self.delegate.clone(),
             );
             let settings = BrowserSettings {
                 background_color: 0xFFFF_FFFF,
@@ -268,11 +289,29 @@ mod native {
             load: LoadHandler,
             display: DisplayHandler,
             keys: KeyboardHandler,
+            delegate: Rc<DelegateState>,
         }
 
         impl Client {
             fn life_span_handler(&self) -> Option<LifeSpanHandler> {
                 Some(self.life.clone())
+            }
+
+            // A bridge call from the popup's page (bridge/pages.rs).
+            fn on_process_message_received(
+                &self,
+                browser: Option<&mut Browser>,
+                frame: Option<&mut Frame>,
+                _source_process: ProcessId,
+                message: Option<&mut ProcessMessage>,
+            ) -> ::std::os::raw::c_int {
+                let (Some(browser), Some(frame), Some(message)) = (browser, frame, message) else {
+                    return 0;
+                };
+                match self.delegate.page_lane() {
+                    Some(lane) if lane.receive(&self.delegate, browser, frame, message) => 1,
+                    _ => 0,
+                }
             }
 
             fn load_handler(&self) -> Option<LoadHandler> {
@@ -294,11 +333,16 @@ mod native {
             delegate: Rc<DelegateState>,
             inner: Rc<RefCell<Inner>>,
             id: String,
+            // The tab that was active when the popup opened (its window).
+            over: TabId,
         }
 
         impl LifeSpanHandler {
-            fn on_after_created(&self, _browser: Option<&mut Browser>) {
+            fn on_after_created(&self, browser: Option<&mut Browser>) {
                 self.delegate.add_live(1);
+                if let Some(browser) = browser {
+                    self.delegate.register_popup(browser, self.over);
+                }
             }
 
             fn do_close(&self, _browser: Option<&mut Browser>) -> ::std::os::raw::c_int {
@@ -306,8 +350,11 @@ mod native {
                 0
             }
 
-            fn on_before_close(&self, _browser: Option<&mut Browser>) {
+            fn on_before_close(&self, browser: Option<&mut Browser>) {
                 self.delegate.add_live(-1);
+                if let Some(browser) = browser {
+                    self.delegate.forget_browser(browser);
+                }
                 let mut inner = self.inner.borrow_mut();
                 if inner.open.as_ref().is_some_and(|open| open.id == self.id)
                     && let Some(open) = inner.open.take()

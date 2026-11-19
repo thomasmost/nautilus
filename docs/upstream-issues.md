@@ -180,6 +180,116 @@ delivered after the answer. Do not turn the question into something
 that stays open while events flow (a prompt in the chrome, an
 asynchronous sheet) without settling this first.
 
+### C11: `tabs.group` and `tabs.discard` on an Alloy-style tab crash the browser process
+
+CEF resolves a windowless (Alloy-style) browser for the extension APIs
+that take a tab id: one fallback in `ExtensionTabUtil::GetTabById`
+finds it. Nothing else in Chromium knows such a browser: it is in no
+`Browser` window and no `TabStripModel`. `chrome.tabs.group({tabIds})`
+and `chrome.tabs.discard(tabId)` look the tab up, succeed, and then
+reach for its tab strip; the browser process dies. Seen on CEF
+154.0.34 (branch 8037), macOS, 2026-11-17: the test extension's last
+record is the call, then the process is gone. CEF's maintainer has
+said general tab API support for Alloy style is not planned. No
+upstream issue found.
+**Seen from an extension page (2026-11-18, macOS):** an
+extension page opened as a tab gets its own Alloy tab id from
+`chrome.tabs.getCurrent()`, and `chrome.tabs.group` on that id crashes the
+browser process inside Chromium, after the page's other native calls return.
+An id no tab has gets `No tab with id`, and a page with no script does not
+crash. The crash is there with the bridge's code never called.
+**Workaround:** a script ahead of each extension's service worker, and the
+namespaces of each extension page, replace `chrome.tabs`, `tabGroups`,
+`windows` and `sidePanel` and answer from Nautilus's own model, so these
+calls never reach Chromium. An extension page's namespaces are replaced at
+the first change to its document, before its first script runs
+(`bridge/js/page_defer.js`). The engine refuses `tabs.group` and `ungroup`
+for a bridged caller. Until a page is bridged an extension that calls either
+crashes Nautilus.
+**Blocks:** tab groups for extensions, unless bridged.
+
+### C12: the window and tab-strip APIs do not see Alloy-style tabs; `tabs.create` opens a Chromium window
+
+`tabs.query`, `windows.getAll`, `windows.getCurrent` and
+`tabGroups.query` list only the hidden management browser; no
+`chrome.tabs` event fires for a Nautilus tab; a tab's `windowId` is -1
+and its `index` -1. `tabs.get`, `scripting.executeScript`,
+`tabs.sendMessage`, `tabs.update({url})`, `tabs.reload`,
+`webNavigation` and `chrome.debugger` do work by tab id. The id is
+Chromium's session id, different on every launch, and is not
+`CefBrowser::GetIdentifier()`. `tabs.create` makes Chromium open a
+Chrome-style window for about 100 ms before `StrayClient` moves its
+URL into a Nautilus tab and closes it; the id it resolved with is dead
+(`tabs.get` and `scripting.executeScript` on it hang or fail). No
+upstream issue found; same cause as C11.
+**Workaround:** the extension bridge (C11), with a tab-id table joined
+from each tab's DevTools target id and `chrome.debugger.getTargets()`
+called by a helper extension (`bridge/table.rs`). Phase 1 answers
+`tabs.query` for a bridged extension; the rest is Phase 5.
+
+### C13: `sidePanel.open` has nowhere to open
+
+`sidePanel.setOptions` and `getOptions` store and return options.
+`sidePanel.open({tabId})` rejects a Nautilus tab ("No tab with id") and
+`open({windowId})` for the management window resolves and shows
+nothing: the side panel is a feature of Chrome's browser window, and a
+windowless tab has none. A call without a user gesture is refused
+before either. No upstream issue found.
+**Workaround (planned):** osmena's side panel, with `chrome.sidePanel`
+bridged (Phase 6).
+
+### C14: CEF's external message pump is not asked for all of Chromium's work
+
+With `external_message_pump` on, CEF asks for work through
+`on_schedule_message_pump_work`, and the application's event loop
+spins it when woken. CEF's header on `master` says the application must
+also run the work unasked, about every 33 ms ("The application must also
+schedule CefDoMessageLoopWork() calls when no callback is received",
+`cef_browser_process_handler.h`); the 154 header does not say it.
+The mechanism: CEF's `MessagePumpExternal::Run` stops after a 10 ms
+slice with no callback, and Chromium's work deduplicator then takes a
+`DoWork` to be pending and does not ask again. Related: CEF issue 2968
+(the replace rule for delayed requests), and 4332 (a second starvation
+in the same pump on macOS, fixed on master 2026-11-10).
+
+Observed on macOS, CEF 154.0.34, with the window not in front (the
+side-panel scripted run `ci/side-panel/run.sh pump`): extension calls
+were not answered for seconds, and for the whole run in one case. With
+the tick off, the instrumented build logged `no spin for 137354 ms; CEF
+asked 0 time(s) since it ended; timer pending: false` and the latency
+run did not finish (`task11/pump-tick0-run1`); a second tick-off run
+failed the same way (`task12/tick0-control`). The replace rule with a
+600000 ms interval, which leaves the timer pending and asks for nothing
+sooner, also failed: two extension calls took 20005 and 20010 ms
+(`task11/pump-tick600000-run1`). So a timer that CEF does not ask for,
+at the interval the header names, is what cleared it.
+**Workaround (2026-11-17):** the message pump runs CEF's work 30 times a
+second when nothing else has asked, after every spin (`PumpScheduler`
+in `engine.rs`: each delayed request is clamped to that interval, a
+later request replaces the pending one, and the timer is armed after
+every spin). Measured with `ci/side-panel/run.sh pump` (202 extension
+calls each, the window unfocused): with the tick on, eight runs passed,
+max 65 to 90 ms and p95 63 to 64 ms, and one failed (`task12/fix-run1`,
+a hidden-tab stall); with it off, the two runs above failed. The
+hidden-tab stall is a separate issue and is not upstream's: a tab behind
+another is hidden, and a debugger's call to a hidden renderer waits for
+the renderer's answer. Nautilus keeps a tab painted while an extension
+debugs it: `bridge.js` reports each `chrome.debugger` attach and detach,
+and `bridge/debugger.rs` keeps the set. An earlier version keyed this on
+CEF's DevTools-agent callback, which fires for the engine's own
+`Target.getTargetInfo` probe at every tab's creation, so no tab was ever
+hidden. The run that showed it logged, for each tab, `C1PROBE attached
+TabId(1) hidden=false` and then `hide TabId(1) dev_tools_attached=true
+was_hidden(1)=false` (2026-11-18, three tabs). No upstream report was
+looked for. In a build with the `test-hooks` feature, `NAUTILUS_PUMP_TICK_MS=0`
+switches the tick off to reproduce; `NAUTILUS_PUMP_LOG=1` reports a pump
+that has not spun. The idle cost of the tick was about 0.5 % CPU and
+416 wake-ups against 0.0 % and 201 without it (sampled in the session;
+no log kept). Not tested: lost wakes in osmena's `WinitWaker::wake` and
+App Nap, which the logs do not point to; no run was made with the
+window focused. Re-check on a CEF bump whether the header still asks
+for it.
+
 ## egui and winit
 
 ### E1: IME is enabled only for egui's own text fields

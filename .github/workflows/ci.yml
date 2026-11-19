@@ -69,10 +69,22 @@ jobs:
           path: .cef
           key: cef-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
 
+      # The Rust cache brings back cef-dll-sys's CMake build tree, which
+      # names its compiler and linker by full path. A runner image with a
+      # newer MSVC toolset leaves that tree pointing at tools that are
+      # gone, and CMake then fails its compiler check.
+      - name: Drop CMake build trees left by another toolchain
+        shell: bash
+        run: bash ci/drop-stale-cmake-trees.sh
+
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --all-targets
       - run: cargo test --workspace
+      # The scripted runs' hooks (the `test-hooks` feature) are in no
+      # packaged build, so they are linted and tested here.
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --all-features
 
       # tiny-skia's output is not guaranteed identical across CPU
       # architectures, so only the Apple Silicon runner diffs the icons.
@@ -130,6 +142,10 @@ jobs:
         with:
           path: .cef
           key: cef-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+      # As in the check job.
+      - name: Drop CMake build trees left by another toolchain
+        shell: bash
+        run: bash ci/drop-stale-cmake-trees.sh
 
       # Windows: the NSIS installer.
       - if: runner.os == 'Windows'
@@ -184,6 +200,17 @@ jobs:
       # every launch go up with the bundle.
       - if: runner.os == 'macOS'
         run: cargo xtask bundle-mac
+      # Every hook of a scripted run logs a line that starts so; a
+      # binary built without the `test-hooks` feature holds none.
+      - name: No test hooks in the packaged binary
+        shell: bash
+        run: |
+          binary=target/release/nautilus
+          [ -f "$binary.exe" ] && binary="$binary.exe"
+          if grep -a -q -F 'TEST HOOK' "$binary"; then
+            echo "::error::$binary was built with the test hooks"
+            exit 1
+          fi
       - if: runner.os == 'macOS'
         name: Symbols
         run: dsymutil target/release/nautilus -o target/release/Nautilus.dSYM

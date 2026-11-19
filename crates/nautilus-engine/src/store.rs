@@ -1,4 +1,5 @@
-//! The Chrome Web Store's own install buttons, rerouted to Nautilus.
+//! The Chrome Web Store's own install buttons, rerouted to Nautilus. The
+//! same handler puts the extension bridge into extension pages (bridge/pages.rs).
 //!
 //! The store's pages call `chrome.webstorePrivate` ("Add to Chrome") and
 //! `chrome.management` ("Remove from Chrome", the enable switch), which
@@ -194,6 +195,15 @@ wrap_render_process_handler! {
                 return;
             };
             let url = CefString::from(&frame.url()).to_string();
+            // An extension's own page, in any frame: the bridge goes in
+            // before the page's scripts run (bridge/pages.rs).
+            #[cfg(any(windows, target_os = "macos"))]
+            {
+                if crate::bridge::pages::extension_of(&url).is_some() {
+                    crate::bridge::pages::install(context);
+                    return;
+                }
+            }
             if frame.is_main() == 0 {
                 return;
             }

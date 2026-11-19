@@ -17,6 +17,11 @@ path = "src/main.rs"
 name = "nautilus-helper"
 path = "src/helper.rs"
 
+[features]
+# The engine's hooks for scripted runs (see its Cargo.toml); off in every
+# build that is packaged.
+test-hooks = ["nautilus-engine/test-hooks"]
+
 [dependencies]
 nautilus-engine = { path = "../nautilus-engine" }
 osmena-shell = { workspace = true }

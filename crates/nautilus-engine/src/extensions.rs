@@ -45,6 +45,148 @@ pub fn web_store_item_id(url: &Url) -> Option<String> {
         .find(|segment| crate::crx::is_extension_id(segment))
 }
 
+/// Which platform's `suggested_key` a command takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub(crate) enum KeyPlatform {
+    Mac,
+    Windows,
+}
+
+impl KeyPlatform {
+    #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+    pub(crate) const CURRENT: KeyPlatform = if cfg!(target_os = "macos") {
+        KeyPlatform::Mac
+    } else {
+        KeyPlatform::Windows
+    };
+
+    fn key(self) -> &'static str {
+        match self {
+            KeyPlatform::Mac => "mac",
+            KeyPlatform::Windows => "windows",
+        }
+    }
+}
+
+/// An extension's toolbar action as its manifest declares it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ActionFacts {
+    /// The popup page, relative to the extension's root.
+    pub popup: Option<String>,
+    /// The title, unless it is absent or a `__MSG_name__` key.
+    pub title: Option<String>,
+}
+
+/// One entry of the manifest's `commands`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommandFacts {
+    pub name: String,
+    pub description: String,
+    /// The manifest's suggestion for this platform, as written.
+    pub suggested_key: Option<String>,
+}
+
+/// What an extension's `manifest.json` says that the engine acts on.
+/// Anything missing or of the wrong type is simply absent.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub(crate) struct ManifestFacts {
+    /// `action`, `browser_action` or `page_action`, with or without a
+    /// popup.
+    pub action: Option<ActionFacts>,
+    /// The icon to show, relative to the extension's root.
+    pub icon_path: Option<String>,
+    /// `background.service_worker`.
+    pub worker: Option<String>,
+    /// `background.type` is `"module"`.
+    pub module_worker: bool,
+    /// `side_panel.default_path`. Nothing reads it yet; the first reader
+    /// removes the `allow` below.
+    #[allow(dead_code)]
+    pub side_panel: Option<String>,
+    /// `commands`, by name. Nothing reads it yet; the first reader removes
+    /// the `allow` below.
+    #[allow(dead_code)]
+    pub commands: Vec<CommandFacts>,
+}
+
+/// Read `manifest` (the parsed `manifest.json`).
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+pub(crate) fn manifest_facts(manifest: &serde_json::Value, platform: KeyPlatform) -> ManifestFacts {
+    let string = |v: Option<&serde_json::Value>| {
+        v.and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let action = ["action", "browser_action", "page_action"]
+        .iter()
+        .find_map(|key| manifest.get(*key))
+        .filter(|a| a.is_object());
+    let icon_path = largest_icon(manifest.get("icons"))
+        .or_else(|| largest_icon(action.and_then(|a| a.get("default_icon"))))
+        .or_else(|| string(action.and_then(|a| a.get("default_icon"))));
+    let background = manifest.get("background");
+    let mut commands: Vec<CommandFacts> = manifest
+        .get("commands")
+        .and_then(|c| c.as_object())
+        .map(|map| {
+            map.iter()
+                .map(|(name, command)| {
+                    let keys = command.get("suggested_key");
+                    CommandFacts {
+                        name: name.clone(),
+                        description: string(command.get("description")).unwrap_or_default(),
+                        suggested_key: string(keys.and_then(|k| k.get(platform.key())))
+                            .or_else(|| string(keys.and_then(|k| k.get("default")))),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    commands.sort_by(|a, b| a.name.cmp(&b.name));
+    ManifestFacts {
+        action: action.map(|a| ActionFacts {
+            popup: string(a.get("default_popup")),
+            // A localised title is a `__MSG_name__` key; the name
+            // serves then.
+            title: string(a.get("default_title")).filter(|t| !t.starts_with("__MSG_")),
+        }),
+        icon_path,
+        worker: string(background.and_then(|b| b.get("service_worker"))),
+        module_worker: background
+            .and_then(|b| b.get("type"))
+            .and_then(|t| t.as_str())
+            == Some("module"),
+        side_panel: string(
+            manifest
+                .get("side_panel")
+                .and_then(|s| s.get("default_path")),
+        ),
+        commands,
+    }
+}
+
+/// The path of the largest icon of a `{"16": "a.png", ...}` map that
+/// is no bigger than 128 (bigger ones are splash art), or the
+/// largest of all otherwise.
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+fn largest_icon(icons: Option<&serde_json::Value>) -> Option<String> {
+    let map = icons?.as_object()?;
+    let mut sizes: Vec<(u32, &str)> = map
+        .iter()
+        .filter_map(|(size, path)| Some((size.parse().ok()?, path.as_str()?)))
+        .collect();
+    sizes.sort_unstable();
+    sizes
+        .iter()
+        .rev()
+        .find(|(size, _)| *size <= 128)
+        .or(sizes.last())
+        .map(|(_, path)| path.to_string())
+}
+
 /// Store downloads are unpacked on a worker thread: writing an
 /// extension's files takes seconds, and seconds spent inside a CEF
 /// callback (the download's completion) leave CEF's external message
@@ -134,13 +276,32 @@ mod stub {
         }
 
         pub(crate) fn shutdown(&self) {}
+
+        pub(crate) fn track_tab(
+            &self,
+            _tab: osmena_core::TabId,
+            _browser: &cef::Browser,
+            _view: std::rc::Rc<crate::delegate::ViewState>,
+        ) {
+        }
+
+        pub(crate) fn untrack_tab(&self, _tab: osmena_core::TabId) {}
+
+        #[cfg(feature = "test-hooks")]
+        pub(crate) fn poll_control(&self) {}
+
+        pub(crate) fn poll_bridge(&self) {}
+
+        pub(crate) fn click_action(&self, _id: &str, _tab: osmena_core::TabId) -> bool {
+            false
+        }
     }
 }
 
 #[cfg(any(windows, target_os = "macos"))]
 mod native {
     use std::cell::{Cell, RefCell};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::sync::Arc;
@@ -164,9 +325,11 @@ mod native {
         wrap_load_handler, wrap_run_file_dialog_callback, wrap_urlrequest_client,
         wrap_window_delegate,
     };
-    use osmena_core::{EngineEvent, Extension, ExtensionSource, Favicon};
+    use osmena_core::{EngineEvent, Extension, ExtensionSource, Favicon, TabId};
 
     use super::UnpackQueue;
+    use crate::bridge::pattern::Grants;
+    use crate::bridge::{self, Bridge};
     use crate::crx;
     use crate::delegate::DelegateState;
 
@@ -217,7 +380,7 @@ mod native {
 })"#;
 
     const ENABLE_SCRIPT: &str = r#"new Promise(function(done){
-  chrome.developerPrivate.updateExtensionConfiguration({extensionId:__ID__, enabled:__ENABLED__}, function(){
+  chrome.management.setEnabled(__ID__, __ENABLED__, function(){
     var err = chrome.runtime.lastError;
     done({error: err ? err.message : null});
   });
@@ -240,11 +403,56 @@ mod native {
         Uninstall { id: String },
     }
 
+    /// A scripted run's command directory (`NAUTILUS_TEST_CONTROL`).
+    #[cfg(feature = "test-hooks")]
+    struct Control {
+        dir: PathBuf,
+        /// The number of the next `cmd-N.json` to carry out.
+        next: u32,
+    }
+
+    /// What a scripted run holds in the manager. Only a build with the
+    /// `test-hooks` feature has it.
+    #[cfg(feature = "test-hooks")]
+    #[derive(Default)]
+    struct Hooks {
+        /// The scripted run's command directory, if one was named.
+        control: Option<Control>,
+        /// A scripted run's hold on the extension list (`hold_list`): until
+        /// this instant, a listing's answer is not read (sync sees no list).
+        list_hold: Option<Instant>,
+        /// A listing's answer came during the hold; it is read again when the
+        /// hold ends, so that the list the engine acts on is the one after it.
+        list_held: bool,
+    }
+
+    /// The scripted run's control directory, if `NAUTILUS_TEST_CONTROL`
+    /// names one that may be used. A directory that fails the check is
+    /// logged and the hook stays off.
+    #[cfg(feature = "test-hooks")]
+    fn test_control(engine_dir: &Path) -> Option<Control> {
+        let dir = PathBuf::from(std::env::var_os("NAUTILUS_TEST_CONTROL")?);
+        if let Some(reason) = crate::test_control::control_refusal(&dir, engine_dir) {
+            log::warn!(
+                "TEST HOOK refused: {} ({reason}); the hook stays off",
+                dir.display()
+            );
+            return None;
+        }
+        log::info!("TEST HOOK: commands are read from {}", dir.display());
+        Some(Control { dir, next: 1 })
+    }
+
     /// What the manager remembers of an extension beyond the model.
     struct Known {
         id: String,
         /// The popup page of its toolbar action, relative to its root.
         popup: Option<String>,
+        /// Its worker is wrapped by the bridge's loader.
+        bridged: bool,
+        enabled: bool,
+        /// Where Chromium loads it from.
+        path: PathBuf,
     }
 
     struct Inner {
@@ -268,6 +476,22 @@ mod native {
         /// The window exists (created, not yet destroyed). CEF may only
         /// shut down once it is gone.
         window_alive: bool,
+        /// Unpacked loads waiting their turn: `loadUnpacked`'s folder
+        /// dialog is answered from one slot, so one load runs at a time.
+        loads: VecDeque<PathBuf>,
+        loading: bool,
+        /// The helper extension was missing from a listing and its load
+        /// has been asked for.
+        helper_requested: bool,
+        /// A scripted run's control and its hold on the list.
+        #[cfg(feature = "test-hooks")]
+        hooks: Hooks,
+        /// Extensions whose directory was already looked at for the bridge
+        /// this run (`on_list`), so each is bridged once per run.
+        checked: HashSet<String>,
+        /// The user-folder extensions being moved into the profile's copies
+        /// (`bridge::migrate`).
+        migrations: bridge::migrate::Migrations,
     }
 
     /// The management browser (never shown) and what it learnt. One per
@@ -278,6 +502,8 @@ mod native {
         store_dir: PathBuf,
         /// Where the unpacking threads report.
         unpacked: Arc<UnpackQueue>,
+        /// The engine's end of the extension bridge.
+        bridge: Rc<Bridge>,
         /// When an extension was last installed, switched, or removed:
         /// Chromium writes its preferences up to ten seconds later, and
         /// nothing in CEF's shutdown flushes them (every exit counts as a
@@ -299,9 +525,27 @@ mod native {
             engine_dir: &Path,
             unpacked: Arc<UnpackQueue>,
         ) -> Rc<Self> {
+            #[cfg(not(feature = "test-hooks"))]
+            for hook in [
+                "NAUTILUS_TEST_CONTROL",
+                "NAUTILUS_TEST_PAGE_SCRIPT",
+                "NAUTILUS_PUMP_LOG",
+                "NAUTILUS_PUMP_TICK_MS",
+            ] {
+                if std::env::var_os(hook).is_some() {
+                    log::warn!(
+                        "{hook} is set, but this build has no test hooks: build with `--features test-hooks`"
+                    );
+                }
+            }
+            let store_dir = engine_dir.join("extensions");
+            if let Err(e) = bridge::install::write_helper(&store_dir) {
+                log::error!("cannot write the helper extension: {e}");
+            }
             let manager = Rc::new(ExtensionManager {
+                bridge: Bridge::new(delegate.clone()),
                 delegate,
-                store_dir: engine_dir.join("extensions"),
+                store_dir,
                 unpacked,
                 last_change: Cell::new(None),
                 inner: RefCell::new(Inner {
@@ -316,6 +560,16 @@ mod native {
                     downloads: Vec::new(),
                     window: None,
                     window_alive: false,
+                    loads: VecDeque::new(),
+                    loading: false,
+                    helper_requested: false,
+                    #[cfg(feature = "test-hooks")]
+                    hooks: Hooks {
+                        control: test_control(engine_dir),
+                        ..Hooks::default()
+                    },
+                    checked: HashSet::new(),
+                    migrations: Default::default(),
                 }),
             });
             let mut client = ManagerClient::new(
@@ -404,17 +658,107 @@ mod native {
 
         pub(crate) fn install(self: &Rc<Self>, source: ExtensionSource) {
             match source {
-                ExtensionSource::Directory(path) => self.load_unpacked(path),
+                ExtensionSource::Directory(path) => self.load_bridged(path),
                 ExtensionSource::AskForDirectory => self.ask_for_directory(),
                 ExtensionSource::Store { id } => self.install_from_store(&id),
             }
         }
 
-        /// Load the extension in `dir`: `loadUnpacked` opens a folder
-        /// dialog, which the engine's dialog handler answers with `dir`.
+        /// Load the extension in `dir`, after any load already going:
+        /// `loadUnpacked` opens a folder dialog, which the engine's dialog
+        /// handler answers with `dir`.
         fn load_unpacked(&self, dir: PathBuf) {
+            self.inner.borrow_mut().loads.push_back(dir);
+            self.next_load();
+        }
+
+        fn next_load(&self) {
+            let dir = {
+                let mut inner = self.inner.borrow_mut();
+                if inner.loading {
+                    return;
+                }
+                let Some(dir) = inner.loads.pop_front() else {
+                    return;
+                };
+                inner.loading = true;
+                dir
+            };
             self.delegate.answer_next_dialog(dir);
             self.run(LOAD_SCRIPT.to_string(), Request::Load);
+        }
+
+        /// Load the extension the user keeps in `source`: copy it under
+        /// the profile, put the bridge into the copy, load the copy. The
+        /// user's folder is never written to; loading the same folder
+        /// again replaces the copy, so Chromium reloads it. A directory
+        /// already under the profile is bridged and loaded where it is
+        /// (`install::bridge_source`). The copying runs on a worker thread,
+        /// like unpacking, and `poll_unpacked` loads what it finished. "Load
+        /// unpacked…", `ExtensionSource::Directory` and the test control's
+        /// `load` command all come here.
+        pub(crate) fn load_bridged(&self, source: PathBuf) {
+            let store_dir = self.store_dir.clone();
+            let queue = self.unpacked.clone();
+            let name = source.display().to_string();
+            let label = name.clone();
+            let spawned = std::thread::Builder::new()
+                .name("NautilusUnpack".to_string())
+                .spawn(move || {
+                    let version = bridge::install::version_of(&crate::bridge::worker_script());
+                    let outcome = bridge::install::bridge_source(&source, &store_dir, &version)
+                        .map(|(copy, bridged)| {
+                            log::info!(
+                                "extension at {} copied to {} (bridged: {bridged:?})",
+                                source.display(),
+                                copy.display()
+                            );
+                            copy
+                        });
+                    queue.push(name, outcome);
+                });
+            if let Err(e) = spawned {
+                self.report_error(format!(
+                    "cannot start copying the extension in {label}: {e}"
+                ));
+            }
+        }
+
+        /// Open the bridge's relays and helper page that are wanted and not
+        /// open (`Bridge::reopen`). The engine calls this on its turn.
+        pub(crate) fn poll_bridge(&self) {
+            self.bridge.reopen();
+        }
+
+        /// The engine's end of the bridge: the hub's worker lane and its
+        /// table.
+        pub(crate) fn bridge(&self) -> Rc<Bridge> {
+            self.bridge.clone()
+        }
+
+        pub(crate) fn track_tab(
+            &self,
+            tab: TabId,
+            browser: &cef::Browser,
+            view: Rc<crate::delegate::ViewState>,
+        ) {
+            self.bridge.track(tab, browser, view);
+        }
+
+        pub(crate) fn untrack_tab(&self, tab: TabId) {
+            self.bridge.untrack(tab);
+        }
+
+        /// Deliver a click on `id`'s popup-less action for `tab` to its
+        /// worker. False when the extension is not bridged.
+        pub(crate) fn click_action(&self, id: &str, tab: TabId) -> bool {
+            let bridged = self
+                .inner
+                .borrow()
+                .known
+                .iter()
+                .any(|k| k.id == id && k.bridged && k.enabled);
+            bridged && self.bridge.click(id, tab)
         }
 
         /// Ask the user for the directory, with a dialog owned by the
@@ -485,10 +829,22 @@ mod native {
         /// Load what the unpacking threads finished. Called by the engine
         /// on every spin.
         pub(crate) fn poll_unpacked(&self) {
-            for (id, outcome) in self.unpacked.take() {
+            for (name, outcome) in self.unpacked.take() {
+                let migration = self.inner.borrow_mut().migrations.finish(&name, &outcome);
                 match outcome {
-                    Ok(dir) => self.load_unpacked(dir),
-                    Err(e) => self.report_error(format!("cannot install extension {id}: {e}")),
+                    Ok(dir) => self.load_unpacked(match migration {
+                        Some(bridge::migrate::Next::Load(copy)) => copy,
+                        _ => dir,
+                    }),
+                    Err(e) => match migration {
+                        Some(bridge::migrate::Next::Disable(original)) => {
+                            self.set_enabled(&original, false);
+                            self.report_error(format!(
+                                "{name} was switched off: its copy in the profile could not be made ({e})"
+                            ));
+                        }
+                        _ => self.report_error(format!("cannot install extension {name}: {e}")),
+                    },
                 }
             }
         }
@@ -520,10 +876,132 @@ mod native {
             ))
         }
 
+        /// Carry out the next command of a scripted run, if one is
+        /// waiting. Called by the engine on every spin; does nothing
+        /// unless `NAUTILUS_TEST_CONTROL` was set.
+        #[cfg(feature = "test-hooks")]
+        pub(crate) fn poll_control(self: &Rc<Self>) {
+            // A hold that ended with a listing held reads the list again, so the
+            // engine acts on the list as it is after the hold.
+            let again = {
+                let mut inner = self.inner.borrow_mut();
+                match inner.hooks.list_hold {
+                    Some(until) if Instant::now() >= until => {
+                        inner.hooks.list_hold = None;
+                        std::mem::take(&mut inner.hooks.list_held)
+                    }
+                    _ => false,
+                }
+            };
+            if again {
+                log::info!("TEST HOOK: the list hold ended; the extension list is read again");
+                self.list();
+            }
+            let (number, text) = {
+                let mut inner = self.inner.borrow_mut();
+                let Some(control) = inner.hooks.control.as_mut() else {
+                    return;
+                };
+                let path = control.dir.join(format!("cmd-{}.json", control.next));
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    return;
+                };
+                control.next += 1;
+                (control.next - 1, text)
+            };
+            let command: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(command) => command,
+                Err(e) => {
+                    log::warn!("TEST HOOK: command {number} is not JSON: {e}");
+                    return;
+                }
+            };
+            if let Some(dir) = command.get("load").and_then(|v| v.as_str()) {
+                log::info!("TEST HOOK: command {number}: load {dir}");
+                self.load_bridged(PathBuf::from(dir));
+            } else if let Some(id) = command.get("click").and_then(|v| v.as_str()) {
+                let tab = self
+                    .delegate
+                    .last_focused()
+                    .or_else(|| self.bridge.any_tab());
+                let sent = tab.is_some_and(|tab| self.click_action(id, tab));
+                log::info!(
+                    "TEST HOOK: command {number}: click on {id} for {tab:?}: {}",
+                    if sent {
+                        "sent to the bridge"
+                    } else {
+                        "not sent"
+                    }
+                );
+            } else if let Some(message) = command.get("devtools").filter(|m| m.is_object()) {
+                let mut message = message.clone();
+                message["id"] = serde_json::json!(9000 + number);
+                log::info!(
+                    "TEST HOOK: command {number}: devtools {}",
+                    message
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("?")
+                );
+                let bytes = message.to_string().into_bytes();
+                let host = self.inner.borrow().browser.as_ref().and_then(|b| b.host());
+                if host.is_none_or(|host| host.send_dev_tools_message(Some(&bytes)) == 0) {
+                    log::warn!("TEST HOOK: command {number} could not be sent");
+                }
+            } else if command.get("table").is_some() {
+                log::info!("TEST HOOK: command {number}: table");
+                self.bridge.log_table();
+            } else if let Some(seconds) = command.get("hold_list").and_then(|v| v.as_u64()) {
+                // The extension list is not read for this long, so the
+                // engine's sync sees no change while the extension reloads.
+                log::info!("TEST HOOK: command {number}: hold_list {seconds} s");
+                self.inner.borrow_mut().hooks.list_hold =
+                    Some(Instant::now() + std::time::Duration::from_secs(seconds));
+            } else if let Some(relay) = command.get("relay_eval") {
+                // The relay page's own answer to an expression, logged.
+                let extension = relay
+                    .get("extension")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let label = relay
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("the expression");
+                let expression = relay
+                    .get("expression")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                log::info!("TEST HOOK: command {number}: relay_eval {label} on {extension}");
+                self.bridge.inspect_relay(extension, label, expression);
+            } else {
+                log::warn!("TEST HOOK: command {number} is not understood: {command}");
+            }
+        }
+
+        /// Append a DevTools message of the management browser to the
+        /// scripted run's `devtools.log`.
+        #[cfg(feature = "test-hooks")]
+        fn control_log(&self, message: &[u8]) {
+            use std::io::Write;
+            let inner = self.inner.borrow();
+            let Some(control) = inner.hooks.control.as_ref() else {
+                return;
+            };
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(control.dir.join("devtools.log"));
+            if let Ok(mut file) = file {
+                let _ = file.write_all(message);
+                let _ = file.write_all(b"\n");
+            }
+        }
+
         /// Close the management window and its browser; the engine then
         /// pumps until they are gone.
         pub(crate) fn shutdown(&self) {
             log::debug!("extension manager shutting down");
+            self.bridge.shutdown();
             let mut inner = self.inner.borrow_mut();
             inner.ready = false;
             inner.queued.clear();
@@ -558,8 +1036,21 @@ mod native {
             }
         }
 
-        /// A `Runtime.evaluate` answered.
+        /// A `Runtime.evaluate` answered. Whatever a load's answer was,
+        /// the next queued load may start.
         fn on_result(self: &Rc<Self>, message_id: i32, success: bool, result: &[u8]) {
+            let was_load = self.inner.borrow().pending.get(&message_id) == Some(&Request::Load);
+            self.handle_result(message_id, success, result);
+            if was_load {
+                // Answered or failed, the load is over: an answer it never
+                // used must not settle the next file dialog of any page.
+                self.delegate.clear_dialog_answer();
+                self.inner.borrow_mut().loading = false;
+                self.next_load();
+            }
+        }
+
+        fn handle_result(self: &Rc<Self>, message_id: i32, success: bool, result: &[u8]) {
             let Some(request) = self.inner.borrow_mut().pending.remove(&message_id) else {
                 return;
             };
@@ -657,6 +1148,22 @@ mod native {
                             {
                                 log::warn!("cannot delete {}: {e}", dir.display());
                             }
+                            // So is the profile's copy of a folder the user loaded.
+                            let copy = self
+                                .inner
+                                .borrow()
+                                .known
+                                .iter()
+                                .find(|known| known.id == id)
+                                .map(|known| known.path.clone());
+                            if let Some(copy) = copy
+                                && copy != self.store_dir
+                                && copy.starts_with(&self.store_dir)
+                                && copy.is_dir()
+                                && let Err(e) = std::fs::remove_dir_all(&copy)
+                            {
+                                log::warn!("cannot delete {}: {e}", copy.display());
+                            }
                         }
                     }
                     self.list();
@@ -664,10 +1171,31 @@ mod native {
             }
         }
 
+        /// Whether a scripted run's hold (`hold_list`) is on: the listing is
+        /// then not read, so sync sees no change while the hold lasts.
+        #[cfg(feature = "test-hooks")]
+        fn list_is_held(&self) -> bool {
+            let mut inner = self.inner.borrow_mut();
+            let held = inner
+                .hooks
+                .list_hold
+                .is_some_and(|until| Instant::now() < until);
+            if held && !std::mem::replace(&mut inner.hooks.list_held, true) {
+                log::info!("TEST HOOK: an extension list read is held until the hold ends");
+            }
+            held
+        }
+
         /// The current list: remember the popups, report the model's view.
         fn on_list(&self, items: &[serde_json::Value]) {
+            #[cfg(feature = "test-hooks")]
+            if self.list_is_held() {
+                return;
+            }
             let mut known = Vec::new();
             let mut extensions = Vec::new();
+            let mut helper_loaded = false;
+            let mut granted: Vec<(String, Grants, bool)> = Vec::new();
             for item in items {
                 let text = |key: &str| {
                     item.get(key)
@@ -683,6 +1211,10 @@ mod native {
                 if id.is_empty() {
                     continue;
                 }
+                if id == bridge::install::HELPER_ID {
+                    helper_loaded = true;
+                    continue;
+                }
                 let path = text("path");
                 let manifest = if path.is_empty() {
                     ManifestInfo::default()
@@ -690,21 +1222,95 @@ mod native {
                     read_manifest(Path::new(&path))
                 };
                 let name = text("name");
+                let dir = PathBuf::from(&path);
+                let enabled = text("state") == "ENABLED";
+                if text("location") == "UNPACKED" && !path.is_empty() {
+                    let first_look = self.inner.borrow_mut().checked.insert(id.clone());
+                    if !dir.starts_with(&self.store_dir) {
+                        // Loaded by an earlier build from the user's own folder,
+                        // which is never written to: run it from a copy instead.
+                        // The original stays until its copy is made and listed
+                        // (`bridge::migrate`), and is switched off if the copy
+                        // cannot be made.
+                        if first_look {
+                            let source = dir.display().to_string();
+                            self.inner
+                                .borrow_mut()
+                                .migrations
+                                .start(&source, &id, enabled);
+                            // Off while its copy is made and listed: the original runs
+                            // unbridged, with Chromium's own tab functions, until then.
+                            // It stays off afterwards: the engine cannot remove it.
+                            if enabled {
+                                self.set_enabled(&id, false);
+                            }
+                            self.load_bridged(dir);
+                        }
+                        continue;
+                    }
+                    let settled = self.inner.borrow_mut().migrations.listed(&dir);
+                    if let Some(on) = settled {
+                        // The copy takes the state the user left the original in.
+                        if enabled != on {
+                            self.set_enabled(&id, on);
+                        }
+                    }
+                    if first_look {
+                        match bridge_into(&dir) {
+                            Ok(true) => {
+                                log::info!("put the bridge into extension {id}; reloading it");
+                                self.run(
+                                    RELOAD_SCRIPT.replace("__ID__", &js_string(&id)),
+                                    Request::Enable,
+                                );
+                            }
+                            Ok(false) => {}
+                            // An extension that cannot carry the bridge must not
+                            // run: two of Chromium's own tab functions crash the
+                            // browser.
+                            Err(e) => {
+                                self.report_error(format!(
+                                    "{name} was switched off: the bridge could not be put into it ({e})"
+                                ));
+                                if enabled {
+                                    self.set_enabled(&id, false);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                }
+                let bridged = manifest
+                    .facts
+                    .worker
+                    .as_deref()
+                    .is_some_and(bridge::rewrite::is_loader);
+                // Every enabled extension is served, with or without a
+                // worker: store.rs bridges each extension page, and the
+                // worker (the loader) is the only thing woken.
+                if enabled {
+                    granted.push((id.clone(), manifest.grants.clone(), bridged));
+                }
+                let action = manifest.facts.action.as_ref();
                 known.push(Known {
                     id: id.clone(),
-                    popup: manifest.popup.clone(),
+                    popup: action.and_then(|a| a.popup.clone()),
+                    bridged,
+                    enabled,
+                    path: dir,
                 });
                 extensions.push(Extension {
                     id,
                     name: name.clone(),
                     version: text("version"),
                     description: text("description"),
-                    enabled: text("state") == "ENABLED",
+                    enabled,
                     icon: manifest.icon,
-                    action_title: manifest
-                        .popup
-                        .is_some()
-                        .then(|| manifest.action_title.unwrap_or(name)),
+                    // Any toolbar action has a title, with or without a
+                    // popup: the host decides what a click does.
+                    action_title: action.map(|a| a.title.clone().unwrap_or(name)),
+                    side_panel: false,
+                    commands: Vec::new(),
                 });
             }
             log::info!(
@@ -721,7 +1327,28 @@ mod native {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
-            self.inner.borrow_mut().known = known;
+            let bridged: Vec<String> = known
+                .iter()
+                .filter(|k| k.bridged && k.enabled)
+                .map(|k| k.id.clone())
+                .collect();
+            // The helper and its hidden page are needed only while a
+            // bridged extension is on: nothing else talks to them.
+            let load_helper = {
+                let mut inner = self.inner.borrow_mut();
+                inner.known = known;
+                !bridged.is_empty()
+                    && !helper_loaded
+                    && !std::mem::replace(&mut inner.helper_requested, true)
+            };
+            if load_helper {
+                log::info!("loading the helper extension");
+                self.load_unpacked(self.store_dir.join("nautilus-helper"));
+            }
+            self.bridge.sync(helper_loaded, &bridged);
+            if let Some(hub) = self.delegate.hub() {
+                hub.set_extensions(granted);
+            }
             self.delegate
                 .push(EngineEvent::ExtensionsChanged(extensions));
         }
@@ -730,6 +1357,26 @@ mod native {
     /// A JavaScript string literal.
     fn js_string(text: &str) -> String {
         serde_json::Value::String(text.to_string()).to_string()
+    }
+
+    /// Reload an extension after its files changed on disk.
+    const RELOAD_SCRIPT: &str = r#"new Promise(function(done){
+  chrome.developerPrivate.reload(__ID__, {failQuietly:true}, function(){
+    var err = chrome.runtime.lastError;
+    done({error: err ? err.message : null});
+  });
+})"#;
+
+    /// Put the bridge into `dir` if it is not there at the current version
+    /// (`install::ensure_bridged`: the marker names the version of the bridge
+    /// script). Returns whether the directory changed. A directory without a
+    /// worker is marked too, so it is not looked at again until the script
+    /// changes.
+    fn bridge_into(dir: &Path) -> Result<bool, String> {
+        let script = crate::bridge::worker_script();
+        bridge::install::ensure_bridged(dir, &bridge::install::version_of(&script), |at| {
+            bridge::install::rewrite_in_place(at, &[]).map(|_| ())
+        })
     }
 
     /// Unpack a store CRX into `dir` (replacing what is there) and write
@@ -763,19 +1410,22 @@ mod native {
         );
         let text = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
         std::fs::write(&manifest_path, text).map_err(|e| format!("writing the manifest: {e}"))?;
+        // The bridge goes in before Chromium ever loads the directory.
+        bridge_into(dir)?;
         Ok(())
     }
 
     /// What the manifest adds to the listing.
     #[derive(Default)]
     struct ManifestInfo {
-        popup: Option<String>,
-        action_title: Option<String>,
+        facts: super::ManifestFacts,
         icon: Option<Favicon>,
+        /// What the bridge lets the extension's contexts see.
+        grants: Grants,
     }
 
-    /// The action and icon from an extension's `manifest.json`. Anything
-    /// missing or unreadable is simply absent.
+    /// The manifest's facts and the decoded icon of the extension in
+    /// `dir`. Anything missing or unreadable is simply absent.
     fn read_manifest(dir: &Path) -> ManifestInfo {
         let Ok(text) = std::fs::read_to_string(dir.join("manifest.json")) else {
             return ManifestInfo::default();
@@ -783,47 +1433,16 @@ mod native {
         let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
             return ManifestInfo::default();
         };
-        let action = ["action", "browser_action", "page_action"]
-            .iter()
-            .find_map(|key| manifest.get(*key))
-            .filter(|a| a.is_object());
-        let string = |v: Option<&serde_json::Value>| {
-            v.and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        };
-        let popup = string(action.and_then(|a| a.get("default_popup")));
-        // A localised title is a `__MSG_name__` key; the name serves then.
-        let action_title = string(action.and_then(|a| a.get("default_title")))
-            .filter(|t| !t.starts_with("__MSG_"));
-        let icon_path = largest_icon(manifest.get("icons"))
-            .or_else(|| largest_icon(action.and_then(|a| a.get("default_icon"))))
-            .or_else(|| string(action.and_then(|a| a.get("default_icon"))));
-        let icon = icon_path.and_then(|p| decode_png(&dir.join(p.trim_start_matches('/'))));
+        let facts = super::manifest_facts(&manifest, super::KeyPlatform::CURRENT);
+        let icon = facts
+            .icon_path
+            .as_deref()
+            .and_then(|p| decode_png(&dir.join(p.trim_start_matches('/'))));
         ManifestInfo {
-            popup,
-            action_title,
+            facts,
             icon,
+            grants: Grants::from_manifest(&manifest),
         }
-    }
-
-    /// The path of the largest icon of a `{"16": "a.png", ...}` map that
-    /// is no bigger than 128 (bigger ones are splash art), or the
-    /// largest of all otherwise.
-    fn largest_icon(icons: Option<&serde_json::Value>) -> Option<String> {
-        let map = icons?.as_object()?;
-        let mut sizes: Vec<(u32, &str)> = map
-            .iter()
-            .filter_map(|(size, path)| Some((size.parse().ok()?, path.as_str()?)))
-            .collect();
-        sizes.sort_unstable();
-        sizes
-            .iter()
-            .rev()
-            .find(|(size, _)| *size <= 128)
-            .or(sizes.last())
-            .map(|(_, path)| path.to_string())
     }
 
     /// Decode a PNG file to straight RGBA8, whatever its colour type.
@@ -1026,6 +1645,23 @@ mod native {
         }
 
         impl DevToolsMessageObserver {
+            // Every message, for a scripted run's log (a build with the
+            // `test-hooks` feature). 0: not handled, so the method results
+            // and events are still delivered.
+            fn on_dev_tools_message(
+                &self,
+                _browser: Option<&mut Browser>,
+                message: Option<&[u8]>,
+            ) -> ::std::os::raw::c_int {
+                #[cfg(feature = "test-hooks")]
+                if let Some(message) = message {
+                    self.manager.control_log(message);
+                }
+                #[cfg(not(feature = "test-hooks"))]
+                let _ = message;
+                0
+            }
+
             fn on_dev_tools_method_result(
                 &self,
                 _browser: Option<&mut Browser>,
@@ -1050,7 +1686,7 @@ mod native {
                     .and_then(|paths| paths.clone().into_iter().next())
                     .filter(|path| !path.is_empty());
                 if let Some(path) = picked {
-                    self.manager.load_unpacked(PathBuf::from(path));
+                    self.manager.load_bridged(PathBuf::from(path));
                 }
             }
         }
@@ -1111,10 +1747,127 @@ mod native {
         }
     }
 }
+
 #[cfg(test)]
 mod tests {
-    use super::web_store_item_id;
+    use super::{CommandFacts, KeyPlatform, manifest_facts, web_store_item_id};
     use url::Url;
+
+    fn facts(json: &str, platform: KeyPlatform) -> super::ManifestFacts {
+        manifest_facts(&serde_json::from_str(json).unwrap(), platform)
+    }
+
+    #[test]
+    fn an_action_without_a_popup_is_still_an_action() {
+        let f = facts(
+            r#"{"action": {"default_title": " Open panel "}}"#,
+            KeyPlatform::Mac,
+        );
+        let action = f.action.unwrap();
+        assert_eq!(action.popup, None);
+        assert_eq!(action.title.as_deref(), Some("Open panel"));
+        // An empty action object is an action too; no key at all is none.
+        assert!(
+            facts(r#"{"action": {}}"#, KeyPlatform::Mac)
+                .action
+                .is_some()
+        );
+        assert!(facts(r#"{"name": "x"}"#, KeyPlatform::Mac).action.is_none());
+        assert!(
+            facts(r#"{"action": "yes"}"#, KeyPlatform::Mac)
+                .action
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_older_action_keys_and_a_localised_title_are_read_as_before() {
+        let f = facts(
+            r#"{"browser_action": {"default_popup": "/p.html", "default_title": "__MSG_title__"}}"#,
+            KeyPlatform::Windows,
+        );
+        let action = f.action.unwrap();
+        assert_eq!(action.popup.as_deref(), Some("/p.html"));
+        assert_eq!(action.title, None);
+        assert!(
+            facts(r#"{"page_action": {}}"#, KeyPlatform::Mac)
+                .action
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_icon_is_the_largest_up_to_128_then_the_actions() {
+        let f = facts(
+            r#"{"icons": {"16": "a.png", "128": "b.png", "512": "c.png"}}"#,
+            KeyPlatform::Mac,
+        );
+        assert_eq!(f.icon_path.as_deref(), Some("b.png"));
+        let f = facts(
+            r#"{"action": {"default_icon": {"32": "d.png"}}}"#,
+            KeyPlatform::Mac,
+        );
+        assert_eq!(f.icon_path.as_deref(), Some("d.png"));
+        let f = facts(r#"{"action": {"default_icon": "e.png"}}"#, KeyPlatform::Mac);
+        assert_eq!(f.icon_path.as_deref(), Some("e.png"));
+    }
+
+    #[test]
+    fn the_worker_entry_and_its_kind_are_read() {
+        let f = facts(
+            r#"{"background": {"service_worker": "bg/sw.js", "type": "module"}}"#,
+            KeyPlatform::Mac,
+        );
+        assert_eq!(f.worker.as_deref(), Some("bg/sw.js"));
+        assert!(f.module_worker);
+        let f = facts(
+            r#"{"background": {"service_worker": "sw.js"}}"#,
+            KeyPlatform::Mac,
+        );
+        assert!(!f.module_worker);
+        // A Manifest V2 background page is no worker.
+        let f = facts(r#"{"background": {"scripts": ["a.js"]}}"#, KeyPlatform::Mac);
+        assert_eq!(f.worker, None);
+    }
+
+    #[test]
+    fn the_side_panel_and_the_commands_are_read_with_this_platforms_key() {
+        let json = r#"{
+            "side_panel": {"default_path": "panel.html"},
+            "commands": {
+                "toggle": {
+                    "suggested_key": {"default": "Ctrl+E", "mac": "Command+E"},
+                    "description": "Toggle the panel"
+                },
+                "_execute_action": {"suggested_key": {"default": "Ctrl+Shift+U"}},
+                "bare": {}
+            }
+        }"#;
+        let mac = facts(json, KeyPlatform::Mac);
+        assert_eq!(mac.side_panel.as_deref(), Some("panel.html"));
+        assert_eq!(
+            mac.commands,
+            vec![
+                CommandFacts {
+                    name: "_execute_action".to_string(),
+                    description: String::new(),
+                    suggested_key: Some("Ctrl+Shift+U".to_string()),
+                },
+                CommandFacts {
+                    name: "bare".to_string(),
+                    description: String::new(),
+                    suggested_key: None,
+                },
+                CommandFacts {
+                    name: "toggle".to_string(),
+                    description: "Toggle the panel".to_string(),
+                    suggested_key: Some("Command+E".to_string()),
+                },
+            ]
+        );
+        let windows = facts(json, KeyPlatform::Windows);
+        assert_eq!(windows.commands[2].suggested_key.as_deref(), Some("Ctrl+E"));
+    }
 
     #[test]
     fn store_item_pages_yield_the_id() {

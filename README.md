@@ -207,6 +207,62 @@ belongs to one running Nautilus at a time.
   and routing tests live in osmena.
 - `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo fmt --all --check` — what CI runs.
+- `ci/side-panel/run.sh spike` (macOS, needs the bundle built with
+  `cargo xtask bundle-mac --features test-hooks`) — the scripted
+  run of the extension bridge: installs a test extension through the
+  bridge's rewrite on a throwaway profile, restarts, and checks the
+  bridge in its worker, an action click (sent through the test control,
+  not the toolbar's button) delivered once to a stopped worker,
+  `chrome.tabs.query` and the ids it returns, and that no extension call
+  takes a second with the window unfocused. `pump` runs the last part
+  alone. `reload` (I10) makes the worker attach a debugger to the background
+  tab and reload the extension; `zombie` does the same with the extension
+  list held during the reload, so that only the worker-target check can see
+  it; `stop` stops the worker over DevTools while it holds that debugger and
+  checks that nothing starts it for 90 s; `idle` holds a debugger until the
+  worker is idle (or stops it when it does not idle within 120 s) and checks
+  the same; `broken` (I11, I14) replaces the stored relay page with one that
+  has no relay, closes the relay, and checks that the give-up keeps a
+  debugged tab shown. Judge each by its exit status,
+  not through a pipe: a browser launch that exits non-zero or by a signal,
+  is still up 120 s after its `--exit-after`, or logs a panic, a fatal
+  runtime error, a RefCell borrowed twice ("already borrowed" or "already
+  mutably borrowed"), or browsers still open at shutdown fails the run.
+- `python3 ci/side-panel/phase5.py` (macOS, needs the same bundle, about
+  five minutes; judge it by its exit status, not through a pipe) — the
+  scripted run of `chrome.tabs` and `chrome.windows` over the bridge. Its
+  test extension (`ci/side-panel/ext/phase5.js`) listens for the tab and
+  window events and runs the `main` suite (the query, the create, activate,
+  move, id-addressed calls, the failed-closed methods, the events, an
+  extension page opened as a tab, `windows.create`) and the `restore` suite
+  (a deferred tab's first show). The owner's own Nautilus may run beside it:
+  its windows are not counted. **Status:** on 2026-11-19, on the review-1 build
+  (`31a7dd7`), three passes of `phase5.py` each exit 0 with 72 checks passing
+  and none failing, and every regression mode exits 0 (`spike` 54 checks,
+  `pump` 7, `reload` 7, `zombie` 21, `stop` 17, `idle` 9, `broken` 14, none
+  failing). The browser no longer traps, the extension page is bridged and its
+  calls are held for their tab and extension, the restored worker's first call
+  is sent again once a relay listens, and an extension page reports its own tab
+  id, so `sender.tab` carries the strip's fields. The relay page's port is
+  adopted although the engine hosts that page in a tab. The status is described
+  in `docs/bridge-protocol.md`, "The scripted run (phase5.py)".
+- **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
+  browser read commands from the named directory: `load` an unpacked
+  extension, `click` an action, send a raw DevTools message on the
+  management browser's browser-wide channel (its answers go to
+  `devtools.log`, which records that browser's DevTools traffic), and
+  `table`. The hook exists only in a build with the `test-hooks` cargo
+  feature (`cargo xtask bundle-mac --features test-hooks`; no packaged
+  build has it, nor `NAUTILUS_TEST_PAGE_SCRIPT`, `NAUTILUS_PUMP_LOG` or
+  `NAUTILUS_PUMP_TICK_MS`) and is powerful while
+  set, so use it only on a directory only you can write (on Unix the
+  engine refuses one owned by another user or writable by its group or
+  others, with a warning, and the hook stays off). On Windows the
+  directory must lie inside your profile folder (`%USERPROFILE%`; `%TEMP%`
+  is normally inside it): the path is canonicalised and compared by name, part by
+  part and case-insensitively, so `C:\Users\you2` is not inside
+  `C:\Users\you`; a directory elsewhere, or one that cannot be found, is
+  refused the same way. Never set it on a browser you use.
 
 ## Manual checklist
 
@@ -633,10 +689,56 @@ Upstream causes and the features they block are tracked in
   Mac has been tried by hand.
 - Extensions: an action popup on macOS is a borderless child window of
   the browser window (`popup.rs`); it was built from the Windows
-  behaviour and not yet clicked by hand. Extension popups see Chromium's own tabs,
-  not Nautilus's: `chrome.tabs.query({active: true})` finds the hidden
-  management page, so a popup that acts on "the current tab" acts on
-  nothing. An action without a popup cannot be clicked. The Web Store
+  behaviour and not yet clicked by hand.
+  Extensions see Nautilus's tabs and windows through a bridge that
+  replaces `chrome.tabs` and `chrome.windows`: pinning, muting state,
+  window bounds and focus changes asked for by an extension are not
+  carried out, `windows.create` always opens an ordinary window, a tab
+  cannot be moved between windows, and `tabs.group` rejects until tab
+  groups arrive. A page's address and title are given only to an
+  extension whose manifest has the `tabs` permission or a matching host
+  permission (`activeTab` and optional permissions are not counted; in
+  Manifest V3 a host pattern counts only under `host_permissions`). A host
+  pattern never grants a file page; an extension with the `tabs` permission is
+  given a file tab's address and title, as in Chrome.
+  `captureVisibleTab` captures only a web page (`http`, `https`, `ftp`,
+  `data`) or the extension's own pages.
+  An unpacked extension runs from a copy in the profile; load the
+  folder again to pick up edits. An unpacked extension that an earlier build
+  loaded from your own folder moves into such a copy, which takes the original's
+  on or off state. One without a `key` gets a new id: the original stays in
+  the list, switched off, and must be removed by hand (Chromium refuses the
+  engine's removal, which needs a user gesture); its stored data stays with its
+  old id. An extension whose bridge cannot be put in is switched off, with a
+  message.
+  A click on an action with no popup reaches the extension's worker
+  through the bridge. An extension with a service worker has the worker
+  bridged (store installs, "Load unpacked…" and the test control alike), and
+  every enabled extension's pages (popup, options page, a page shown as a tab)
+  are bridged on their own lane, with or without a worker, so a page's
+  `chrome.tabs` calls are answered like a worker's. An extension page's
+  `iframe`s have no `chrome.tabs`. The relay page and the helper's pages are
+  not bridged. A tab an extension is
+  debugging is kept painted, for any extension whose worker is bridged; a background tab nothing
+  reported as debugged is hidden, so DevTools ("Inspect") on a background
+  tab is slow until it is shown. A debugged tab is hidden again when its
+  extension is reloaded and the browser sees its session end (measured
+  with the test extension, `run.sh reload`, and with the extension's list
+  held, `run.sh zombie`, where the worker target shows the reload); a
+  bridge page that will not load is given up after five openings: its
+  extension's clicks are refused until the extension changes, and its
+  debuggers are kept (the browser forgets a debugger only on the worker's
+  own word, or when the extension is off or its tab closes). A debugger
+  called from an extension page (popup, options, side panel) is not reported
+  (see `docs/bridge-protocol.md`, "Limits in protocol 1"). A symlink in an
+  unpacked extension is not copied: it is skipped with a warning that
+  names it, and a worker entry that is a link or missing fails the load.
+  Dot-files and dot-directories (`.git`, `.DS_Store`) are not copied
+  either; a worker entry under one fails the load with a message saying so.
+  The bridge builds on Windows but has not run there; the test control's
+  Unix owner-and-mode rule and its Windows profile-folder rule are not run
+  there either.
+  The Web Store
   may show "Switch to Chrome" instead of an install button (install
   through the puzzle menu or Settings then); when it shows "Add to
   Chrome", the button installs through Nautilus but the page reports
