@@ -40,6 +40,14 @@ PROFILE = "side-panel-p5"
 PROFILE_DIR = Path.home() / "Library/Application Support/Nautilus/profiles" / PROFILE
 PORT = 47615
 SYNTHETIC_BASE = 2_000_000_000
+INT32_MAX = 2**31 - 1
+
+
+def live_chromium_tab(tab):
+    """A tab Chromium holds live: its id is a positive 32-bit session id (which
+    may be above SYNTHETIC_BASE: Chromium starts its ids at random), and it is
+    not a deferred tab, whose id the engine made up (it is unloaded)."""
+    return 0 < tab["id"] <= INT32_MAX and not tab.get("discarded") and tab.get("status") != "unloaded"
 GRACE = 120  # as run.sh's allow: a launch still up this long after its --exit-after is killed
 MARKERS = ("panicked at", "fatal runtime error", "already borrowed",
            "already mutably borrowed", "browser(s) still open at shutdown")
@@ -271,6 +279,13 @@ def judge_main(code, log, samples):
     check("main: the browser exited cleanly", code == 0, f"exit {code}")
     check("main: the suite finished", done("main"), str(of_kind("done")))
     s = steps()
+    # A message from an isolated-world sender that no listener answers settles at
+    # once, with Chromium's undefined answer (measured on the bundle; the
+    # expectation is that measurement, see docs/bridge-protocol.md).
+    content = value(s, "content-silent")
+    if content is not None:
+        check("N3 a message to a silent listener settles promptly, with no answer",
+              content["outcome"] == "answered" and content["detail"] is None and content["ms"] < 1000, str(content))
 
     tabs = value(s, "query-all")
     if tabs:
@@ -283,7 +298,7 @@ def judge_main(code, log, samples):
         check("AC3.1 active, windowId and groupId match the model",
               sum(t["active"] for t in tabs) == 1 and window >= 1
               and all(t["windowId"] == window and t["groupId"] == -1 for t in tabs), str(tabs))
-        check("AC3.4 the ids are Chromium's", all(0 < i < SYNTHETIC_BASE for i in ids) and len(set(ids)) == len(ids), str(ids))
+        check("AC3.4 the ids are Chromium's", all(live_chromium_tab(t) for t in tabs) and len(set(ids)) == len(ids), str(ids))
         active = value(s, "query-active-current")
         if active is not None:
             check("AC3.1 {active, currentWindow} is the window's active tab",
@@ -317,7 +332,7 @@ def judge_main(code, log, samples):
         check("AC3.3 create resolves with the tab that exists afterwards",
               created["got"]["id"] == new and created["last"]["id"] == new
               and created["count"] == len(tabs) + 1 and created["tab"]["index"] == len(tabs)
-              and created["tab"]["active"] is False and 0 < new < SYNTHETIC_BASE, str(created))
+              and created["tab"]["active"] is False and live_chromium_tab(created["tab"]), str(created))
         check("AC3.2 onCreated fired for it",
               any(a[0]["id"] == new for a in events_named(events, "tabs.onCreated")), str(events_named(events, "tabs.onCreated")))
         check("AC3.2 onUpdated reported its load",
@@ -417,7 +432,8 @@ def judge_restore(code, log):
     if shown:
         check("AC3.6 it gets Chromium's id when first shown, announced by onReplaced",
               shown["replaced"] == [shown["shown"]["id"], shown["was"]["id"]]
-              and 0 < shown["shown"]["id"] < SYNTHETIC_BASE and shown["shown"]["active"] is True, str(shown))
+              and live_chromium_tab(shown["shown"]) and shown["was"]["status"] == "unloaded"
+              and shown["shown"]["active"] is True, str(shown))
         check("AC3.6 the new id works in Chromium and the old one still resolves",
               shown["href"] == shown["was"]["url"] and shown["byOld"]["id"] == shown["shown"]["id"], str(shown))
     check("restore: Chromium opened no browser of its own", "on its own; moving it to a tab" not in log, "StrayClient's line")

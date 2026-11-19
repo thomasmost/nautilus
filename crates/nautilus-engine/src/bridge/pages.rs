@@ -28,7 +28,6 @@ use url::Url;
 use osmena_core::TabId;
 
 use super::hub::Lane;
-use super::ids::SYNTHETIC_BASE;
 use super::install::HELPER_ID;
 use super::relay::RELAY_PATH;
 use super::transport::{Asker, BridgeCall, CallId};
@@ -76,7 +75,9 @@ pub(crate) fn extension_of(url: &str) -> Option<String> {
 pub(crate) const REPORT_MESSAGE: &str = "nautilus-bridge-tab";
 
 /// The Chromium tab id a page reports: an object whose only key is `tab`,
-/// holding a positive integer below `SYNTHETIC_BASE`.
+/// holding a positive 32-bit integer. Chromium's ids are session ids from a
+/// random start, so they may lie above `SYNTHETIC_BASE`; a value that a live
+/// tab holds (a synthetic id included) is refused by `TabTable::report`.
 pub(crate) fn report_of(text: &str) -> Option<i64> {
     let value: Value = serde_json::from_str(text).ok()?;
     let object = value.as_object()?;
@@ -84,7 +85,7 @@ pub(crate) fn report_of(text: &str) -> Option<i64> {
         return None;
     }
     let tab = object.get("tab")?.as_i64()?;
-    (0 < tab && tab < SYNTHETIC_BASE).then_some(tab)
+    (0 < tab && tab <= i32::MAX as i64).then_some(tab)
 }
 
 /// Whether a report may come from a frame, and for which view and extension:
@@ -705,12 +706,16 @@ mod report_tests {
     }
 
     #[test]
-    fn a_report_is_an_object_with_only_a_positive_tab_id_below_the_synthetic_range() {
+    fn a_report_is_an_object_with_only_a_positive_chromium_tab_id() {
         assert_eq!(report_of(r#"{"tab":5}"#), Some(5));
         assert_eq!(report_of(r#"{"tab":1999999999}"#), Some(1_999_999_999));
+        // Chromium's session ids run up to the 32-bit range, above the synthetic base.
+        assert_eq!(report_of(r#"{"tab":2000000000}"#), Some(2_000_000_000));
+        assert_eq!(report_of(r#"{"tab":2116615708}"#), Some(2_116_615_708));
+        assert_eq!(report_of(r#"{"tab":2147483647}"#), Some(2_147_483_647));
+        assert_eq!(report_of(r#"{"tab":2147483648}"#), None);
         assert_eq!(report_of(r#"{"tab":0}"#), None);
         assert_eq!(report_of(r#"{"tab":-3}"#), None);
-        assert_eq!(report_of(r#"{"tab":2000000000}"#), None);
         assert_eq!(report_of(r#"{"tab":"5"}"#), None);
         assert_eq!(report_of(r#"{"tab":5.5}"#), None);
         assert_eq!(report_of(r#"{"tab":5,"view":7}"#), None, "only the id");
