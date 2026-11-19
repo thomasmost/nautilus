@@ -681,14 +681,17 @@ fn capture(call: &BridgeCall, view: &View) -> Result<Outcome, String> {
 
 /// Whether `captureVisibleTab` may read the page at `url` for `extension`:
 /// the web's schemes, and the extension's own pages. Browser pages, other
-/// extensions' pages and files are refused (this browser grants no file
-/// access, so a file page is never readable).
+/// extensions' pages, the Chrome Web Store and files are refused (this
+/// browser grants no file access, so a file page is never readable).
 fn capturable(url: &str, extension: &str) -> Result<(), String> {
     let refused =
         || format!("Cannot capture the tab: its page ({url}) is not one an extension may capture.");
     let Ok(parsed) = Url::parse(url) else {
         return Err(refused());
     };
+    if crate::store::is_web_store(&parsed) {
+        return Err(refused());
+    }
     match parsed.scheme() {
         "http" | "https" | "ftp" | "data" => Ok(()),
         "chrome-extension" if parsed.host_str() == Some(extension) => Ok(()),
@@ -1896,7 +1899,16 @@ mod tests {
             ("http://a.example/", true),
             ("ftp://a.example/", true),
             ("data:text/html,hi", true),
+            ("https://chrome.google.com/other", true),
+            ("https://example.com/webstore", true),
             (own.as_str(), true),
+            // Chrome refuses the Web Store, on both of its hosts.
+            (
+                "https://chromewebstore.google.com/detail/x/abcdefghijklmnopabcdefghijklmnop",
+                false,
+            ),
+            ("https://chromewebstore.google.com/", false),
+            ("https://chrome.google.com/webstore/detail/x/abc", false),
             ("chrome://settings/", false),
             ("chrome-untrusted://terminal/", false),
             ("devtools://devtools/bundled/devtools_app.html", false),
