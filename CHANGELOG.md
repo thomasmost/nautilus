@@ -68,6 +68,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- The icon at the left end of the Launch Panel's field says what Enter
+  will open (osmena): the site's own favicon for a page, a magnifier
+  for a search, sparkles for a question.
 - The Launch Panel's field asks as well as searches (osmena): tap
   Shift twice and the field's text becomes a question, opened by
   Enter in Claude or ChatGPT, whichever the Launch Settings' new
