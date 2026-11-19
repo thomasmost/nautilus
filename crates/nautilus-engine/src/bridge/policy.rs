@@ -4,7 +4,7 @@
 //! outcome means for another attempt. `Bridge` in `relay.rs` carries them
 //! out, and the tests here pin them down.
 //!
-//! The rule for a debugger (review cycle 4): uncertainty never forgets. A
+//! The rule for a debugger: uncertainty never forgets. A
 //! tracked debugger is forgotten only on positive evidence (`Evidence`); a
 //! timeout, a failed evaluation, an unreachable worker or a relay that is
 //! given up on closes the relay and keeps the debugger.

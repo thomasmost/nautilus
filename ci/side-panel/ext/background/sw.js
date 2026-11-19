@@ -4,7 +4,7 @@ importScripts('lib.js'); // relative: resolves beside the worker's own script
 const RUN = Math.random().toString(36).slice(2, 8); // one per worker start
 const ROUNDS = 40;
 
-// M8: what the bridge's wrapping of onConnect answers, probed before this
+// What the bridge's wrapping of onConnect answers, probed before this
 // worker adds any listener of its own (the bridge's own listener must not
 // count, and a spy added and removed must come and go).
 (function probeListeners() {

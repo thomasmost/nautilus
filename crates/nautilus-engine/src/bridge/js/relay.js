@@ -83,7 +83,7 @@
   }
 
   // Whether this page's extension context is still alive: after a reload its
-  // chrome.runtime.id is undefined (measured: review cycle 4 zombie runs).
+  // chrome.runtime.id is undefined (measured in a zombie page).
   function contextAlive() {
     try { return !!(chrome.runtime && chrome.runtime.id); } catch (e) { return false; }
   }

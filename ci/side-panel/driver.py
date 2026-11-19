@@ -108,7 +108,7 @@ def wait_file(path, secs):
 
 
 def check(name, ok, detail=''):
-    """One PASS or FAIL line. The detail is printed on a FAIL only (M17): a
+    """One PASS or FAIL line. The detail is printed on a FAIL only: a
     PASS that carries its detail reads as evidence it is not."""
     if ok:
         print('PASS ' + name, flush=True)
@@ -475,7 +475,7 @@ def reload_provocation(ext, zombie=False):
     tab for the attach; after the reload, with no debugger left on it, the tab
     must be hidden again. Whatever the engine logs is kept in run-1.log.
 
-    `zombie` (I10 (b)): the extension list is held for HOLD_SECONDS from the
+    `zombie`: the extension list is held for HOLD_SECONDS from the
     attach, so no list read during the reload can show the extension off. The
     only way the engine can then see the reload is the worker target, and the
     run requires that path: the detector's line, the relay opened again, the
@@ -548,7 +548,7 @@ def reload_provocation(ext, zombie=False):
     # The tab is hidden again when the engine logs "hidden again", on the last
     # debugger's detach or when it forgets the extension's debuggers (by the
     # list, `sync`, or by a hello that says the session is not attached,
-    # `hello`). M20: "has no debugger left" alone does not say the tab was hidden;
+    # `hello`). "has no debugger left" alone does not say the tab was hidden;
     # only the "hidden again" line does (logged when set_tab_debugged hid it).
     hidden_again = 'bridge: TabId(%s) (Chromium tab %s) hidden again: no debugger is left on it' % (tab, chromium)
     hidden = any(hidden_again in line for line in after)
@@ -617,7 +617,7 @@ def zombie_checks(after, start, tab, chromium, lines_at_reload):
     forgot = first_index(log_all, '%s has no debugger left (%s, its worker says' % ('TabId(%s)' % tab, ext_id), at)
     check('zombie: the hello said the tab has no session, and the engine forgot its debugger', forgot >= 0,
           'no "its worker says" line for TabId(%s) after the detector' % tab)
-    # M20: the line the detach path logs when it hides the tab (set_tab_debugged
+    # The line the detach path logs when it hides the tab (set_tab_debugged
     # said it was behind another tab). "has no debugger left" alone is not it.
     hidden = first_index(log_all, 'bridge: TabId(%s) (Chromium tab %s) hidden again' % (tab, chromium), at)
     check('zombie: the tab is hidden again (its "hidden again" line)', hidden >= 0,
@@ -653,7 +653,7 @@ def idle_provocation(ext):
     check('idle: the engine showed the tab for the attach', bool(shown), None if shown else 'no shown line')
     tab_name = re.search(r'TabId\((\d+)\)', shown[-1]).group(0) if shown else 'TabId(?)'
     # Chromium's own idle stop first: wait for it up to 120 s. A run of the
-    # first build of this cycle showed no idle stop with the debugger held (the
+    # an earlier build showed no idle stop with the debugger held (the
     # worker stayed listed for 240 s), so when none comes the worker is stopped
     # by DevTools, the stop the `stop` mode uses. Either way the window below
     # starts at a seen stop, and it is the engine's behaviour in it that is judged.
@@ -780,7 +780,7 @@ def started_by_delivery(quiet):
     returns (every restart is explained, every identity ask is explained). A
     restart or an ask is explained only when a delivery the engine sent (an
     event the worker listens for, or a click) comes before it in the window.
-    The plan's emit contract starts a stopped worker for a delivery and for
+    The engine's emit contract starts a stopped worker for a delivery and for
     nothing else, so with no delivery in the window neither may happen."""
     first_sent = next((i for i, line in enumerate(quiet) if SENT.search(line)), None)
 
@@ -862,7 +862,7 @@ def stop_provocation(ext):
     change_checks('stop', after_lines, ext_id)
     tab_name = re.search(r'TabId\((\d+)\)', shown[-1]).group(0) if shown else 'TabId(?)'
     left = any(tab_name + ' has no debugger left' in line for line in after_lines)
-    # M20: "hidden again" is the line that says the tab was hidden.
+    # "hidden again" is the line that says the tab was hidden.
     again = any('hidden again' in line and tab_name in line for line in after_lines)
     if after.get('ok'):
         check('stop: the session survived the stop, so the engine keeps the tab painted', not left and not again)
