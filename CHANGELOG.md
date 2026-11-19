@@ -137,6 +137,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- Two fingers spread or pinched on a touchpad zoom the page, a step
+  at a time, as Ctrl (Cmd) and the wheel do (osmena). Before, the
+  gesture scrolled the page on Windows and did nothing on macOS.
 - The Launch Panel opens a typed address as typed (osmena). Typing
   `docs.rs`, or a whole URL, and pressing Enter went to the most
   visited page starting with it, often one deep inside the site; the
