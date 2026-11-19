@@ -141,8 +141,10 @@ extension's and `sender.url` is the relay page's address
 (`runtime.getURL('nautilus-bridge/relay.html')`). The engine hosts the relay
 page in a tab, so its port's sender carries a `tab`; that is not refused. The
 relay adopts only its extension's worker's port: `sender.id` is the extension's
-and `sender.url` is inside the extension (measured: the worker's
-`background/nautilus-loader.js`). A content script's port carries the web
+and `sender.url` is the address of the worker's script, which is the manifest's
+`background.service_worker` (the loader, measured as `background/nautilus-loader.js`)
+resolved with `runtime.getURL`. Another page of the extension (a popup, the options
+page) and another script of it are refused. A content script's port carries the web
 page's address, so it is refused in both places. Measured in the scripted run
 (`phase5.py`): the relay's port has a sender tab and is adopted; a check that
 refused a sender tab left the first wake undelivered.
@@ -499,21 +501,27 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   no worker is woken for it, and its pages get `chrome.tabs` and
   `chrome.windows` like a worker's.
 - A host pattern is a host permission: in Manifest V3 only `host_permissions`
-  grants one (Chrome ignores a pattern under `permissions`). `<all_urls>` and
-  every pattern leave out file pages, since this browser grants no file access.
+  grants one (Chrome ignores a pattern under `permissions`). A host pattern never grants a file page, since this browser grants no file access
+  (`pattern.rs` `grants_url`); with the `tabs` permission an extension is given a
+  file tab's address and title, and `tabs.query`'s `url` filter finds such a page
+  (`pattern.rs` `matches_url`).
 - An extension page's `iframe`s (`srcdoc`, `about:blank`) have a `chrome`
   object with no `tabs` or `windows`: measured on the bundle, with a probe page
   in a worker-less test extension, `typeof` is `undefined` for both. If an
   extension page's bridge cannot be put in, its native `tabs` and `windows`
   are replaced with namespaces that refuse every call (`page_transport.js`,
   `__nautilusRefuseNative`), so a native `tabs.group` is never called.
-- A message from a tab (`sender.tab`) is answered by this context only when one
-  of its listeners answers. A context whose listeners do not answer sends
-  nothing, so an answer from a popup or an offscreen document is the one the
-  sender gets. Chromium then closes the sender's channel with its own error when
-  no context answers, where it would give no error and an `undefined` answer.
-  That difference is the chosen trade-off: a context cannot know, before its
-  listeners run, whether another context will answer.
+- A message from a tab (`sender.tab`) is delivered synchronously, so Chromium gets
+  the answer to its keep-open question at once: the wrapper returns true only when a
+  listener of this context kept the channel open (returned true or a promise). A
+  context whose listeners do not answer sends nothing, so another context's answer
+  wins, and a message no context answers settles as Chromium settles it. The
+  `sender.tab` fields come from the context's cache (`js/runtime.js`, `strips`):
+  primed from `tabs.query` when a worker starts, and refreshed after each message
+  from the engine's `stripOf`. A tab the cache does not hold yet (a tab opened
+  since, before its first message) carries Chromium's own fields for that message
+  only (index -1); the next message from it carries the strip. This residual case
+  is the one known gap; see "Measured in review cycle 2" below.
 - `tabs.stripOf(id)` is internal (see the method table); it is not a
   `chrome.tabs` member.
 - Extension pages get the bridge (`bridge/pages.rs`): an
@@ -615,11 +623,16 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   and aside folders carry a per-process number; copies are made one at a time;
   a load removes only the leftovers with exactly its copy's staging or aside
   names (`install.rs`, `replace_dir` and `sweep_leftovers`).
-- A user's folder that an earlier build loaded (`bridge/migrate.rs`) is
-  switched off while its copy is made. It is removed once the copy is listed:
-  a keyless extension's copy has a new id, so the data stored under the old id
-  goes with it. If the copy cannot be made, the original stays switched off,
-  with a message.
+- A user's folder that an earlier build loaded (`bridge/migrate.rs`) is switched off
+  while its copy is made, and the copy takes the state the original had once it is
+  listed (`migrate::Migrations::listed`). A keyed copy keeps the id. A keyless copy
+  has a new id: the original is not removed (Chromium refuses the engine's uninstall
+  without a user gesture, and the gesture flag gave no removal; measured), so it stays
+  in the list switched off, with its data under the old id, and the user removes it.
+  If the copy cannot be made, the original stays switched off, with a message.
+  Not measured: an original the user had switched off before the copy is made (the
+  harness cannot switch it off first); `migrate.rs` has a pure test that such a copy
+  stays off.
 
 ## Phase 5 reconciliation
 
@@ -1229,3 +1242,22 @@ a namespace is added as "How a later phase adds a namespace" describes. The
 `sender.tab` decision was taken by the owner: option (a), the page's report
 (`Messages Phase 5 adds`). The release (a merge to `main`) needs the
 owner's yes; the draft pull requests are osmena #2 and nautilus #1.
+
+## Measured in review cycle 2 (Phase 5)
+
+- **Content scripts run.** On the bundle, a manifest `content_scripts` entry for
+  `http://127.0.0.1:8765/*` ran on the matching page and its `fetch` reached a local
+  server (`evidence/phase-5/review2-n6-*`, the probe in the session scratchpad). The
+  first attempt in the scripted run used an `https` page and a `fetch` to an `http`
+  address; that is the likely reason it never reported, not verified.
+- **Messages to a silent listener.** From an isolated-world sender on a tab (the
+  `content-silent` step of `phase5.py`), the wrapped worker listener settles in about
+  1 ms with an undefined answer (`evidence/phase-5/review2-n3-after-phase5-run1.txt`);
+  before the wrapper was synchronous it held the channel for the whole 5 s
+  (`review2-n3-before-phase5-run2.txt`). The unwrapped baseline could not be measured:
+  the only listener outside the bridge is the helper extension's, which has none, so the
+  expectation is this measured outcome, not a measured Chromium one.
+- **Ids.** Chromium's tab ids are session ids that can lie anywhere in the 32-bit range,
+  above the synthetic base (`2 000 000 000`). A page's report of its id is accepted for
+  any positive 32-bit value; a value a live tab already holds, synthetic ids included,
+  is refused by `TabTable::report`.

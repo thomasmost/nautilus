@@ -694,15 +694,19 @@ Upstream causes and the features they block are tracked in
   groups arrive. A page's address and title are given only to an
   extension whose manifest has the `tabs` permission or a matching host
   permission (`activeTab` and optional permissions are not counted; in
-  Manifest V3 a host pattern counts only under `host_permissions`). No file
-  page's address or title is given, since this browser grants no file access.
+  Manifest V3 a host pattern counts only under `host_permissions`). A host
+  pattern never grants a file page; an extension with the `tabs` permission is
+  given a file tab's address and title, as in Chrome.
   `captureVisibleTab` captures only a web page (`http`, `https`, `ftp`,
   `data`) or the extension's own pages.
   An unpacked extension runs from a copy in the profile; load the
   folder again to pick up edits. An unpacked extension that an earlier build
-  loaded from your own folder moves into such a copy: one without a `key` gets
-  a new id, so the data stored under its old id is removed. An extension whose
-  bridge cannot be put in is switched off, with a message.
+  loaded from your own folder moves into such a copy, which takes the original's
+  on or off state. One without a `key` gets a new id: the original stays in
+  the list, switched off, and must be removed by hand (Chromium refuses the
+  engine's removal, which needs a user gesture); its stored data stays with its
+  old id. An extension whose bridge cannot be put in is switched off, with a
+  message.
   A click on an action with no popup reaches the extension's worker
   through the bridge. An extension with a service worker has the worker
   bridged (store installs, "Load unpacked…" and the test control alike), and

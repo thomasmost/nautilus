@@ -29,20 +29,25 @@ has no releases yet; `Unreleased` holds everything on `main`.
   worker's entry is under one fails to load, with a message that says so.
 - An unpacked extension that an earlier build loaded from the user's own
   folder is moved into a copy in the profile without a gap: the original is
-  switched off while the copy is made and removed once the copy is listed. An
-  extension without a `key` gets a new id, so the data stored under its old id
-  is removed with the original, and a message says so. If the copy cannot be
-  made, the original stays switched off, with a message.
+  switched off while the copy is made, and the copy takes the state the
+  original had. An extension with a `key` keeps its id. An extension without
+  one gets a new id: the copy is listed beside the original, which stays in
+  the list switched off, and the data stored under the original's id stays
+  with it. Chromium does not let the engine remove the original, so it is
+  removed by hand. If the copy cannot be made, the original stays switched
+  off, with a message.
 - An extension whose bridge cannot be put in is switched off with a message,
   and an extension page whose bridge cannot be put in refuses Chromium's
   `tabs` and `windows` rather than leaving them callable.
 - `captureVisibleTab` captures only a web page (`http`, `https`, `ftp`,
   `data`) or the extension's own pages. A browser page, another extension's
   page or a file page is refused, with a message that names its address.
-- A message from a tab reaches an extension's listeners as before, but a
-  context whose listeners do not answer sends nothing. Before, it answered
-  `undefined` and could beat a popup's or an offscreen document's answer. When
-  no context answers, the sender now gets Chromium's closed-channel error.
+- A message from a tab is delivered to an extension's listeners at once, with
+  the tab's strip fields from the context's cache. A context whose listeners
+  do not answer sends nothing, so a popup's or an offscreen document's answer
+  is the one the sender gets, and a message no context answers settles as
+  Chromium settles it. A tab the cache does not hold yet carries Chromium's
+  own fields for that first message.
 
 ### Added
 
@@ -91,6 +96,16 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- The extension switch on the manager's list did nothing: the engine sent a
+  property Chromium rejects (`enabled`), so an extension was never switched on
+  or off. It now uses `chrome.management.setEnabled`.
+- `tabs.query` with a `url` filter finds a file page the extension may see
+  (`file:///*`, `<all_urls>`) when it has the `tabs` permission; before, a file
+  page was never found by that filter.
+- A page shown as a tab whose Chromium tab id is 2 000 000 000 or more gets its
+  row: the engine refused such an id as if it were one of its own, so the page's
+  `sender.tab` and its window were missing.
+- `captureVisibleTab` refuses the Chrome Web Store, as Chrome does.
 - An extension without a service worker (a popup-only extension, or one
   with a background page) gets `chrome.tabs` and `chrome.windows` in its
   pages. Its page calls used to be refused after a wait, and they queued behind
