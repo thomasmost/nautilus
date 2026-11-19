@@ -85,6 +85,10 @@ jobs:
       # packaged build, so they are linted and tested here.
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace --all-features
+      # The bridge's scripts, run against a stand-in for Chromium's
+      # `chrome` object: what the Rust tests, which only read the
+      # scripts' text, cannot show. Node comes with the runner image.
+      - run: node ci/side-panel/bridge_check.mjs
 
       # tiny-skia's output is not guaranteed identical across CPU
       # architectures, so only the Apple Silicon runner diffs the icons.
