@@ -16,10 +16,10 @@ publish = false
 # at once. For local work, patch the source to a checkout in
 # ~/.cargo/config.toml (see osmena's README). winit, egui, and glow come
 # through these crates, pinned there.
-osmena-core = { git = "https://github.com/thomasmost/osmena", rev = "be55e71e12d570b59d98c64659eba123b44e303f" }
-osmena-engine = { git = "https://github.com/thomasmost/osmena", rev = "be55e71e12d570b59d98c64659eba123b44e303f" }
-osmena-shell = { git = "https://github.com/thomasmost/osmena", rev = "be55e71e12d570b59d98c64659eba123b44e303f" }
-osmena-xtask = { git = "https://github.com/thomasmost/osmena", rev = "be55e71e12d570b59d98c64659eba123b44e303f" }
+osmena-core = { git = "https://github.com/thomasmost/osmena", rev = "424227d0c9e33443a8ac23fbe87a7652e2321bc4" }
+osmena-engine = { git = "https://github.com/thomasmost/osmena", rev = "424227d0c9e33443a8ac23fbe87a7652e2321bc4" }
+osmena-shell = { git = "https://github.com/thomasmost/osmena", rev = "424227d0c9e33443a8ac23fbe87a7652e2321bc4" }
+osmena-xtask = { git = "https://github.com/thomasmost/osmena", rev = "424227d0c9e33443a8ac23fbe87a7652e2321bc4" }
 raw-window-handle = "0.6"
 dpi = "0.1"
 keyboard-types = { version = "0.8.3", features = ["serde"] }

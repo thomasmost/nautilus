@@ -8,6 +8,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- The Launch Panel's field completes to a page, without the `?query`
+  and `#fragment` an address in the history may carry (osmena): `sho`
+  completes to `shop.example/list`, not to
+  `shop.example/list?page=2&sid=…`. The matches under the field still
+  list the full addresses.
 - The hooks scripted runs drive the browser with are in no packaged
   build: `NAUTILUS_TEST_CONTROL`, `NAUTILUS_TEST_PAGE_SCRIPT`,
   `NAUTILUS_PUMP_LOG` and `NAUTILUS_PUMP_TICK_MS` do nothing unless the
