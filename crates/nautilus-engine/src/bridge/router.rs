@@ -1137,6 +1137,49 @@ mod tests {
     }
 
     #[test]
+    fn query_url_filters_find_a_file_page_the_extension_may_see() {
+        let mut file = tab(1, "a*");
+        file.url = "file:///tmp/notes.html".to_string();
+        let mut web = tab(2, "b");
+        web.url = "https://b.example/".to_string();
+        let mut world = World::new(snapshot(vec![window(1, true, vec![file, web])]));
+        for (info, expected) in [
+            (json!({ "url": "file:///*" }), vec![101]),
+            (json!({ "url": ["file:///tmp/*"] }), vec![101]),
+            (json!({ "url": "<all_urls>" }), vec![101, 102]),
+        ] {
+            assert_eq!(
+                brief(&world.tabs("query", json!([info])))
+                    .iter()
+                    .map(|t| t.0)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{info} with the tabs permission"
+            );
+        }
+        // Without the tabs permission a file page is not one the extension may
+        // see, so no address filter finds it, whatever the host pattern.
+        world.grants = Grants {
+            tabs: false,
+            all_urls: true,
+            hosts: vec!["<all_urls>".to_string()],
+        };
+        for (info, expected) in [
+            (json!({ "url": "file:///*" }), vec![]),
+            (json!({ "url": "<all_urls>" }), vec![102]),
+        ] {
+            assert_eq!(
+                brief(&world.tabs("query", json!([info])))
+                    .iter()
+                    .map(|t| t.0)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{info} with host permissions only"
+            );
+        }
+    }
+
+    #[test]
     fn an_extension_without_the_tabs_permission_gets_no_addresses() {
         let mut world = World::two_windows();
         world.grants = Grants {

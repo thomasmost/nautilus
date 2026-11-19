@@ -32,9 +32,8 @@ pub(crate) fn glob(pattern: &str, text: &str) -> bool {
     rest.ends_with(last)
 }
 
-/// The schemes `<all_urls>` covers for a tab's address. `file` is not among
-/// them: a file page is covered only with the extension's file access, which
-/// the bridge does not grant (`matches_url`).
+/// The schemes `<all_urls>` covers for a tab's address, besides `file`
+/// (`matches_url`).
 const ALL_URLS_SCHEMES: [&str; 5] = ["http", "https", "ftp", "ws", "wss"];
 
 /// Whether `url` falls under the match pattern `pattern`
@@ -42,15 +41,13 @@ const ALL_URLS_SCHEMES: [&str; 5] = ["http", "https", "ftp", "ws", "wss"];
 /// or `https`; a host of `*` is any, `*.x` is `x` and its subdomains; a
 /// port in the pattern is not compared; the path is a glob over the URL's
 /// path and query; the scheme and the host compare case-insensitively. Anything
-/// that is no pattern matches nothing. A file page matches nothing: this browser
-/// grants no file access, and Chrome's file access is a switch of the extension
-/// that the bridge cannot read.
+/// that is no pattern matches nothing. A file page is named by a pattern that
+/// names the `file` scheme, and by `<all_urls>`; this is the rule of the
+/// `tabs.query` url filter, which lists the file pages the extension may see.
+/// Whether the extension may see a file page at all is `grants_url`'s rule.
 pub(crate) fn matches_url(pattern: &str, url: &Url) -> bool {
-    if url.scheme() == "file" {
-        return false;
-    }
     if pattern == "<all_urls>" {
-        return ALL_URLS_SCHEMES.contains(&url.scheme());
+        return ALL_URLS_SCHEMES.contains(&url.scheme()) || url.scheme() == "file";
     }
     let Some((scheme, rest)) = pattern.split_once("://") else {
         return false;
@@ -89,6 +86,14 @@ pub(crate) fn matches_url(pattern: &str, url: &Url) -> bool {
         target.push_str(query);
     }
     glob(path, &target)
+}
+
+/// Whether a host permission `pattern` grants the page at `url`: the pattern
+/// matches, and the page is not a file. This browser grants no file access,
+/// and Chrome's file access is a switch of the extension that the bridge
+/// cannot read, so a host pattern never covers a file page.
+pub(crate) fn grants_url(pattern: &str, url: &Url) -> bool {
+    url.scheme() != "file" && matches_url(pattern, url)
 }
 
 /// What an extension's manifest entitles it to learn about tabs.
@@ -140,8 +145,7 @@ impl Grants {
     /// at `url`.
     pub(crate) fn sees(&self, url: &str) -> bool {
         self.tabs
-            || Url::parse(url)
-                .is_ok_and(|url| self.hosts.iter().any(|host| matches_url(host, &url)))
+            || Url::parse(url).is_ok_and(|url| self.hosts.iter().any(|host| grants_url(host, &url)))
     }
 }
 
@@ -175,16 +179,18 @@ mod tests {
         }
     }
 
+    /// The `tabs.query` url filter (`matches_url`): a pattern names the
+    /// pages it matches, file pages included, whatever the extension may read.
     #[test]
-    fn match_patterns_follow_chromes_rules() {
+    fn query_patterns_follow_chromes_rules() {
         for (pattern, page, expected) in [
             ("<all_urls>", "https://example.com/a", true),
-            // No file access is granted here, so no pattern reads a file page.
-            ("<all_urls>", "file:///tmp/x.html", false),
+            ("<all_urls>", "file:///tmp/x.html", true),
             ("<all_urls>", "chrome://extensions/", false),
             ("<all_urls>", "about:blank", false),
             ("*://*/*", "http://example.com/", true),
             ("*://*/*", "https://example.com/x?y", true),
+            // A scheme of `*` is http or https, never file.
             ("*://*/*", "file:///tmp/x.html", false),
             ("*://*.example.com/*", "https://example.com/", true),
             ("*://*.example.com/*", "https://www.example.com/a", true),
@@ -198,7 +204,8 @@ mod tests {
             ("https://example.com/a", "https://example.com/abc", false),
             ("https://example.com/*", "https://example.com:8443/x", true),
             ("https://*/foo?bar=*", "https://x.test/foo?bar=1", true),
-            ("file:///tmp/*", "file:///tmp/x.html", false),
+            ("file:///tmp/*", "file:///tmp/x.html", true),
+            ("file:///tmp/*", "file:///etc/hosts", false),
             // Chrome compares hosts case-insensitively.
             ("https://EXAMPLE.com/*", "https://example.com/", true),
             ("*://*.Example.COM/*", "https://www.example.com/a", true),
@@ -213,7 +220,30 @@ mod tests {
             assert_eq!(
                 matches_url(pattern, &url(page)),
                 expected,
-                "{pattern} on {page}"
+                "query {pattern} on {page}"
+            );
+        }
+    }
+
+    /// The host permissions (`grants_url`): a host pattern never grants a
+    /// file page, whatever its scheme, and every other page matches as the
+    /// query rule has it.
+    #[test]
+    fn host_grants_never_cover_a_file_page() {
+        for (pattern, page, expected) in [
+            ("<all_urls>", "https://example.com/a", true),
+            ("<all_urls>", "file:///tmp/x.html", false),
+            ("*://*/*", "http://example.com/", true),
+            ("*://*/*", "file:///tmp/x.html", false),
+            ("file:///tmp/*", "file:///tmp/x.html", false),
+            ("file:///*", "file:///tmp/x.html", false),
+            ("https://example.com/*", "https://example.com/", true),
+            ("chrome-extension://*/*", "file:///tmp/x.html", false),
+        ] {
+            assert_eq!(
+                grants_url(pattern, &url(page)),
+                expected,
+                "grant {pattern} on {page}"
             );
         }
     }
@@ -282,5 +312,13 @@ mod tests {
         assert!(!host.sees("https://example.org/"));
         assert!(!host.sees("not a url"));
         assert!(!Grants::default().sees("https://example.com/"));
+        // A file page is seen with the tabs permission and never with a host pattern.
+        assert!(tabs.sees("file:///tmp/x.html"));
+        let all = Grants {
+            hosts: vec!["<all_urls>".to_string()],
+            ..Grants::default()
+        };
+        assert!(all.sees("https://example.com/"));
+        assert!(!all.sees("file:///tmp/x.html"));
     }
 }
