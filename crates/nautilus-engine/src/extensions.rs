@@ -379,7 +379,7 @@ mod native {
 })"#;
 
     const ENABLE_SCRIPT: &str = r#"new Promise(function(done){
-  chrome.developerPrivate.updateExtensionConfiguration({extensionId:__ID__, enabled:__ENABLED__}, function(){
+  chrome.management.setEnabled(__ID__, __ENABLED__, function(){
     var err = chrome.runtime.lastError;
     done({error: err ? err.message : null});
   });
@@ -1203,6 +1203,7 @@ mod native {
                                 &source,
                                 &id,
                                 manifest.has_key,
+                                enabled,
                             );
                             // Off until its copy is listed: the original runs
                             // unbridged, with Chromium's own tab functions, until then.
@@ -1213,14 +1214,20 @@ mod native {
                         }
                         continue;
                     }
-                    let replaced = self.inner.borrow_mut().migrations.listed(&dir);
-                    if let Some(original) = replaced {
-                        // Without a `key` the copy has a new id, so the original's
-                        // stored data goes with the original.
-                        self.report_error(format!(
-                            "{name} now runs from a copy inside the profile; its id changed, so the data stored under its old id is removed"
-                        ));
-                        self.uninstall(&original);
+                    let settled = self.inner.borrow_mut().migrations.listed(&dir);
+                    if let Some(settled) = settled {
+                        if let Some(original) = settled.original {
+                            // Without a `key` the copy has a new id, so the original's
+                            // stored data goes with the original.
+                            self.report_error(format!(
+                                "{name} now runs from a copy inside the profile, which has a new id; the original is removed with the data stored under its old id"
+                            ));
+                            self.uninstall(&original);
+                        }
+                        // The copy takes the state the user left the original in.
+                        if enabled != settled.enabled {
+                            self.set_enabled(&id, settled.enabled);
+                        }
                     }
                     if first_look {
                         match bridge_into(&dir) {
