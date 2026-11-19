@@ -1199,14 +1199,13 @@ mod native {
                         // cannot be made.
                         if first_look {
                             let source = dir.display().to_string();
-                            self.inner.borrow_mut().migrations.start(
-                                &source,
-                                &id,
-                                manifest.has_key,
-                                enabled,
-                            );
-                            // Off until its copy is listed: the original runs
+                            self.inner
+                                .borrow_mut()
+                                .migrations
+                                .start(&source, &id, enabled);
+                            // Off while its copy is made and listed: the original runs
                             // unbridged, with Chromium's own tab functions, until then.
+                            // It stays off afterwards: the engine cannot remove it.
                             if enabled {
                                 self.set_enabled(&id, false);
                             }
@@ -1215,18 +1214,10 @@ mod native {
                         continue;
                     }
                     let settled = self.inner.borrow_mut().migrations.listed(&dir);
-                    if let Some(settled) = settled {
-                        if let Some(original) = settled.original {
-                            // Without a `key` the copy has a new id, so the original's
-                            // stored data goes with the original.
-                            self.report_error(format!(
-                                "{name} now runs from a copy inside the profile, which has a new id; the original is removed with the data stored under its old id"
-                            ));
-                            self.uninstall(&original);
-                        }
+                    if let Some(on) = settled {
                         // The copy takes the state the user left the original in.
-                        if enabled != settled.enabled {
-                            self.set_enabled(&id, settled.enabled);
+                        if enabled != on {
+                            self.set_enabled(&id, on);
                         }
                     }
                     if first_look {
@@ -1396,8 +1387,6 @@ mod native {
         icon: Option<Favicon>,
         /// What the bridge lets the extension's contexts see.
         grants: Grants,
-        /// The manifest pins its id with a `key`.
-        has_key: bool,
     }
 
     /// The manifest's facts and the decoded icon of the extension in
@@ -1418,7 +1407,6 @@ mod native {
             facts,
             icon,
             grants: Grants::from_manifest(&manifest),
-            has_key: manifest.get("key").is_some(),
         }
     }
 
