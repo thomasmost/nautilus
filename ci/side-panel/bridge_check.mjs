@@ -484,7 +484,8 @@ function loadWorker(runtime) {
   const w = workerWorld();
   const worker = loadWorker(w.runtime);
   const relayed = portEnd('nautilus-bridge-1');
-  relayed.sender = { id: 'x', url: 'chrome-extension://x/nautilus-bridge/relay.html' };
+  // The relay page is hosted in a tab (the engine's hidden browser): it has a sender tab.
+  relayed.sender = { id: 'x', tab: { id: 9 }, url: 'chrome-extension://x/nautilus-bridge/relay.html' };
   const relayEnd = portEnd('nautilus-bridge-1');
   relayed.peer = relayEnd;
   relayEnd.peer = relayed;
@@ -520,7 +521,7 @@ function loadWorker(runtime) {
   other.peer.postMessage({ call: { id: 2, method: 'query', args: [] } });
   assert.equal(await Promise.race([sandbox.nautilusRelay.next(), wait(30).then(() => 'nothing')]), 'nothing');
   // The worker's own port (from this extension, no tab) is adopted.
-  const worker = forgedFrom({ id: 'x' });
+  const worker = forgedFrom({ id: 'x', url: 'chrome-extension://x/background/nautilus-loader.js' });
   runtime.onConnect.fire(worker);
   worker.peer.postMessage({ call: { id: 3, method: 'query', args: [] } });
   assert.equal(JSON.stringify(await sandbox.nautilusRelay.next()), JSON.stringify([{ call: { id: 3, method: 'query', args: [] } }]));

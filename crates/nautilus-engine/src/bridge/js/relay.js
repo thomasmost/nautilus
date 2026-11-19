@@ -58,10 +58,12 @@
 
   // The worker opens the port itself when it was started by something
   // else and needs the engine.
-  // Only this extension's worker opens the port here: a port with a sender tab
-  // is a content script's, and any other sender is not the worker.
+  // Only this extension's worker opens the port here. The worker's port has
+  // an address inside this extension (its script); a content script's port has
+  // the web page's address, and a port from another extension has another id.
   function fromWorker(sender) {
-    return !!sender && sender.id === chrome.runtime.id && !sender.tab;
+    return !!sender && sender.id === chrome.runtime.id &&
+      typeof sender.url === 'string' && sender.url.indexOf('chrome-extension://' + chrome.runtime.id + '/') === 0;
   }
   chrome.runtime.onConnect.addListener(function (newPort) {
     if (newPort.name === PORT && fromWorker(newPort.sender)) { adopt(newPort); }
