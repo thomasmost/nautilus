@@ -1,5 +1,5 @@
 // A check of the bridge scripts against a stand-in for Chromium's chrome
-// object, for a development machine with Node (it is not part of CI):
+// object. CI runs it in the check job; on a development machine with Node:
 //   node ci/side-panel/bridge_check.mjs
 // It proves what the Rust tests cannot: that the scripts parse, that a
 // replaced namespace has no function of Chromium's left in it, both

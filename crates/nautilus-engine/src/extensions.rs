@@ -251,6 +251,7 @@ mod stub {
             _delegate: Rc<DelegateState>,
             _engine_dir: &Path,
             _unpacked: Arc<UnpackQueue>,
+            _nudge: Box<dyn Fn()>,
         ) -> Rc<Self> {
             Rc::new(ExtensionManager)
         }
@@ -292,6 +293,14 @@ mod stub {
 
         pub(crate) fn poll_bridge(&self) {}
 
+        pub(crate) fn tick_bridge(&self) {}
+
+        pub(crate) fn release_bridge(&self) {}
+
+        pub(crate) fn strip_changed(&self, _windows: &[osmena_engine::WindowStrip<'_>]) {}
+
+        pub(crate) fn extension_reply(&self, _token: u64, _reply: osmena_core::ExtensionReply) {}
+
         pub(crate) fn click_action(&self, _id: &str, _tab: osmena_core::TabId) -> bool {
             false
         }
@@ -312,18 +321,17 @@ mod native {
         Browser, BrowserSettings, BrowserView, BrowserViewDelegate, CefString, CefStringList,
         ChromeToolbarType, Client, DevToolsMessageObserver, DialogHandler, DisplayHandler,
         FileDialogMode, Frame, ImplBrowser, ImplBrowserHost, ImplBrowserViewDelegate, ImplClient,
-        ImplDevToolsMessageObserver, ImplDictionaryValue, ImplDisplayHandler, ImplFrame,
-        ImplLifeSpanHandler, ImplLoadHandler, ImplPanel, ImplPanelDelegate, ImplRequest,
-        ImplResponse, ImplRunFileDialogCallback, ImplUrlrequest, ImplUrlrequestClient,
-        ImplViewDelegate, ImplWindow, ImplWindowDelegate, LifeSpanHandler, LoadHandler,
-        LogSeverity, Rect, Registration, RunFileDialogCallback, RuntimeStyle, Urlrequest,
-        UrlrequestClient, UrlrequestStatus, View, Window as CefWindow, WindowDelegate,
-        WrapBrowserViewDelegate, WrapClient, WrapDevToolsMessageObserver, WrapDisplayHandler,
-        WrapLifeSpanHandler, WrapLoadHandler, WrapRunFileDialogCallback, WrapUrlrequestClient,
-        WrapWindowDelegate, wrap_browser_view_delegate, wrap_client,
-        wrap_dev_tools_message_observer, wrap_display_handler, wrap_life_span_handler,
-        wrap_load_handler, wrap_run_file_dialog_callback, wrap_urlrequest_client,
-        wrap_window_delegate,
+        ImplDevToolsMessageObserver, ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler,
+        ImplLoadHandler, ImplPanel, ImplPanelDelegate, ImplRequest, ImplResponse,
+        ImplRunFileDialogCallback, ImplUrlrequest, ImplUrlrequestClient, ImplViewDelegate,
+        ImplWindow, ImplWindowDelegate, LifeSpanHandler, LoadHandler, LogSeverity, Rect,
+        Registration, RunFileDialogCallback, RuntimeStyle, Urlrequest, UrlrequestClient,
+        UrlrequestStatus, View, Window as CefWindow, WindowDelegate, WrapBrowserViewDelegate,
+        WrapClient, WrapDevToolsMessageObserver, WrapDisplayHandler, WrapLifeSpanHandler,
+        WrapLoadHandler, WrapRunFileDialogCallback, WrapUrlrequestClient, WrapWindowDelegate,
+        wrap_browser_view_delegate, wrap_client, wrap_dev_tools_message_observer,
+        wrap_display_handler, wrap_life_span_handler, wrap_load_handler,
+        wrap_run_file_dialog_callback, wrap_urlrequest_client, wrap_window_delegate,
     };
     use osmena_core::{EngineEvent, Extension, ExtensionSource, Favicon, TabId};
 
@@ -502,8 +510,13 @@ mod native {
         store_dir: PathBuf,
         /// Where the unpacking threads report.
         unpacked: Arc<UnpackQueue>,
-        /// The engine's end of the extension bridge.
+        /// The engine's end of the extension bridge: the relay pages and
+        /// the tab-id table.
         bridge: Rc<Bridge>,
+        /// The bridge's hub, which answers extensions' calls from the
+        /// strip. Its worker lane is `bridge`; extension pages have a lane
+        /// of their own, which the delegate holds too.
+        hub: Rc<bridge::hub::Hub>,
         /// When an extension was last installed, switched, or removed:
         /// Chromium writes its preferences up to ten seconds later, and
         /// nothing in CEF's shutdown flushes them (every exit counts as a
@@ -524,6 +537,7 @@ mod native {
             delegate: Rc<DelegateState>,
             engine_dir: &Path,
             unpacked: Arc<UnpackQueue>,
+            nudge: Box<dyn Fn()>,
         ) -> Rc<Self> {
             #[cfg(not(feature = "test-hooks"))]
             for hook in [
@@ -542,8 +556,34 @@ mod native {
             if let Err(e) = bridge::install::write_helper(&store_dir) {
                 log::error!("cannot write the helper extension: {e}");
             }
+            let bridge = Bridge::new(delegate.clone());
+            let hub = {
+                let table = {
+                    let bridge = bridge.clone();
+                    Box::new(move |tab: TabId| bridge.chromium_id(tab))
+                };
+                let reporter: bridge::hub::Reporter = {
+                    let bridge = bridge.clone();
+                    Box::new(move |tab, chromium, extension| {
+                        bridge.report_tab(tab, chromium, extension)
+                    })
+                };
+                let page_lane = Rc::new(bridge::pages::PageLane::default());
+                delegate.set_page_lane(&page_lane);
+                let hub = bridge::hub::Hub::new(
+                    &delegate,
+                    bridge.clone() as Rc<dyn bridge::transport::BridgeTransport>,
+                    Some(page_lane),
+                    table,
+                    reporter,
+                    nudge,
+                );
+                delegate.set_hub(&hub);
+                hub
+            };
             let manager = Rc::new(ExtensionManager {
-                bridge: Bridge::new(delegate.clone()),
+                bridge,
+                hub,
                 delegate,
                 store_dir,
                 unpacked,
@@ -619,20 +659,17 @@ mod native {
                 log::warn!("extension manager has no browser for {request:?}");
                 return;
             };
-            let Some(mut params) = cef::dictionary_value_create() else {
-                return;
-            };
-            params.set_string(
-                Some(&"expression".into()),
-                Some(&CefString::from(script.as_str())),
-            );
-            params.set_bool(Some(&"awaitPromise".into()), 1);
-            params.set_bool(Some(&"returnByValue".into()), 1);
+            // The entry is recorded before the call, under an id of the
+            // manager's own: CEF can answer inside the call.
             let id = inner.next_message_id;
             inner.next_message_id += 1;
             log::debug!("extension manager evaluates {request:?} as message {id}");
             inner.pending.insert(id, request);
-            host.execute_dev_tools_method(id, Some(&"Runtime.evaluate".into()), Some(&mut params));
+            drop(inner);
+            if crate::devtools::evaluate(&host, id, &script).is_none() {
+                let request = self.inner.borrow_mut().pending.remove(&id);
+                log::warn!("extension manager could not evaluate {request:?}");
+            }
         }
 
         fn list(&self) {
@@ -730,10 +767,30 @@ mod native {
             self.bridge.reopen();
         }
 
-        /// The engine's end of the bridge: the hub's worker lane and its
-        /// table.
-        pub(crate) fn bridge(&self) -> Rc<Bridge> {
-            self.bridge.clone()
+        /// Called after CEF's work on every turn: strips held for a tab's
+        /// id, and answers held for a strip.
+        pub(crate) fn tick_bridge(&self) {
+            self.hub.tick();
+        }
+
+        /// `Engine::strip_changed`: extensions' queries are answered from
+        /// the strip, and its differences become their events.
+        pub(crate) fn strip_changed(&self, windows: &[osmena_engine::WindowStrip<'_>]) {
+            self.hub.strip_changed(windows);
+        }
+
+        /// `Engine::extension_reply`: the model's answer to a request.
+        pub(crate) fn extension_reply(&self, token: u64, reply: osmena_core::ExtensionReply) {
+            self.hub.extension_reply(token, reply);
+        }
+
+        /// Let go of what the hub and the page lane hold of CEF, before
+        /// the engine pumps towards shutdown.
+        pub(crate) fn release_bridge(&self) {
+            self.hub.shutdown();
+            if let Some(lane) = self.delegate.page_lane() {
+                lane.clear();
+            }
         }
 
         pub(crate) fn track_tab(
@@ -1054,29 +1111,12 @@ mod native {
             let Some(request) = self.inner.borrow_mut().pending.remove(&message_id) else {
                 return;
             };
-            let parsed: serde_json::Value = serde_json::from_slice(result).unwrap_or_default();
-            let value = if success {
-                if let Some(exception) = parsed.get("exceptionDetails") {
-                    let text = exception
-                        .get("exception")
-                        .and_then(|e| e.get("description"))
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("script error");
-                    self.report_error(format!("extension manager script failed: {text}"));
+            let value = match bridge::evaluation(success, result) {
+                Ok(value) => value,
+                Err(e) => {
+                    self.report_error(format!("extension manager script failed: {e}"));
                     return;
                 }
-                parsed
-                    .get("result")
-                    .and_then(|r| r.get("value"))
-                    .cloned()
-                    .unwrap_or_default()
-            } else {
-                let text = parsed
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("unknown error");
-                self.report_error(format!("extension manager call failed: {text}"));
-                return;
             };
             let text = |key: &str| value.get(key).and_then(|v| v.as_str()).map(str::to_string);
             let error = text("error");
@@ -1343,7 +1383,7 @@ mod native {
             };
             if load_helper {
                 log::info!("loading the helper extension");
-                self.load_unpacked(self.store_dir.join("nautilus-helper"));
+                self.load_unpacked(bridge::install::helper_dir(&self.store_dir));
             }
             self.bridge.sync(helper_loaded, &bridged);
             if let Some(hub) = self.delegate.hub() {

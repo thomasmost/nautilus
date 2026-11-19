@@ -129,9 +129,16 @@ pub(crate) fn parse_call(text: &str) -> Option<PageCall> {
 /// console, which the browser process logs.
 pub(crate) fn page_script() -> String {
     format!(
-        "try {{\n{PAGE_TRANSPORT_JS}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}\n{}",
+        "{}\n{}",
+        guarded(PAGE_TRANSPORT_JS),
         deferred_namespaces(&format!("{}\n{REPORT_JS}", namespaces_script()))
     )
+}
+
+/// `script` in a `try`: a failure is reported through the console, which
+/// the browser process logs, and the scripts after it still run.
+fn guarded(script: &str) -> String {
+    format!("try {{\n{script}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}")
 }
 
 /// The namespaces as a function run once, at the first change to the
@@ -139,7 +146,8 @@ pub(crate) fn page_script() -> String {
 /// context is created, and it does before the page's first script.
 pub(crate) fn deferred_namespaces(namespaces: &str) -> String {
     format!(
-        "(function (root, install) {{\n{DEFER_JS}\n}})(self, function () {{\ntry {{\n{namespaces}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}\n}});"
+        "(function (root, install) {{\n{DEFER_JS}\n}})(self, function () {{\n{}\n}});",
+        guarded(namespaces)
     )
 }
 
@@ -158,7 +166,9 @@ fn delivery(payload: &Value) -> String {
 /// are not put in, so the page's calls stay refused.
 pub(crate) fn refusal_script() -> String {
     format!(
-        "try {{\n{PAGE_TRANSPORT_JS}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}\ntry {{ self.__nautilusRefuseNative(); }} catch (e) {{ console.error('nautilus-bridge: ' + e); }}"
+        "{}\n{}",
+        guarded(PAGE_TRANSPORT_JS),
+        guarded("self.__nautilusRefuseNative();")
     )
 }
 
@@ -203,53 +213,32 @@ fn bind_functions(context: &mut V8Context) -> bool {
     let Some(global) = context.global() else {
         return false;
     };
-    let name = CefString::from(SEND_FUNCTION);
-    let mut handler = BridgeSend::new();
-    let Some(mut function) = cef::v8_value_create_function(Some(&name), Some(&mut handler)) else {
-        return false;
-    };
-    global.set_value_bykey(
-        Some(&name),
-        Some(&mut function),
-        V8Propertyattribute::default(),
-    );
-    let report_name = CefString::from(REPORT_FUNCTION);
-    let mut report_handler = BridgeReport::new();
-    let Some(mut report_function) =
-        cef::v8_value_create_function(Some(&report_name), Some(&mut report_handler))
-    else {
-        return false;
-    };
-    global.set_value_bykey(
-        Some(&report_name),
-        Some(&mut report_function),
-        V8Propertyattribute::default(),
-    );
+    for (name, message) in [
+        (SEND_FUNCTION, CALL_MESSAGE),
+        (REPORT_FUNCTION, REPORT_MESSAGE),
+    ] {
+        let name = CefString::from(name);
+        let mut handler = BridgeSend::new(message);
+        let Some(mut function) = cef::v8_value_create_function(Some(&name), Some(&mut handler))
+        else {
+            return false;
+        };
+        global.set_value_bykey(
+            Some(&name),
+            Some(&mut function),
+            V8Propertyattribute::default(),
+        );
+    }
     true
 }
 
-// The bound function: its one string argument becomes a process message
-// to the browser process, from the frame that called it.
+// A bound function: its one string argument becomes the process message
+// `message` to the browser process, from the frame that called it. A call
+// and the tab report are two such functions.
 wrap_v8_handler! {
-    struct BridgeSend;
-
-    impl V8Handler {
-        fn execute(
-            &self,
-            _name: Option<&CefString>,
-            _object: Option<&mut V8Value>,
-            arguments: Option<&[Option<V8Value>]>,
-            _retval: Option<&mut Option<V8Value>>,
-            _exception: Option<&mut CefString>,
-        ) -> ::std::os::raw::c_int {
-            send_to_browser(CALL_MESSAGE, arguments)
-        }
+    struct BridgeSend {
+        message: &'static str,
     }
-}
-
-// The same for the tab report: one string, sent in its own message.
-wrap_v8_handler! {
-    struct BridgeReport;
 
     impl V8Handler {
         fn execute(
@@ -260,7 +249,7 @@ wrap_v8_handler! {
             _retval: Option<&mut Option<V8Value>>,
             _exception: Option<&mut CefString>,
         ) -> ::std::os::raw::c_int {
-            send_to_browser(REPORT_MESSAGE, arguments)
+            send_to_browser(self.message, arguments)
         }
     }
 }
@@ -334,7 +323,7 @@ impl PageLane {
         }
         // The extension is the frame's own address, as the browser process
         // holds it, never a field of the message.
-        let url = CefString::from(&frame.url()).to_string();
+        let url = frame_url(frame);
         let Some(extension) = extension_of(&url) else {
             log::warn!("a bridge call from {url}, which is no extension page, was dropped");
             return true;
@@ -342,10 +331,7 @@ impl PageLane {
         // An extension the hub does not serve yet is not dropped here: the
         // call is held there until it is served, and then refused if it
         // never is (`BridgeState::page_call`), so the page always gets a reply.
-        let text = message
-            .argument_list()
-            .filter(|arguments| arguments.size() >= 1)
-            .map(|arguments| CefString::from(&arguments.string(0)).to_string());
+        let text = message_text(message);
         // A call the browser cannot take is answered with an error when its
         // number can be read: this frame is an extension's page, so the answer
         // goes to it and to no other frame.
@@ -396,15 +382,12 @@ impl PageLane {
         frame: &Frame,
         message: &ProcessMessage,
     ) -> bool {
-        let url = CefString::from(&frame.url()).to_string();
+        let url = frame_url(frame);
         let view = match delegate.asker_of(browser) {
             Asker::View(tab) => Some(tab),
             Asker::Worker | Asker::Popup { .. } => None,
         };
-        let text = message
-            .argument_list()
-            .filter(|arguments| arguments.size() >= 1)
-            .map(|arguments| CefString::from(&arguments.string(0)).to_string());
+        let text = message_text(message);
         let Some(chromium) = text.as_deref().and_then(report_of) else {
             log::warn!("a tab report from {url} was dropped: it is not a tab id");
             return true;
@@ -471,9 +454,7 @@ impl PageLane {
     /// Answer the page call `call`: the page's own number, in the frame
     /// that asked, if that frame is still a page of the extension that asked.
     pub(crate) fn reply(&self, call: CallId, result: Result<Value, String>) {
-        let answer = take_answer(&mut self.calls.borrow_mut(), call, |frame| {
-            CefString::from(&frame.url()).to_string()
-        });
+        let answer = take_answer(&mut self.calls.borrow_mut(), call, frame_url);
         let Some((frame, id, extension)) = answer else {
             return;
         };
@@ -498,6 +479,19 @@ impl PageLane {
             deliver(&frame, extension, &json!({ "event": event, "args": args }));
         }
     }
+}
+
+/// A frame's current address, as the browser process holds it.
+fn frame_url(frame: &Frame) -> String {
+    CefString::from(&frame.url()).to_string()
+}
+
+/// The one string a bridge message carries, if it carries one.
+fn message_text(message: &ProcessMessage) -> Option<String> {
+    message
+        .argument_list()
+        .filter(|arguments| arguments.size() >= 1)
+        .map(|arguments| CefString::from(&arguments.string(0)).to_string())
 }
 
 /// The number a page gave a call, read even when the rest of the call is not
@@ -528,8 +522,7 @@ fn deliver(frame: &Frame, extension: &str, payload: &Value) {
     if frame.is_valid() == 0 {
         return;
     }
-    let url = CefString::from(&frame.url()).to_string();
-    if !deliverable(&url, extension) {
+    if !deliverable(&frame_url(frame), extension) {
         return;
     }
     frame.execute_java_script(Some(&CefString::from(delivery(payload).as_str())), None, 0);

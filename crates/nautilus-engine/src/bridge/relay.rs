@@ -1,11 +1,11 @@
-//! The CEF side of the bridge: hidden pages the engine evaluates
-//! scripts in (each bridged extension's relay page, and the helper
-//! extension's page), and the `Bridge` that owns them.
+//! The CEF side of the bridge: the `Bridge`, which owns the hidden pages
+//! the engine evaluates scripts in (`hidden_page`: each bridged
+//! extension's relay page, and the helper extension's page).
 //!
-//! A hidden page is a windowless browser nobody paints. The engine
-//! reaches it the way `ExtensionManager` reaches `chrome://extensions`:
-//! `Runtime.evaluate` through `execute_dev_tools_method`, the answer in
-//! `on_dev_tools_method_result`. No render-process code is involved.
+//! The engine reaches a hidden page the way `ExtensionManager` reaches
+//! `chrome://extensions`: `Runtime.evaluate` through DevTools
+//! (`devtools::evaluate`), the answer in `on_dev_tools_method_result`. No
+//! render-process code is involved.
 //!
 //! The decisions are in `policy` and `debugger` (pure); this file carries
 //! them out.
@@ -16,28 +16,23 @@ use std::rc::Rc;
 
 use cef::rc::Rc as _;
 use cef::{
-    Browser, BrowserSettings, CefString, Client, DevToolsMessageObserver, DialogHandler,
-    DisplayHandler, Frame, ImplBrowser, ImplBrowserHost, ImplClient, ImplDevToolsMessageObserver,
-    ImplDictionaryValue, ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler,
-    ImplRenderHandler, ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity, Rect,
-    Registration, RenderHandler, RequestHandler, TerminationStatus, WindowInfo, WrapClient,
-    WrapDevToolsMessageObserver, WrapDisplayHandler, WrapLifeSpanHandler, WrapLoadHandler,
-    WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_dev_tools_message_observer,
-    wrap_display_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
-    wrap_request_handler,
+    Browser, DevToolsMessageObserver, ImplBrowser, ImplBrowserHost, ImplDevToolsMessageObserver,
+    Registration, WrapDevToolsMessageObserver, wrap_dev_tools_message_observer,
 };
 use osmena_core::TabId;
 use serde_json::{Value, json};
 
+use super::call_ids::CallIds;
 use super::debugger::{Change, Debuggers};
 use super::evaluation;
-use super::hub::Lane;
+use super::hidden_page::HiddenPage;
+use super::hub::{CAPTURE_IDS, Lane};
 use super::install::HELPER_ID;
 use super::policy::{
     AfterAsk, Answered, Evidence, Identity, JobKind, JobTurn, MAX_OPENINGS, Next, Opening,
     Overflow, REFRESH_INTERVAL, Session, WorkerTarget, WorkerWatch, after_ask, after_delivery,
-    asks_on, check_due, failed_by_loss, forgets, identity, is_generation, job_kept, job_turn,
-    next_opening, overflow, relay_changes, reply_due, session_evidence, tabs_to_forget,
+    asks_on, fails_on_loss, forgets, identity, job_kept, job_turn, next_opening, overflow,
+    relay_changes, reply_due, session_evidence, tabs_to_forget,
 };
 use super::table::{
     Debuggee, Hello, Report, TabTable, Target, debuggee_of, hello_of, parse_targets, target_id_of,
@@ -54,10 +49,16 @@ const HELPER_KEY: &str = "helper";
 /// (`chrome-extension://<id><RELAY_PATH>`). It is `BRIDGE_DIR`'s relay.
 pub(crate) const RELAY_PATH: &str = "/nautilus-bridge/relay.html";
 
-/// The sentinel of a tab's probe whose call is in progress (`Probe::sent`).
-const RESERVED: i32 = -1;
-/// The sentinel of a tab's probe whose call failed: no result carries it.
-const NOT_SENT: i32 = -2;
+/// The DevTools message id of a tab's probe (`Bridge::track`). The probe is
+/// the first DevTools call on its tab's browser, and CEF keeps a caller's id
+/// that is not below the browser's next one (`Inner::next_message`), and a
+/// browser counts from 1. The same browser later carries the hub's
+/// screenshots, whose ids are above `CAPTURE_IDS`, so the probe's must stay
+/// below it.
+const TAB_PROBE_ID: i32 = 1;
+const _: () = assert!(TAB_PROBE_ID < CAPTURE_IDS);
+/// A tab's probe whose call was not sent: no result carries this id.
+const NOT_SENT: i32 = 0;
 
 /// Waiting jobs beyond this are failed, oldest first, so a page that
 /// never comes back cannot grow the queue without bound.
@@ -66,271 +67,6 @@ const MAX_JOBS: usize = 256;
 /// The script an evaluation of a hidden page checks first: a page whose
 /// script did not load answers `false` (or fails), and is closed.
 const PROBE: &str = "typeof nautilusRelay === 'object' || typeof nautilusHelper === 'object'";
-
-#[cfg(target_os = "macos")]
-fn no_window() -> cef::sys::cef_window_handle_t {
-    std::ptr::null_mut()
-}
-
-#[cfg(windows)]
-fn no_window() -> cef::sys::cef_window_handle_t {
-    cef::sys::HWND(std::ptr::null_mut())
-}
-
-/// A page in a windowless browser that is never shown.
-struct HiddenPage {
-    browser: Browser,
-    /// Tells this page from an earlier one under the same key: a callback
-    /// from a page that is gone must not change its successor.
-    generation: u64,
-    /// The DevTools observer stays registered while this lives.
-    _devtools: Option<Registration>,
-    /// Its main frame finished loading.
-    ready: Cell<bool>,
-}
-
-impl HiddenPage {
-    fn open(bridge: &Rc<Bridge>, key: &str, url: &str, generation: u64) -> Option<HiddenPage> {
-        let mut client = PageClient::new(
-            PageRender::new(),
-            PageLife::new(
-                bridge.delegate.clone(),
-                bridge.clone(),
-                key.to_string(),
-                generation,
-            ),
-            PageLoad::new(bridge.clone(), key.to_string(), generation),
-            PageDisplay::new(key.to_string()),
-            bridge.delegate.dialog_handler(),
-            PageRequest::new(bridge.clone(), key.to_string(), generation),
-        );
-        let window_info = WindowInfo::default().set_as_windowless(no_window());
-        let settings = BrowserSettings {
-            windowless_frame_rate: 1,
-            ..BrowserSettings::default()
-        };
-        let browser = cef::browser_host_create_browser_sync(
-            Some(&window_info),
-            Some(&mut client),
-            Some(&CefString::from(url)),
-            Some(&settings),
-            None,
-            None,
-        )?;
-        let mut observer = PageDevTools::new(bridge.clone(), key.to_string(), generation);
-        let devtools = browser
-            .host()
-            .and_then(|host| host.add_dev_tools_message_observer(Some(&mut observer)));
-        log::debug!("bridge: page {key} opening at {url}");
-        Some(HiddenPage {
-            browser,
-            generation,
-            _devtools: devtools,
-            ready: Cell::new(false),
-        })
-    }
-
-    /// Evaluate `expression` (a promise is awaited, the value returned
-    /// by value); the DevTools message id the answer will carry.
-    fn evaluate(browser: &Browser, expression: &str) -> Option<i32> {
-        let host = browser.host()?;
-        let mut params = cef::dictionary_value_create()?;
-        params.set_string(
-            Some(&"expression".into()),
-            Some(&CefString::from(expression)),
-        );
-        params.set_bool(Some(&"awaitPromise".into()), 1);
-        params.set_bool(Some(&"returnByValue".into()), 1);
-        // Id 0 asks CEF for the next id of this browser; a caller's
-        // own id may be raised, so the returned one is what counts.
-        let id =
-            host.execute_dev_tools_method(0, Some(&"Runtime.evaluate".into()), Some(&mut params));
-        (id != 0).then_some(id)
-    }
-
-    fn close(&self) {
-        if let Some(host) = self.browser.host() {
-            host.close_browser(1);
-        }
-    }
-}
-
-wrap_client! {
-    struct PageClient {
-        render: RenderHandler,
-        life: LifeSpanHandler,
-        load: LoadHandler,
-        display: DisplayHandler,
-        dialog: DialogHandler,
-        request: RequestHandler,
-    }
-
-    impl Client {
-        fn render_handler(&self) -> Option<RenderHandler> {
-            Some(self.render.clone())
-        }
-
-        fn life_span_handler(&self) -> Option<LifeSpanHandler> {
-            Some(self.life.clone())
-        }
-
-        fn load_handler(&self) -> Option<LoadHandler> {
-            Some(self.load.clone())
-        }
-
-        fn display_handler(&self) -> Option<DisplayHandler> {
-            Some(self.display.clone())
-        }
-
-        fn dialog_handler(&self) -> Option<DialogHandler> {
-            Some(self.dialog.clone())
-        }
-
-        fn request_handler(&self) -> Option<RequestHandler> {
-            Some(self.request.clone())
-        }
-    }
-}
-
-// A windowless browser must have a render handler that names a view
-// rectangle; nothing is done with what it paints.
-wrap_render_handler! {
-    struct PageRender;
-
-    impl RenderHandler {
-        fn view_rect(&self, _browser: Option<&mut Browser>, rect: Option<&mut Rect>) {
-            if let Some(rect) = rect {
-                rect.x = 0;
-                rect.y = 0;
-                rect.width = 16;
-                rect.height = 16;
-            }
-        }
-    }
-}
-
-wrap_life_span_handler! {
-    struct PageLife {
-        delegate: Rc<DelegateState>,
-        bridge: Rc<Bridge>,
-        key: String,
-        generation: u64,
-    }
-
-    impl LifeSpanHandler {
-        fn on_after_created(&self, _browser: Option<&mut Browser>) {
-            self.delegate.add_live(1);
-        }
-
-        fn on_before_close(&self, _browser: Option<&mut Browser>) {
-            self.delegate.add_live(-1);
-            // Closed by the engine, the page is already gone and this is
-            // a no-op; closed underneath (an extension reload), it goes.
-            self.bridge.page_gone(&self.key, self.generation, "it closed", false);
-        }
-    }
-}
-
-// A renderer that terminates takes the page's script with it; the browser
-// itself stays until it is closed, so the page is closed too.
-wrap_request_handler! {
-    struct PageRequest {
-        bridge: Rc<Bridge>,
-        key: String,
-        generation: u64,
-    }
-
-    impl RequestHandler {
-        fn on_render_process_terminated(
-            &self,
-            _browser: Option<&mut Browser>,
-            _status: TerminationStatus,
-            _error_code: ::std::os::raw::c_int,
-            _error_string: Option<&CefString>,
-        ) {
-            self.bridge
-                .page_gone(&self.key, self.generation, "its renderer terminated", true);
-        }
-    }
-}
-
-wrap_load_handler! {
-    struct PageLoad {
-        bridge: Rc<Bridge>,
-        key: String,
-        generation: u64,
-    }
-
-    impl LoadHandler {
-        fn on_load_end(
-            &self,
-            _browser: Option<&mut Browser>,
-            frame: Option<&mut Frame>,
-            _http_status_code: ::std::os::raw::c_int,
-        ) {
-            if frame.is_some_and(|f| f.is_main() != 0) {
-                self.bridge.page_ready(&self.key, self.generation);
-            }
-        }
-    }
-}
-
-wrap_display_handler! {
-    struct PageDisplay {
-        key: String,
-    }
-
-    impl DisplayHandler {
-        fn on_console_message(
-            &self,
-            _browser: Option<&mut Browser>,
-            _level: LogSeverity,
-            message: Option<&CefString>,
-            _source: Option<&CefString>,
-            _line: ::std::os::raw::c_int,
-        ) -> ::std::os::raw::c_int {
-            log::debug!(
-                "bridge: page {} says: {}",
-                self.key,
-                message.map(CefString::to_string).unwrap_or_default()
-            );
-            1
-        }
-    }
-}
-
-wrap_dev_tools_message_observer! {
-    struct PageDevTools {
-        bridge: Rc<Bridge>,
-        key: String,
-        generation: u64,
-    }
-
-    impl DevToolsMessageObserver {
-        fn on_dev_tools_method_result(
-            &self,
-            _browser: Option<&mut Browser>,
-            message_id: ::std::os::raw::c_int,
-            success: ::std::os::raw::c_int,
-            result: Option<&[u8]>,
-        ) {
-            self.bridge.page_result(
-                &self.key,
-                self.generation,
-                message_id,
-                success != 0,
-                result.unwrap_or_default(),
-            );
-        }
-
-        /// The page's DevTools session ended: the results still pending
-        /// will never arrive (CEF's header says so), so they are dropped
-        /// and what was waiting for them is asked again.
-        fn on_dev_tools_agent_detached(&self, _browser: Option<&mut Browser>) {
-            self.bridge.page_detached(&self.key, self.generation);
-        }
-    }
-}
 
 /// What a pending evaluation was for.
 enum Pending {
@@ -351,32 +87,104 @@ enum Pending {
     Poll,
     /// An answer handed to a relay; only a failure is of interest.
     Reply,
-    /// A delivery to an extension's worker.
-    Deliver {
-        tab: TabId,
-        attempt: u8,
-        delivery: u64,
-    },
-    /// An event for an extension's worker (`Job::Emit`), kept to retry it.
-    Emit {
+    /// A delivery handed to an extension's relay, kept to send it again.
+    Deliver(Delivery),
+}
+
+/// What a delivery carries to an extension's worker.
+enum Payload {
+    /// A click on the extension's action for `tab`.
+    Click { tab: TabId },
+    /// A listener's event, or `bridge.wake`. `instance` is the worker
+    /// instance the extension was known to have when the event was queued
+    /// (`None`: before any hello).
+    Event {
         event: String,
         args: Vec<Value>,
-        attempt: u8,
-        delivery: u64,
         instance: Option<String>,
     },
 }
 
+/// One delivery to an extension's worker. `id` is what the worker sees,
+/// the same on every attempt, so a worker instance that already ran it
+/// ignores the repeat. `attempt` counts from 0.
+struct Delivery {
+    id: u64,
+    attempt: u8,
+    payload: Payload,
+}
+
+impl Delivery {
+    /// How the log names it: `delivery 7` for a click, `event tabs.onCreated
+    /// (delivery 7)` for an event.
+    fn label(&self) -> String {
+        match &self.payload {
+            Payload::Click { .. } => format!("delivery {}", self.id),
+            Payload::Event { event, .. } => format!("event {event} (delivery {})", self.id),
+        }
+    }
+}
+
+#[cfg(test)]
+mod delivery_tests {
+    use osmena_core::TabId;
+
+    use super::{Delivery, Job, Payload};
+    use crate::bridge::policy::JobKind;
+
+    fn click() -> Delivery {
+        Delivery {
+            id: 7,
+            attempt: 0,
+            payload: Payload::Click { tab: TabId(3) },
+        }
+    }
+
+    fn event() -> Delivery {
+        Delivery {
+            id: 8,
+            attempt: 1,
+            payload: Payload::Event {
+                event: "tabs.onCreated".to_string(),
+                args: Vec::new(),
+                instance: None,
+            },
+        }
+    }
+
+    // The scripted runs read these words in the log (`ci/side-panel`).
+    #[test]
+    fn a_click_is_logged_by_its_delivery_and_an_event_by_its_name_too() {
+        assert_eq!(click().label(), "delivery 7");
+        assert_eq!(event().label(), "event tabs.onCreated (delivery 8)");
+    }
+
+    #[test]
+    fn the_queue_reads_a_deliverys_kind_from_what_it_carries() {
+        let job = |delivery| Job::Deliver {
+            extension: "abcdefghijklmnopabcdefghijklmnop".to_string(),
+            delivery,
+        };
+        assert_eq!(job(click()).kind(), JobKind::Click);
+        assert_eq!(job(event()).kind(), JobKind::Emit);
+    }
+}
+
+/// Why a delivery was not queued (`Bridge::deliver`).
+enum Undeliverable {
+    /// The extension's relay, or the helper's page, was given up.
+    GivenUp,
+    /// The extension is not bridged and on.
+    NotWanted,
+}
+
 /// Work that waits for a fresh table, or for its relay to be ready.
 enum Job {
-    /// Deliver a click on `extension`'s action for `tab`. `delivery` is
-    /// the id the worker will see, kept for every attempt so a worker
-    /// instance that already ran it ignores the repeat.
-    Click {
+    /// Hand `delivery` to `extension`'s worker: a click on its action, or
+    /// an event.
+    Deliver {
         extension: String,
-        tab: TabId,
-        attempt: u8,
-        delivery: u64,
+        delivery: Delivery,
     },
     /// `extension`'s worker attached (or detached) its debugger to
     /// `debuggee`; the worker waits for `call`, made by `instance`.
@@ -387,48 +195,25 @@ enum Job {
         debuggee: Debuggee,
         attach: bool,
     },
-    /// Deliver `event` with `args` to `extension`'s worker: a listener's
-    /// event, or `bridge.wake`. `delivery` is its id, the same on every
-    /// attempt (a worker instance that ran it ignores the repeat).
-    /// `instance` is the worker instance the extension was known to have
-    /// when the event was queued (`None`: before any hello).
-    Emit {
-        extension: String,
-        event: String,
-        args: Vec<Value>,
-        attempt: u8,
-        delivery: u64,
-        instance: Option<String>,
-    },
 }
 
-/// `Job::Emit` (an event for an extension's worker) sits in the queue with
-/// the fields of its delivery; the kind is what the queue's rules read.
 impl Job {
     fn extension(&self) -> &str {
         match self {
-            Job::Click { extension, .. }
-            | Job::Debugger { extension, .. }
-            | Job::Emit { extension, .. } => extension,
+            Job::Deliver { extension, .. } | Job::Debugger { extension, .. } => extension,
         }
     }
 
+    /// What the queue's rules read (`policy`).
     fn kind(&self) -> JobKind {
         match self {
-            Job::Click { .. } => JobKind::Click,
+            Job::Deliver { delivery, .. } => match delivery.payload {
+                Payload::Click { .. } => JobKind::Click,
+                Payload::Event { .. } => JobKind::Emit,
+            },
             Job::Debugger { .. } => JobKind::Debugger,
-            Job::Emit { .. } => JobKind::Emit,
         }
     }
-}
-
-/// An evaluation whose call is in progress: its pending entry is reserved
-/// before the call, because CEF can answer inside the call, before it has
-/// returned the message id. Such an answer is matched here by `key`.
-struct Sending {
-    token: u64,
-    key: String,
-    pending: Option<Pending>,
 }
 
 /// How a hidden page has fared in its openings (`policy::next_opening`):
@@ -452,90 +237,6 @@ struct TabRecord {
     _probe: Option<Registration>,
 }
 
-/// The engine's ids for worker calls. A worker numbers its calls itself, so
-/// two extensions' workers can both have a call 7, and a worker instance
-/// that is replaced leaves calls whose answers its successor would ignore.
-/// The hub is given a Bridge-local id per call (`issue`); this map gives back
-/// the worker's (extension, instance, call) when the answer comes (`take`).
-#[derive(Default)]
-pub(crate) struct CallIds {
-    last: CallId,
-    calls: HashMap<CallId, (String, String, u64)>,
-}
-
-impl CallIds {
-    /// The Bridge-local id of call `worker_call` of `instance` of `extension`.
-    pub(crate) fn issue(&mut self, extension: &str, instance: &str, worker_call: u64) -> CallId {
-        self.last += 1;
-        self.calls.insert(
-            self.last,
-            (extension.to_string(), instance.to_string(), worker_call),
-        );
-        self.last
-    }
-
-    /// The triple of `call`, removed: an answer is sent once.
-    pub(crate) fn take(&mut self, call: CallId) -> Option<(String, String, u64)> {
-        self.calls.remove(&call)
-    }
-
-    /// Drop the calls of `extension`'s instances other than `current`, the
-    /// instance a hello has just named. Returns how many were dropped.
-    pub(crate) fn retire_instances(&mut self, extension: &str, current: &str) -> usize {
-        let before = self.calls.len();
-        self.calls
-            .retain(|_, (e, instance, _)| e != extension || instance == current);
-        before - self.calls.len()
-    }
-}
-
-#[cfg(test)]
-mod call_ids_tests {
-    use super::CallIds;
-
-    #[test]
-    fn calls_of_two_workers_with_the_same_number_stay_apart() {
-        let mut ids = CallIds::default();
-        let a = ids.issue("aaaa", "i1", 7);
-        let b = ids.issue("bbbb", "i2", 7);
-        assert_ne!(a, b);
-        assert_eq!(ids.take(b), Some(("bbbb".to_string(), "i2".to_string(), 7)));
-        assert_eq!(ids.take(a), Some(("aaaa".to_string(), "i1".to_string(), 7)));
-        assert_eq!(ids.take(a), None, "an answer is sent once");
-    }
-
-    #[test]
-    fn a_new_worker_instance_retires_the_calls_of_the_old_one_and_no_others() {
-        let mut ids = CallIds::default();
-        let old_one = ids.issue("aaaa", "old", 1);
-        let old_two = ids.issue("aaaa", "old", 2);
-        let other = ids.issue("bbbb", "old", 3);
-        let same = ids.issue("aaaa", "new", 4);
-        assert_eq!(
-            ids.retire_instances("aaaa", "new"),
-            2,
-            "the two calls of the old instance go"
-        );
-        assert_eq!(ids.take(old_one), None);
-        assert_eq!(ids.take(old_two), None);
-        assert_eq!(
-            ids.take(other),
-            Some(("bbbb".to_string(), "old".to_string(), 3)),
-            "another extension's calls stay"
-        );
-        assert_eq!(
-            ids.take(same),
-            Some(("aaaa".to_string(), "new".to_string(), 4)),
-            "the current instance's calls stay"
-        );
-        assert_eq!(
-            ids.retire_instances("aaaa", "new"),
-            0,
-            "a hello of the same instance retires nothing"
-        );
-    }
-}
-
 #[derive(Default)]
 struct Inner {
     table: TabTable,
@@ -543,9 +244,9 @@ struct Inner {
     tabs: HashMap<TabId, TabRecord>,
     /// Which extensions are debugging which tab (`bridge::debugger`).
     debuggers: Debuggers,
-    helper: Option<HiddenPage>,
-    /// The relay page of each bridged, enabled extension, by its id.
-    relays: HashMap<String, HiddenPage>,
+    /// The hidden pages, by key: the relay page of each bridged, enabled
+    /// extension under its id, and the helper's page under `HELPER_KEY`.
+    pages: HashMap<String, HiddenPage>,
     /// The extensions the last `sync` wanted a relay for.
     wanted: Vec<String>,
     /// Whether the helper extension is loaded, as the last `sync` said.
@@ -565,9 +266,13 @@ struct Inner {
     /// Evaluations sent and not yet answered, by page key and the
     /// DevTools message id of that page's browser.
     pending: HashMap<(String, i32), Pending>,
-    /// Evaluations whose call has not returned yet.
-    sending: Vec<Sending>,
-    next_token: u64,
+    /// The message id of the next evaluation in any hidden page. CEF
+    /// keeps a caller's id when it is not below the next id of the page's
+    /// browser (`CefDevToolsController::ExecuteDevToolsMethod`: each browser
+    /// counts from 1 and moves past every id it is given), and nothing else
+    /// sends on a hidden page's browser, so one increasing counter for all
+    /// the pages is always kept.
+    next_message: i32,
     /// The helper has been asked for the targets and has not answered.
     refreshing: bool,
     /// A tab's target id was learned after the last refresh: the next turn
@@ -583,35 +288,37 @@ struct Inner {
 /// The engine's end of the bridge. One per engine, owned by the
 /// extension manager.
 pub(crate) struct Bridge {
-    delegate: Rc<DelegateState>,
+    pub(super) delegate: Rc<DelegateState>,
     inner: RefCell<Inner>,
 }
 
-/// Whether the page under `key` is the one made under `generation`.
+/// Whether the page under `key` is the one made under `generation`: a
+/// callback from a page that is gone, or from the predecessor of the page
+/// now under its key, is not for the current one.
 fn is_current(inner: &Inner, key: &str, generation: u64) -> bool {
-    is_generation(page_ref(inner, key).map(|page| page.generation), generation)
+    page_ref(inner, key).is_some_and(|page| page.generation == generation)
 }
 
 fn page_ref<'a>(inner: &'a Inner, key: &str) -> Option<&'a HiddenPage> {
-    if key == HELPER_KEY {
-        inner.helper.as_ref()
-    } else {
-        inner.relays.get(key)
-    }
+    inner.pages.get(key)
 }
 
 /// Remove the page under `key` if it has `generation`.
 fn take_page(inner: &mut Inner, key: &str, generation: u64) -> Option<HiddenPage> {
-    if key == HELPER_KEY {
-        return match &inner.helper {
-            Some(page) if page.generation == generation => inner.helper.take(),
-            _ => None,
-        };
-    }
-    match inner.relays.get(key) {
-        Some(page) if page.generation == generation => inner.relays.remove(key),
+    match inner.pages.get(key) {
+        Some(page) if page.generation == generation => inner.pages.remove(key),
         _ => None,
     }
+}
+
+/// The extensions whose relay page is open.
+fn open_relays(inner: &Inner) -> Vec<String> {
+    inner
+        .pages
+        .keys()
+        .filter(|key| key.as_str() != HELPER_KEY)
+        .cloned()
+        .collect()
 }
 
 /// The browser and view of a tracked tab.
@@ -651,7 +358,7 @@ impl Bridge {
             inner: RefCell::new(Inner {
                 next_delivery: 1,
                 next_generation: 1,
-                next_token: 1,
+                next_message: 1,
                 ..Inner::default()
             }),
         })
@@ -665,24 +372,22 @@ impl Bridge {
         let Some(host) = browser.host() else {
             return;
         };
-        let probe = Rc::new(Probe::default());
-        // Reserved before the call: CEF can answer inside it (see `Probe`).
-        probe.sent.set(RESERVED);
-        let mut observer = TabProbe::new(self.clone(), tab, probe.clone());
+        // The id is the probe's own and the observer knows it before the
+        // call: CEF can answer inside it.
+        let sent = Rc::new(Cell::new(TAB_PROBE_ID));
+        let mut observer = TabProbe::new(self.clone(), tab, sent.clone());
         let registration = host.add_dev_tools_message_observer(Some(&mut observer));
-        let id = host.execute_dev_tools_method(0, Some(&"Target.getTargetInfo".into()), None);
+        let id =
+            host.execute_dev_tools_method(TAB_PROBE_ID, Some(&"Target.getTargetInfo".into()), None);
         if id == 0 {
-            probe.sent.set(NOT_SENT);
-            probe.early.borrow_mut().clear();
+            sent.set(NOT_SENT);
             log::warn!("bridge: cannot ask {tab:?} for its target id");
-        } else {
-            probe.sent.set(id);
-            let early: Vec<(i32, bool, Vec<u8>)> = probe.early.borrow_mut().drain(..).collect();
-            for (message, success, result) in early {
-                if message == id {
-                    self.target_known(tab, success, &result);
-                }
-            }
+        } else if id != TAB_PROBE_ID {
+            // Not expected: the probe is the first call on its browser.
+            sent.set(id);
+            log::warn!(
+                "bridge: CEF replaced message id {TAB_PROBE_ID} with {id} for {tab:?}'s probe"
+            );
         }
         self.inner.borrow_mut().tabs.insert(
             tab,
@@ -748,7 +453,7 @@ impl Bridge {
                 inner.openers.remove(HELPER_KEY);
             }
             inner.helper_loaded = helper_loaded;
-            let open: Vec<String> = inner.relays.keys().cloned().collect();
+            let open = open_relays(&inner);
             let open: Vec<&str> = open.iter().map(String::as_str).collect();
             let (_, mut to_close) = relay_changes(&open, bridged);
             // Every extension that is off or gone, open relay or not, is no
@@ -763,20 +468,12 @@ impl Bridge {
                 inner.watches.remove(id);
                 inner.pending_sessions.remove(id);
             }
-            let close_helper = bridged.is_empty() && inner.helper.is_some();
+            let close_helper = bridged.is_empty() && inner.pages.contains_key(HELPER_KEY);
             (close_helper, to_close)
         };
         if close_helper {
             log::info!("bridge: no bridged extension is on; the helper's page closes");
-            let page = {
-                let mut inner = self.inner.borrow_mut();
-                drop_pending(&mut inner, HELPER_KEY, "the helper's page closed");
-                inner.refreshing = false;
-                inner.helper.take()
-            };
-            if let Some(page) = page {
-                page.close();
-            }
+            self.close_relay(HELPER_KEY);
         }
         for id in to_close {
             self.close_relay(&id);
@@ -800,12 +497,11 @@ impl Bridge {
         }
         let (helper_loaded, wanted, helper_open, open) = {
             let inner = self.inner.borrow();
-            let open: Vec<String> = inner.relays.keys().cloned().collect();
             (
                 inner.helper_loaded,
                 inner.wanted.clone(),
-                inner.helper.is_some(),
-                open,
+                inner.pages.contains_key(HELPER_KEY),
+                open_relays(&inner),
             )
         };
         if wanted.is_empty() {
@@ -818,18 +514,10 @@ impl Bridge {
                 relay_changes(&open, &wanted).0,
             )
         };
-        if helper_wanted && self.opening_due(HELPER_KEY, now) {
-            let url = format!("chrome-extension://{HELPER_ID}/helper.html");
-            let generation = self.next_generation();
-            let page = HiddenPage::open(self, HELPER_KEY, &url, generation);
-            if page.is_none() {
-                log::error!("bridge: Chromium could not create the helper's page");
-            }
-            self.inner.borrow_mut().helper = page;
-        }
-        for id in relays_wanted {
-            if self.opening_due(&id, now) {
-                self.open_relay(&id);
+        let helper = helper_wanted.then(|| HELPER_KEY.to_string());
+        for key in helper.into_iter().chain(relays_wanted) {
+            if self.opening_due(&key, now) {
+                self.open_page(&key);
             }
         }
     }
@@ -841,13 +529,14 @@ impl Bridge {
     /// So a reload is seen within a bounded time, tab activity or not.
     fn refresh_due(&self, now: std::time::Instant) -> bool {
         let mut inner = self.inner.borrow_mut();
-        if inner.relays.is_empty() {
+        if open_relays(&inner).is_empty() {
             return false;
         }
         let since = inner
             .last_refresh
             .map(|at| now.saturating_duration_since(at));
-        if check_due(since, REFRESH_INTERVAL) {
+        // Due when never made, or when the interval has passed.
+        if since.is_none_or(|elapsed| elapsed >= REFRESH_INTERVAL) {
             inner.last_refresh = Some(now);
             true
         } else {
@@ -870,7 +559,7 @@ impl Bridge {
             let mut inner = self.inner.borrow_mut();
             for extension in inner.wanted.clone() {
                 let listed = worker_target_of(targets, &extension);
-                let relay_open = inner.relays.contains_key(&extension);
+                let relay_open = inner.pages.contains_key(&extension);
                 let watch = inner.watches.entry(extension.clone()).or_default();
                 let recorded = watch.recorded().map(str::to_string);
                 let (target, change) = watch.observe(listed.as_deref());
@@ -1037,17 +726,24 @@ impl Bridge {
         generation
     }
 
-    fn open_relay(self: &Rc<Self>, extension: &str) {
-        let url = format!("chrome-extension://{extension}{RELAY_PATH}");
+    /// Open the hidden page under `key`: the helper's, or an extension's
+    /// relay.
+    fn open_page(self: &Rc<Self>, key: &str) {
+        let is_helper = key == HELPER_KEY;
+        let url = if is_helper {
+            format!("chrome-extension://{HELPER_ID}/helper.html")
+        } else {
+            format!("chrome-extension://{key}{RELAY_PATH}")
+        };
         let generation = self.next_generation();
-        match HiddenPage::open(self, extension, &url, generation) {
+        match HiddenPage::open(self, key, &url, generation) {
             Some(page) => {
-                self.inner
-                    .borrow_mut()
-                    .relays
-                    .insert(extension.to_string(), page);
+                self.inner.borrow_mut().pages.insert(key.to_string(), page);
             }
-            None => log::error!("bridge: Chromium could not create the relay of {extension}"),
+            None if is_helper => {
+                log::error!("bridge: Chromium could not create the helper's page");
+            }
+            None => log::error!("bridge: Chromium could not create the relay of {key}"),
         }
     }
 
@@ -1057,14 +753,11 @@ impl Bridge {
     fn close_relay(&self, extension: &str) {
         let page = {
             let mut inner = self.inner.borrow_mut();
-            let page = if extension == HELPER_KEY {
+            if extension == HELPER_KEY {
                 inner.refreshing = false;
-                inner.helper.take()
-            } else {
-                inner.relays.remove(extension)
-            };
+            }
             drop_pending(&mut inner, extension, "its page was closed");
-            page
+            inner.pages.remove(extension)
         };
         if let Some(page) = page {
             page.close();
@@ -1113,18 +806,25 @@ impl Bridge {
     }
 
     /// Hide `tab` once no debugger is left on it, and log that it was hidden
-    /// again, in the words the detach path uses (`set_debugged`): the driver's
-    /// checks read that line, so it is logged only when the tab was hidden.
+    /// again. Every path that takes a tab's last debugger away ends here, so
+    /// the line has one wording: the driver's checks read it, and it is
+    /// logged only when the tab was hidden.
     fn hide_again(&self, tab: TabId, handles: Option<TabHandles>, chromium: Option<i64>) {
         let Some((browser, view)) = handles else {
             return;
         };
         if set_tab_debugged(&browser, &view, false) {
-            let chromium = chromium.map_or_else(|| "?".to_string(), |id| id.to_string());
             log::info!(
-                "bridge: {tab:?} (Chromium tab {chromium}) hidden again: no debugger is left on it"
+                "bridge: {tab:?} (Chromium tab {}) hidden again: no debugger is left on it",
+                chromium_label(chromium)
             );
         }
+    }
+
+    /// Acknowledge a debugger report: the worker waits for the answer, and
+    /// must not hang on it whatever became of the report.
+    fn acknowledge(&self, extension: &str, instance: &str, call: u64) {
+        self.reply(extension, instance, call, &json!({"result": null}));
     }
 
     /// Close every hidden page; the engine pumps until they are gone.
@@ -1139,8 +839,7 @@ impl Bridge {
             inner.pending.clear();
             inner.jobs.clear();
             inner.wanted.clear();
-            let mut pages: Vec<HiddenPage> = inner.helper.take().into_iter().collect();
-            pages.extend(inner.relays.drain().map(|(_, page)| page));
+            let pages: Vec<HiddenPage> = inner.pages.drain().map(|(_, page)| page).collect();
             (pages, tabs)
         };
         // The tabs' records and the pages are let go with no borrow held.
@@ -1150,48 +849,36 @@ impl Bridge {
         }
     }
 
-    /// Evaluate `expression` in the page under `key`; the pending entry is
-    /// reserved before the call and settled after it, so an answer that
-    /// CEF gives inside the call (before the call returns its id) is still
-    /// matched (`page_result`). The state is not borrowed across the call.
+    /// Evaluate `expression` in the page under `key`. The pending entry is
+    /// recorded before the call, under a message id of the bridge's own
+    /// (`Inner::next_message`), so an answer that CEF gives inside the call
+    /// finds it (`page_result`). The state is not borrowed across the call.
     fn evaluate(&self, key: &str, expression: &str, pending: Pending) -> bool {
-        let browser = {
-            let inner = self.inner.borrow();
-            page_ref(&inner, key).map(|page| page.browser.clone())
+        let (browser, id) = {
+            let mut inner = self.inner.borrow_mut();
+            let Some(browser) = page_ref(&inner, key).map(|page| page.browser.clone()) else {
+                return false;
+            };
+            let id = inner.next_message;
+            inner.next_message += 1;
+            inner.pending.insert((key.to_string(), id), pending);
+            (browser, id)
         };
-        let Some(browser) = browser else {
-            return false;
-        };
-        let token = self.reserve(key, pending);
-        let id = HiddenPage::evaluate(&browser, expression);
-        self.settle(token, key, id)
-    }
-
-    fn reserve(&self, key: &str, pending: Pending) -> u64 {
+        let sent = HiddenPage::evaluate(&browser, id, expression);
+        if sent == Some(id) {
+            return true;
+        }
+        // The entry may be gone already: its page can be lost inside the call.
         let mut inner = self.inner.borrow_mut();
-        let token = inner.next_token;
-        inner.next_token += 1;
-        inner.sending.push(Sending {
-            token,
-            key: key.to_string(),
-            pending: Some(pending),
-        });
-        token
-    }
-
-    /// The call returned `id`: the reservation becomes a pending entry under
-    /// it, unless the answer already came (and took the entry). A failed call
-    /// leaves nothing pending.
-    fn settle(&self, token: u64, key: &str, id: Option<i32>) -> bool {
-        let mut inner = self.inner.borrow_mut();
-        let Some(at) = inner.sending.iter().position(|s| s.token == token) else {
-            return id.is_some();
-        };
-        let sent = inner.sending.remove(at);
-        match id {
-            Some(id) => {
-                if let Some(pending) = sent.pending {
-                    inner.pending.insert((key.to_string(), id), pending);
+        let entry = inner.pending.remove(&(key.to_string(), id));
+        match sent {
+            Some(sent) => {
+                // Not expected (see `Inner::next_message`). An answer that came
+                // inside the call found no entry and is lost.
+                log::warn!("bridge: CEF replaced message id {id} with {sent} for the page {key}");
+                inner.next_message = inner.next_message.max(sent.saturating_add(1));
+                if let Some(entry) = entry {
+                    inner.pending.insert((key.to_string(), sent), entry);
                 }
                 true
             }
@@ -1205,7 +892,7 @@ impl Bridge {
     }
 
     /// A hidden page's main frame loaded.
-    fn page_ready(self: &Rc<Self>, key: &str, generation: u64) {
+    pub(super) fn page_ready(self: &Rc<Self>, key: &str, generation: u64) {
         {
             let inner = self.inner.borrow();
             if !is_current(&inner, key, generation) {
@@ -1235,12 +922,12 @@ impl Bridge {
 
     /// A hidden page is gone: it was closed, its renderer terminated, or its
     /// DevTools session ended. Its pending evaluations are dropped, and the
-    /// jobs that need it fail now (`policy::failed_by_loss`): a debugger
+    /// jobs that need it fail now (`policy::fails_on_loss`): a debugger
     /// report does not, since it needs the table, and waits for the next
     /// join. A wanted relay is opened again by the next turn (`reopen`),
     /// never from this callback. `close` says the page still has to be
     /// closed by us.
-    fn page_gone(self: &Rc<Self>, key: &str, generation: u64, why: &str, close: bool) {
+    pub(super) fn page_gone(self: &Rc<Self>, key: &str, generation: u64, why: &str, close: bool) {
         let (page, stale_jobs) = {
             let mut inner = self.inner.borrow_mut();
             let Some(page) = take_page(&mut inner, key, generation) else {
@@ -1251,22 +938,9 @@ impl Bridge {
             if is_helper {
                 inner.refreshing = false;
             }
-            let jobs = std::mem::take(&mut inner.jobs);
-            let fail = {
-                let kinds: Vec<(JobKind, &str)> = jobs
-                    .iter()
-                    .map(|job| (job.kind(), job.extension()))
-                    .collect();
-                failed_by_loss(key, is_helper, &kinds)
-            };
-            let (mut stale, mut kept) = (Vec::new(), Vec::new());
-            for (job, failed) in jobs.into_iter().zip(fail) {
-                if failed {
-                    stale.push(job);
-                } else {
-                    kept.push(job);
-                }
-            }
+            let (stale, kept): (Vec<Job>, Vec<Job>) = std::mem::take(&mut inner.jobs)
+                .into_iter()
+                .partition(|job| fails_on_loss(job.kind(), job.extension(), key, is_helper));
             inner.jobs = kept;
             (page, stale)
         };
@@ -1286,7 +960,7 @@ impl Bridge {
     /// asked again from this callback: CEF reports the end again to a call
     /// made inside it, which turned into an endless loop (the run that found
     /// this logged the report thousands of times in a millisecond).
-    fn page_detached(self: &Rc<Self>, key: &str, generation: u64) {
+    pub(super) fn page_detached(self: &Rc<Self>, key: &str, generation: u64) {
         let current = is_current(&self.inner.borrow(), key, generation);
         if current {
             self.page_gone(key, generation, "its DevTools session ended", true);
@@ -1358,29 +1032,49 @@ impl Bridge {
     /// `extension`'s action was clicked for `tab`. False when the
     /// extension is not wanted a relay (it is not bridged, or is off).
     pub(crate) fn click(&self, extension: &str, tab: TabId) -> bool {
-        if self.given_up(extension) || self.given_up(HELPER_KEY) {
-            log::warn!("bridge: the click on {extension} is refused: its page did not load");
-            return false;
-        }
-        {
-            let mut inner = self.inner.borrow_mut();
-            // A wanted relay that closed underneath is reopened on the next
-            // turn, and its click waits for it (`job_turn`).
-            if !inner.wanted.iter().any(|id| id == extension) {
-                return false;
+        match self.deliver(extension, |_| Payload::Click { tab }) {
+            Ok(()) => true,
+            Err(Undeliverable::GivenUp) => {
+                log::warn!("bridge: the click on {extension} is refused: its page did not load");
+                false
             }
-            let delivery = inner.next_delivery;
-            inner.next_delivery += 1;
-            drop(inner);
-            self.queue(Job::Click {
-                extension: extension.to_string(),
-                tab,
-                attempt: 0,
-                delivery,
-            });
+            Err(Undeliverable::NotWanted) => false,
         }
+    }
+
+    /// Queue a delivery to `extension`'s worker; `payload` is given the
+    /// worker instance the extension is known to have. An extension that
+    /// is not bridged and on, or whose relay (or the helper's page) has
+    /// been given up, has nothing to deliver to. A wanted relay that
+    /// closed underneath is reopened on the next turn, and the delivery
+    /// waits for it (`job_turn`).
+    fn deliver(
+        &self,
+        extension: &str,
+        payload: impl FnOnce(Option<String>) -> Payload,
+    ) -> Result<(), Undeliverable> {
+        if self.given_up(extension) || self.given_up(HELPER_KEY) {
+            return Err(Undeliverable::GivenUp);
+        }
+        let delivery = {
+            let mut inner = self.inner.borrow_mut();
+            if !inner.wanted.iter().any(|id| id == extension) {
+                return Err(Undeliverable::NotWanted);
+            }
+            let id = inner.next_delivery;
+            inner.next_delivery += 1;
+            Delivery {
+                id,
+                attempt: 0,
+                payload: payload(inner.identities.get(extension).cloned()),
+            }
+        };
+        self.queue(Job::Deliver {
+            extension: extension.to_string(),
+            delivery,
+        });
         self.refresh();
-        true
+        Ok(())
     }
 
     /// One request of `extension`'s worker, as the relay passed it on. The
@@ -1464,14 +1158,14 @@ impl Bridge {
     ) {
         let Some(debuggee) = debuggee else {
             log::warn!("bridge: {extension}: a debugger report names no tab or target");
-            self.reply(extension, instance, call, &json!({"result": null}));
+            self.acknowledge(extension, instance, call);
             return;
         };
         let known = self.inner.borrow().table.resolve(&debuggee);
         match known {
             Some(tab) => {
                 self.set_debugged(extension, tab, attach);
-                self.reply(extension, instance, call, &json!({"result": null}));
+                self.acknowledge(extension, instance, call);
             }
             // Not in the table yet: the next join decides it (`run`).
             None => {
@@ -1502,9 +1196,6 @@ impl Bridge {
             };
             (change, tab_handles(&inner, tab), inner.table.chromium(tab))
         };
-        // The Chromium id is in the log so that a run can name the tab a
-        // debugger was on by the id its extension knows it by.
-        let chromium = chromium.map_or_else(|| "?".to_string(), |id| id.to_string());
         match change {
             Change::Unchanged => {
                 log::debug!("bridge: {extension}: {tab:?} debugger unchanged");
@@ -1515,19 +1206,14 @@ impl Bridge {
                     && set_tab_debugged(&browser, &view, true)
                 {
                     log::info!(
-                        "bridge: {tab:?} (Chromium tab {chromium}) was hidden; shown for the debugger of {extension}"
+                        "bridge: {tab:?} (Chromium tab {}) was hidden; shown for the debugger of {extension}",
+                        chromium_label(chromium)
                     );
                 }
             }
             Change::Undebugged => {
                 log::info!("bridge: {extension} no longer debugs {tab:?}");
-                if let Some((browser, view)) = handles
-                    && set_tab_debugged(&browser, &view, false)
-                {
-                    log::info!(
-                        "bridge: {tab:?} (Chromium tab {chromium}) hidden again: no debugger is left on it"
-                    );
-                }
+                self.hide_again(tab, handles, chromium);
             }
         }
     }
@@ -1621,12 +1307,10 @@ impl Bridge {
             );
         }
         for job in stale {
-            if let Job::Emit {
-                event, delivery, ..
-            } = job
-            {
+            if let Job::Deliver { delivery, .. } = job {
                 log::warn!(
-                    "bridge: {extension}: event {event} (delivery {delivery}) is dropped: its worker instance was replaced"
+                    "bridge: {extension}: {} is dropped: its worker instance was replaced",
+                    delivery.label()
                 );
             }
         }
@@ -1748,26 +1432,19 @@ impl Bridge {
     fn fail_jobs(&self, jobs: Vec<Job>, why: &str) {
         for job in jobs {
             match job {
-                Job::Emit {
+                Job::Deliver {
                     extension,
-                    event,
                     delivery,
-                    ..
-                } => {
-                    log::warn!(
-                        "bridge: {extension}: event {event} (delivery {delivery}) is dropped: {why}"
-                    );
-                }
-                Job::Click {
-                    extension,
-                    tab,
-                    delivery,
-                    ..
-                } => {
-                    log::warn!(
-                        "bridge: {extension}: the click on {tab:?} (delivery {delivery}) is dropped: {why}"
-                    );
-                }
+                } => match delivery.payload {
+                    Payload::Click { tab } => log::warn!(
+                        "bridge: {extension}: the click on {tab:?} (delivery {}) is dropped: {why}",
+                        delivery.id
+                    ),
+                    Payload::Event { .. } => log::warn!(
+                        "bridge: {extension}: {} is dropped: {why}",
+                        delivery.label()
+                    ),
+                },
                 Job::Debugger {
                     extension,
                     call,
@@ -1778,66 +1455,59 @@ impl Bridge {
                     log::warn!(
                         "bridge: {extension}: the debugger of {debuggee:?} is not tracked: {why}"
                     );
-                    self.reply(&extension, &instance, call, &json!({"result": null}));
+                    self.acknowledge(&extension, &instance, call);
                 }
             }
         }
     }
 
-    fn run(&self, job: Job) {
-        match job {
-            Job::Emit {
-                extension,
-                event,
-                args,
-                attempt,
-                delivery,
-                instance,
-            } => {
-                let message = json!({"id": delivery, "event": event, "args": args});
-                let expression = format!("nautilusRelay.deliver({message})");
-                let pending = Pending::Emit {
-                    event: event.clone(),
-                    args,
-                    attempt,
-                    delivery,
-                    instance,
-                };
-                if self.evaluate(&extension, &expression, pending) {
-                    log::debug!("bridge: {extension}: event {event} (delivery {delivery}) sent");
-                } else {
-                    log::warn!("bridge: cannot reach the relay of {extension} for {event}");
-                }
-            }
-            Job::Click {
-                extension,
-                tab,
-                attempt,
-                delivery,
-            } => {
-                let chromium = self.inner.borrow().table.chromium(tab);
+    /// Hand `delivery` to `extension`'s relay, which passes it to the
+    /// worker. A click names its tab by Chromium's id, read from the table
+    /// now; a click on a tab the table cannot name is dropped.
+    fn send(&self, extension: &str, delivery: Delivery) {
+        let id = delivery.id;
+        let (message, sent, unreachable) = match &delivery.payload {
+            Payload::Click { tab } => {
+                let chromium = self.inner.borrow().table.chromium(*tab);
                 let Some(chromium) = chromium else {
                     log::warn!(
                         "bridge: no Chromium tab id for {tab:?}; the click on {extension} is dropped"
                     );
                     return;
                 };
-                let message =
-                    json!({"id": delivery, "event": "action.onClicked", "tabId": chromium});
-                let expression = format!("nautilusRelay.deliver({message})");
-                let pending = Pending::Deliver {
-                    tab,
-                    attempt,
-                    delivery,
-                };
-                if self.evaluate(&extension, &expression, pending) {
-                    log::info!(
-                        "bridge: {extension}: delivery {delivery} (action.onClicked, tab {chromium}) sent"
-                    );
-                } else {
-                    log::warn!("bridge: cannot reach the relay of {extension}");
-                }
+                (
+                    json!({"id": id, "event": "action.onClicked", "tabId": chromium}),
+                    format!(
+                        "bridge: {extension}: delivery {id} (action.onClicked, tab {chromium}) sent"
+                    ),
+                    format!("bridge: cannot reach the relay of {extension}"),
+                )
             }
+            Payload::Event { event, args, .. } => (
+                json!({"id": id, "event": event, "args": args}),
+                format!("bridge: {extension}: event {event} (delivery {id}) sent"),
+                format!("bridge: cannot reach the relay of {extension} for {event}"),
+            ),
+        };
+        // A click's sending is part of a run's record; an event's is not.
+        let level = match delivery.payload {
+            Payload::Click { .. } => log::Level::Info,
+            Payload::Event { .. } => log::Level::Debug,
+        };
+        let expression = format!("nautilusRelay.deliver({message})");
+        if self.evaluate(extension, &expression, Pending::Deliver(delivery)) {
+            log::log!(level, "{sent}");
+        } else {
+            log::warn!("{unreachable}");
+        }
+    }
+
+    fn run(&self, job: Job) {
+        match job {
+            Job::Deliver {
+                extension,
+                delivery,
+            } => self.send(&extension, delivery),
             Job::Debugger {
                 extension,
                 call,
@@ -1852,13 +1522,13 @@ impl Bridge {
                         "bridge: {extension}: {debuggee:?} is no Nautilus tab in the table; its debugger is not tracked"
                     ),
                 }
-                self.reply(&extension, &instance, call, &json!({"result": null}));
+                self.acknowledge(&extension, &instance, call);
             }
         }
     }
 
     /// An evaluation in a hidden page answered.
-    fn page_result(
+    pub(super) fn page_result(
         self: &Rc<Self>,
         key: &str,
         generation: u64,
@@ -1871,17 +1541,7 @@ impl Bridge {
             if !is_current(&inner, key, generation) {
                 return;
             }
-            match inner.pending.remove(&(key.to_string(), id)) {
-                Some(pending) => Some(pending),
-                // The answer came while its call was still running, before
-                // the call returned the id: it is the reservation's.
-                None => inner
-                    .sending
-                    .iter_mut()
-                    .rev()
-                    .find(|s| s.key == key && s.pending.is_some())
-                    .and_then(|s| s.pending.take()),
-            }
+            inner.pending.remove(&(key.to_string(), id))
         };
         let Some(pending) = pending else {
             return;
@@ -2053,87 +1713,54 @@ impl Bridge {
                     log::warn!("bridge: an answer to {key} was lost: {e}");
                 }
             }
-            Pending::Deliver {
-                tab,
-                attempt,
-                delivery,
-            } => match after_delivery(&value, attempt) {
-                Next::Finished => {
-                    let attempts = value
+            Pending::Deliver(delivery) => self.delivered(key, delivery, &value),
+        }
+    }
+
+    /// The relay of `extension` answered a delivery (`policy::after_delivery`).
+    fn delivered(&self, extension: &str, mut delivery: Delivery, outcome: &Result<Value, String>) {
+        let label = delivery.label();
+        match after_delivery(outcome, delivery.attempt) {
+            Next::Finished => match delivery.payload {
+                Payload::Click { .. } => {
+                    let attempts = outcome
                         .as_ref()
                         .ok()
                         .and_then(|v| v.get("attempts"))
                         .and_then(Value::as_u64)
                         .unwrap_or(0);
                     log::info!(
-                        "bridge: {key}: delivery {delivery} taken by the worker after {attempts} attempt(s)"
+                        "bridge: {extension}: {label} taken by the worker after {attempts} attempt(s)"
                     );
                 }
-                Next::Retry => {
-                    log::warn!(
-                        "bridge: {key}: delivery {delivery} was not acknowledged ({}); trying once more with a fresh relay",
-                        describe(&value)
-                    );
-                    // Closed here, reopened by the next turn (`reopen`): a
-                    // callback creates no browser.
-                    self.close_relay(key);
-                    self.queue(Job::Click {
-                        extension: key.to_string(),
-                        tab,
-                        attempt: attempt + 1,
-                        delivery,
-                    });
-                }
-                Next::Abandon { reopen } => {
-                    log::warn!(
-                        "bridge: {key}: delivery {delivery} dropped: {}",
-                        describe(&value)
-                    );
-                    if reopen {
-                        self.close_relay(key);
-                    }
+                Payload::Event { .. } => {
+                    log::debug!("bridge: {extension}: {label} taken by the worker");
                 }
             },
-            Pending::Emit {
-                event,
-                args,
-                attempt,
-                delivery,
-                instance,
-            } => match after_delivery(&value, attempt) {
-                Next::Finished => {
-                    log::debug!(
-                        "bridge: {key}: event {event} (delivery {delivery}) taken by the worker"
-                    );
+            Next::Retry => {
+                log::warn!(
+                    "bridge: {extension}: {label} was not acknowledged ({}); trying once more with a fresh relay",
+                    describe(outcome)
+                );
+                // Closed here, reopened by the next turn (`reopen`): a
+                // callback creates no browser. The id is kept, so an
+                // instance that ran the delivery ignores the repeat.
+                self.close_relay(extension);
+                delivery.attempt += 1;
+                self.queue(Job::Deliver {
+                    extension: extension.to_string(),
+                    delivery,
+                });
+            }
+            Next::Abandon { reopen } => {
+                log::warn!(
+                    "bridge: {extension}: {label} dropped: {}",
+                    describe(outcome)
+                );
+                if reopen {
+                    self.close_relay(extension);
                 }
-                Next::Retry => {
-                    log::warn!(
-                        "bridge: {key}: event {event} (delivery {delivery}) was not acknowledged ({}); trying once more with a fresh relay",
-                        describe(&value)
-                    );
-                    // Closed here, reopened by the next turn (`reopen`): a
-                    // callback creates no browser. The id is kept, so an
-                    // instance that ran the event ignores the repeat.
-                    self.close_relay(key);
-                    self.queue(Job::Emit {
-                        extension: key.to_string(),
-                        event,
-                        args,
-                        attempt: attempt + 1,
-                        delivery,
-                        instance,
-                    });
-                }
-                Next::Abandon { reopen } => {
-                    log::warn!(
-                        "bridge: {key}: event {event} (delivery {delivery}) dropped: {}",
-                        describe(&value)
-                    );
-                    if reopen {
-                        self.close_relay(key);
-                    }
-                }
-            },
+            }
         }
     }
 
@@ -2200,31 +1827,20 @@ impl Bridge {
     /// on, or whose relay has given up, has nothing to deliver to: the event is
     /// dropped (logged) and never retried, as an undeliverable click is.
     fn event(&self, extension: &str, event: &str, args: &[Value]) {
-        if self.given_up(extension) || self.given_up(HELPER_KEY) {
-            log::warn!("bridge: {event} for {extension} is dropped: its page did not load");
-            return;
-        }
-        let (delivery, instance) = {
-            let mut inner = self.inner.borrow_mut();
-            if !inner.wanted.iter().any(|id| id == extension) {
-                log::debug!(
-                    "bridge: {event} for {extension} is not delivered: it is not bridged and on"
-                );
-                return;
-            }
-            let delivery = inner.next_delivery;
-            inner.next_delivery += 1;
-            (delivery, inner.identities.get(extension).cloned())
-        };
-        self.queue(Job::Emit {
-            extension: extension.to_string(),
+        let queued = self.deliver(extension, |instance| Payload::Event {
             event: event.to_string(),
             args: args.to_vec(),
-            attempt: 0,
-            delivery,
             instance,
         });
-        self.refresh();
+        match queued {
+            Ok(()) => {}
+            Err(Undeliverable::GivenUp) => {
+                log::warn!("bridge: {event} for {extension} is dropped: its page did not load");
+            }
+            Err(Undeliverable::NotWanted) => log::debug!(
+                "bridge: {event} for {extension} is not delivered: it is not bridged and on"
+            ),
+        }
     }
 }
 
@@ -2257,10 +1873,17 @@ impl BridgeTransport for Bridge {
 /// instance `current` makes stale (`policy::job_kept`).
 fn is_stale_event(job: &Job, extension: &str, current: &str) -> bool {
     match job {
-        Job::Emit {
+        Job::Deliver {
             extension: e,
-            instance: Some(instance),
-            ..
+            delivery:
+                Delivery {
+                    payload:
+                        Payload::Event {
+                            instance: Some(instance),
+                            ..
+                        },
+                    ..
+                },
         } => e.as_str() == extension && !job_kept(JobKind::Emit, instance, current),
         _ => false,
     }
@@ -2269,16 +1892,8 @@ fn is_stale_event(job: &Job, extension: &str, current: &str) -> bool {
 /// Log a pending evaluation that is lost with its page: a delivery or an
 /// event among them is unknown to the engine from now on.
 fn log_lost(key: &str, pending: &Pending, why: &str) {
-    match pending {
-        Pending::Deliver { delivery, .. } => {
-            log::warn!("bridge: {key}: delivery {delivery} is unknown ({why})");
-        }
-        Pending::Emit {
-            event, delivery, ..
-        } => {
-            log::warn!("bridge: {key}: event {event} (delivery {delivery}) is unknown ({why})");
-        }
-        _ => {}
+    if let Pending::Deliver(delivery) = pending {
+        log::warn!("bridge: {key}: {} is unknown ({why})", delivery.label());
     }
 }
 
@@ -2292,14 +1907,13 @@ fn drop_pending(inner: &mut Inner, key: &str, why: &str) {
         log_lost(key, pending, why);
         false
     });
-    // An evaluation still inside its call is dropped with its page: its
-    // answer, if any, is for a page that is gone.
-    for sent in inner.sending.iter_mut().filter(|s| s.key == key) {
-        if let Some(pending) = &sent.pending {
-            log_lost(key, pending, why);
-        }
-        sent.pending = None;
-    }
+}
+
+/// A tab's Chromium id as the log shows it, so that a run can name the tab
+/// a debugger was on by the id its extension knows it by; `?` when the
+/// table does not know it.
+fn chromium_label(chromium: Option<i64>) -> String {
+    chromium.map_or_else(|| "?".to_string(), |id| id.to_string())
 }
 
 /// A delivery's outcome as the log shows it.
@@ -2310,22 +1924,14 @@ fn describe(value: &Result<Value, String>) -> String {
     }
 }
 
-/// One tab's probe for its target id: the message id of the one
-/// `Target.getTargetInfo` it sends (`sent`). Until the call returns, that id
-/// is `RESERVED`, and CEF's answers in the window are kept (`early`); they
-/// count only once the call has returned the id they carry. So the probe
-/// acts on its own result and on no other method's result.
-#[derive(Default)]
-struct Probe {
-    sent: Cell<i32>,
-    early: RefCell<Vec<(i32, bool, Vec<u8>)>>,
-}
-
+// One tab's probe for its target id. `sent` is the message id of the one
+// `Target.getTargetInfo` it sends (`TAB_PROBE_ID`, set before the call), so
+// the probe acts on its own result and on no other method's result.
 wrap_dev_tools_message_observer! {
     struct TabProbe {
         bridge: Rc<Bridge>,
         tab: TabId,
-        probe: Rc<Probe>,
+        sent: Rc<Cell<i32>>,
     }
 
     impl DevToolsMessageObserver {
@@ -2336,17 +1942,9 @@ wrap_dev_tools_message_observer! {
             success: ::std::os::raw::c_int,
             result: Option<&[u8]>,
         ) {
-            let result = result.unwrap_or_default();
-            match self.probe.sent.get() {
-                RESERVED => self
-                    .probe
-                    .early
-                    .borrow_mut()
-                    .push((message_id, success != 0, result.to_vec())),
-                sent if sent == message_id => {
-                    self.bridge.target_known(self.tab, success != 0, result);
-                }
-                _ => {}
+            if self.sent.get() == message_id {
+                self.bridge
+                    .target_known(self.tab, success != 0, result.unwrap_or_default());
             }
         }
     }

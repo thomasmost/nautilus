@@ -17,9 +17,12 @@
 // kept (and tested) everywhere, so its lints are quiet elsewhere.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 mod crx;
-// The bridge's pure parts are kept (and tested) everywhere; only
-// Windows and macOS run extensions.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+// The extension bridge, on the platforms that run extensions. This is
+// its one gate: the rest of the crate reaches it through
+// `ExtensionManager`, whose stub stands in elsewhere (`extensions.rs`),
+// and through the two places CEF hands it a process message or a new
+// script context (`delegate.rs`, `store.rs`).
+#[cfg(any(windows, target_os = "macos"))]
 mod bridge;
 mod delegate;
 mod devtools;

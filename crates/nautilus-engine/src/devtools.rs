@@ -2,18 +2,39 @@
 //! windowed browser Chromium opens in a top-level window of its own.
 //! Closing the tab closes them; the live-browser count keeps shutdown
 //! waiting for them like for any browser.
+//!
+//! Also here: `evaluate`, the DevTools call the engine runs scripts in
+//! its own hidden pages with.
 
 use std::rc::Rc;
 
 use cef::rc::Rc as _;
 
 use cef::{
-    Browser, BrowserHost, BrowserSettings, Client, DialogHandler, ImplBrowserHost, ImplClient,
-    ImplLifeSpanHandler, LifeSpanHandler, Point, WindowInfo, WrapClient, WrapLifeSpanHandler,
-    wrap_client, wrap_life_span_handler,
+    Browser, BrowserHost, BrowserSettings, CefString, Client, DialogHandler, ImplBrowserHost,
+    ImplClient, ImplDictionaryValue, ImplLifeSpanHandler, LifeSpanHandler, Point, WindowInfo,
+    WrapClient, WrapLifeSpanHandler, wrap_client, wrap_life_span_handler,
 };
 
 use crate::delegate::DelegateState;
+
+/// `Runtime.evaluate` of `expression` through `host`'s DevTools agent: a
+/// promise is awaited and the value comes back by value, to the browser's
+/// DevTools observer (`bridge::evaluation` reads it). `id` is the message
+/// id to use, or 0 for the browser's next one. Returns the id the answer
+/// will carry, or `None` when the call was not sent.
+pub(crate) fn evaluate(host: &BrowserHost, id: i32, expression: &str) -> Option<i32> {
+    let mut params = cef::dictionary_value_create()?;
+    params.set_string(
+        Some(&"expression".into()),
+        Some(&CefString::from(expression)),
+    );
+    params.set_bool(Some(&"awaitPromise".into()), 1);
+    params.set_bool(Some(&"returnByValue".into()), 1);
+    let sent =
+        host.execute_dev_tools_method(id, Some(&"Runtime.evaluate".into()), Some(&mut params));
+    (sent != 0).then_some(sent)
+}
 
 /// Open the developer tools of `host`'s browser, inspecting the element
 /// at `point` (logical pixels from the view's top left) if given.

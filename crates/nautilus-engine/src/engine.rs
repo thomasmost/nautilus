@@ -24,17 +24,12 @@ use cef::{
 };
 use osmena_core::{
     BlockedSites, DownloadPolicy, EngineEvent, EngineInfo, ExtensionReply, ExtensionSource,
-    ExtensionSupport, PageTools, PendingTab, TabId,
+    ExtensionSupport, PageTools, PendingTab,
 };
 use osmena_engine::raw_window_handle::{DisplayHandle, WindowHandle};
 use osmena_engine::{EngineError, GlutinSurface, PhysicalSize, Waker, WindowStrip};
 use url::Url;
 
-#[cfg(any(windows, target_os = "macos"))]
-use crate::bridge::hub::{Hub, Reporter};
-use crate::bridge::pages::PageLane;
-#[cfg(any(windows, target_os = "macos"))]
-use crate::bridge::transport::BridgeTransport;
 use crate::delegate::DelegateState;
 use crate::extensions::{ExtensionManager, UnpackQueue};
 use crate::host::TabHost;
@@ -138,9 +133,6 @@ fn load_framework(_helper: bool) {}
 pub struct Engine {
     delegate: Rc<DelegateState>,
     extensions: Rc<ExtensionManager>,
-    /// The bridge between extension contexts and the model.
-    #[cfg(any(windows, target_os = "macos"))]
-    hub: Rc<Hub>,
     /// True while inside `do_message_loop_work`, whose callbacks may ask
     /// for another spin; that request is served on the next call.
     spinning: Cell<bool>,
@@ -221,49 +213,22 @@ impl Engine {
         }
         let delegate = Rc::new(DelegateState::default());
         *shared_delegate.borrow_mut() = Some(delegate.clone());
-        let extensions =
-            ExtensionManager::start(delegate.clone(), &engine_dir, UnpackQueue::new(waker));
-        delegate.set_extensions(&extensions);
-        // The hub: the bridge's CEF-facing half. Its worker lane is the relay
-        // bridge, whose table says which Chromium tab id each tab has. The
-        // extension pages' lane is made with the hub, below.
-        #[cfg(any(windows, target_os = "macos"))]
-        let hub = {
-            let bridge = extensions.bridge();
-            let table = {
-                let bridge = bridge.clone();
-                Box::new(move |tab: TabId| bridge.chromium_id(tab))
-            };
-            let nudge = {
-                let pump = pump.clone();
-                Box::new(move || pump.schedule(50))
-            };
-            // Extension pages call the bridge on their own lane (`pages.rs`);
-            // the delegate holds it too, for the tabs' process messages.
-            let page_lane = Rc::new(PageLane::default());
-            delegate.set_page_lane(&page_lane);
-            let reporter: Reporter = {
-                let bridge = bridge.clone();
-                Box::new(move |tab, chromium, extension| {
-                    bridge.report_tab(tab, chromium, extension)
-                })
-            };
-            let hub = Hub::new(
-                &delegate,
-                bridge.clone() as Rc<dyn BridgeTransport>,
-                Some(page_lane.clone()),
-                table,
-                reporter,
-                nudge,
-            );
-            delegate.set_hub(&hub);
-            hub
+        // The bridge asks for another turn of the pump while it has
+        // something to wait for.
+        let nudge = {
+            let pump = pump.clone();
+            Box::new(move || pump.schedule(50))
         };
+        let extensions = ExtensionManager::start(
+            delegate.clone(),
+            &engine_dir,
+            UnpackQueue::new(waker),
+            nudge,
+        );
+        delegate.set_extensions(&extensions);
         Ok(Engine {
             delegate,
             extensions,
-            #[cfg(any(windows, target_os = "macos"))]
-            hub,
             spinning: Cell::new(false),
             pump,
         })
@@ -303,8 +268,7 @@ impl osmena_engine::Engine for Engine {
         let started = Instant::now();
         cef::do_message_loop_work();
         // Strips held for a tab's id, and answers held for a strip.
-        #[cfg(any(windows, target_os = "macos"))]
-        self.hub.tick();
+        self.extensions.tick_bridge();
         self.pump.after_spin(started.elapsed());
         self.spinning.set(false);
     }
@@ -361,18 +325,12 @@ impl osmena_engine::Engine for Engine {
     /// The strip changed: extensions' queries are answered from it, and its
     /// differences become their tab and window events.
     fn strip_changed(&self, windows: &[WindowStrip<'_>]) {
-        #[cfg(any(windows, target_os = "macos"))]
-        self.hub.strip_changed(windows);
-        #[cfg(not(any(windows, target_os = "macos")))]
-        let _ = windows;
+        self.extensions.strip_changed(windows);
     }
 
     /// The model's answer to an extension's request.
     fn extension_reply(&self, token: u64, reply: ExtensionReply) {
-        #[cfg(any(windows, target_os = "macos"))]
-        self.hub.extension_reply(token, reply);
-        #[cfg(not(any(windows, target_os = "macos")))]
-        let _ = (token, reply);
+        self.extensions.extension_reply(token, reply);
     }
 
     fn cancel_download(&self, id: u32) {
@@ -401,13 +359,7 @@ impl Drop for Engine {
     /// message loop, so pump it until the last one is gone (or give up
     /// after a moment).
     fn drop(&mut self) {
-        #[cfg(any(windows, target_os = "macos"))]
-        {
-            self.hub.shutdown();
-            if let Some(lane) = self.delegate.page_lane() {
-                lane.clear();
-            }
-        }
+        self.extensions.release_bridge();
         // A recent extension change is still only in memory; see
         // `ExtensionManager::settle_deadline`.
         if let Some(settle) = self.extensions.settle_deadline() {
