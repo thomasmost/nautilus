@@ -31,8 +31,8 @@ use super::install::HELPER_ID;
 use super::policy::{
     AfterAsk, Answered, Evidence, Identity, JobKind, JobTurn, MAX_OPENINGS, Next, Opening,
     Overflow, REFRESH_INTERVAL, Session, WorkerTarget, WorkerWatch, after_ask, after_delivery,
-    asks_on, check_due, failed_by_loss, forgets, identity, is_generation, job_kept, job_turn,
-    next_opening, overflow, relay_changes, reply_due, session_evidence, tabs_to_forget,
+    asks_on, fails_on_loss, forgets, identity, job_kept, job_turn, next_opening, overflow,
+    relay_changes, reply_due, session_evidence, tabs_to_forget,
 };
 use super::table::{
     Debuggee, Hello, Report, TabTable, Target, debuggee_of, hello_of, parse_targets, target_id_of,
@@ -291,9 +291,11 @@ pub(crate) struct Bridge {
     inner: RefCell<Inner>,
 }
 
-/// Whether the page under `key` is the one made under `generation`.
+/// Whether the page under `key` is the one made under `generation`: a
+/// callback from a page that is gone, or from the predecessor of the page
+/// now under its key, is not for the current one.
 fn is_current(inner: &Inner, key: &str, generation: u64) -> bool {
-    is_generation(page_ref(inner, key).map(|page| page.generation), generation)
+    page_ref(inner, key).is_some_and(|page| page.generation == generation)
 }
 
 fn page_ref<'a>(inner: &'a Inner, key: &str) -> Option<&'a HiddenPage> {
@@ -534,7 +536,8 @@ impl Bridge {
         let since = inner
             .last_refresh
             .map(|at| now.saturating_duration_since(at));
-        if check_due(since, REFRESH_INTERVAL) {
+        // Due when never made, or when the interval has passed.
+        if since.is_none_or(|elapsed| elapsed >= REFRESH_INTERVAL) {
             inner.last_refresh = Some(now);
             true
         } else {
@@ -932,7 +935,7 @@ impl Bridge {
 
     /// A hidden page is gone: it was closed, its renderer terminated, or its
     /// DevTools session ended. Its pending evaluations are dropped, and the
-    /// jobs that need it fail now (`policy::failed_by_loss`): a debugger
+    /// jobs that need it fail now (`policy::fails_on_loss`): a debugger
     /// report does not, since it needs the table, and waits for the next
     /// join. A wanted relay is opened again by the next turn (`reopen`),
     /// never from this callback. `close` says the page still has to be
@@ -948,22 +951,9 @@ impl Bridge {
             if is_helper {
                 inner.refreshing = false;
             }
-            let jobs = std::mem::take(&mut inner.jobs);
-            let fail = {
-                let kinds: Vec<(JobKind, &str)> = jobs
-                    .iter()
-                    .map(|job| (job.kind(), job.extension()))
-                    .collect();
-                failed_by_loss(key, is_helper, &kinds)
-            };
-            let (mut stale, mut kept) = (Vec::new(), Vec::new());
-            for (job, failed) in jobs.into_iter().zip(fail) {
-                if failed {
-                    stale.push(job);
-                } else {
-                    kept.push(job);
-                }
-            }
+            let (stale, kept): (Vec<Job>, Vec<Job>) = std::mem::take(&mut inner.jobs)
+                .into_iter()
+                .partition(|job| fails_on_loss(job.kind(), job.extension(), key, is_helper));
             inner.jobs = kept;
             (page, stale)
         };

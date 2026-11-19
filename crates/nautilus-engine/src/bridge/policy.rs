@@ -83,15 +83,13 @@ pub(crate) enum JobKind {
     Emit,
 }
 
-/// Which queued jobs fail when the page under `key` is gone. `is_helper`
-/// says the page is the helper's, which every tab list and click needs;
-/// otherwise the page is extension `key`'s relay. A debugger report is
-/// never failed (it waits for the next table), so the worker's attach or
-/// detach is still applied.
-pub(crate) fn failed_by_loss(key: &str, is_helper: bool, jobs: &[(JobKind, &str)]) -> Vec<bool> {
-    jobs.iter()
-        .map(|(kind, extension)| *kind != JobKind::Debugger && (is_helper || *extension == key))
-        .collect()
+/// Whether a queued job of `kind` for `extension` fails when the page
+/// under `key` is gone. `is_helper` says the page is the helper's, which
+/// every tab list and click needs; otherwise the page is extension
+/// `key`'s relay. A debugger report is never failed (it waits for the
+/// next table), so the worker's attach or detach is still applied.
+pub(crate) fn fails_on_loss(kind: JobKind, extension: &str, key: &str, is_helper: bool) -> bool {
+    kind != JobKind::Debugger && (is_helper || extension == key)
 }
 
 /// What the bound on the queue does with a queue of `kinds` (oldest
@@ -116,13 +114,6 @@ pub(crate) fn overflow(kinds: &[JobKind], max: usize) -> Overflow {
         Some(index) => Overflow::Fail(index),
         None => Overflow::Apply(0),
     }
-}
-
-/// Whether a callback from a page made under `generation` belongs to the
-/// page now under its key, `current`. A page that is gone (`None`), or a
-/// successor under a new generation, does not match.
-pub(crate) fn is_generation(current: Option<u64>, generation: u64) -> bool {
-    current == Some(generation)
 }
 
 /// One worker session state a hello reports for one tab.
@@ -346,12 +337,6 @@ impl WorkerWatch {
 /// `run.sh reload`); the target list is the one thing that shows it.
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Whether a check that was last made `since_last` ago (`None`: never) is due,
-/// given the interval between two checks.
-pub(crate) fn check_due(since_last: Option<Duration>, interval: Duration) -> bool {
-    since_last.is_none_or(|elapsed| elapsed >= interval)
-}
-
 /// How many openings of one hidden page may fail in a row before the engine
 /// stops opening it (`Opening::GiveUp`).
 pub(crate) const MAX_OPENINGS: u32 = 5;
@@ -502,13 +487,18 @@ mod tests {
             (JobKind::Debugger, "a"),
             (JobKind::Click, "b"),
         ];
+        let failed = |key: &str, is_helper: bool| -> Vec<bool> {
+            jobs.iter()
+                .map(|(kind, extension)| fails_on_loss(*kind, extension, key, is_helper))
+                .collect()
+        };
         assert_eq!(
-            failed_by_loss("a", false, &jobs),
+            failed("a", false),
             vec![true, true, false, false],
             "a relay's loss fails the jobs of that extension only"
         );
         assert_eq!(
-            failed_by_loss("helper", true, &jobs),
+            failed("helper", true),
             vec![true, true, false, true],
             "the helper's loss fails every tab list and click, and keeps the debugger report"
         );
@@ -548,13 +538,6 @@ mod tests {
         }
         assert_eq!(failed, vec![Emit]);
         assert_eq!(kinds.len(), 4, "the queue is at its bound, not past it");
-    }
-
-    #[test]
-    fn a_page_callback_belongs_to_the_page_only_under_its_own_generation() {
-        assert!(is_generation(Some(7), 7));
-        assert!(!is_generation(Some(8), 7), "a successor under the same key");
-        assert!(!is_generation(None, 7), "a page that is gone");
     }
 
     #[test]
@@ -644,19 +627,13 @@ mod tests {
 
     #[test]
     fn an_event_is_failed_by_its_relays_loss_as_a_click_is() {
-        let jobs = [
-            (JobKind::Emit, "a"),
-            (JobKind::Click, "a"),
-            (JobKind::Emit, "b"),
-        ];
-        assert_eq!(
-            failed_by_loss("a", false, &jobs),
-            vec![true, true, false],
-            "an event waiting on a relay that is gone is failed (and logged), as a click is"
-        );
-        assert_eq!(
-            failed_by_loss("helper", true, &[(JobKind::Emit, "a")]),
-            vec![true],
+        // An event waiting on a relay that is gone is failed (and logged),
+        // as a click is; another extension's event is not.
+        assert!(fails_on_loss(JobKind::Emit, "a", "a", false));
+        assert!(fails_on_loss(JobKind::Click, "a", "a", false));
+        assert!(!fails_on_loss(JobKind::Emit, "b", "a", false));
+        assert!(
+            fails_on_loss(JobKind::Emit, "a", "helper", true),
             "the helper's loss fails events as it fails clicks"
         );
     }
@@ -718,16 +695,6 @@ mod tests {
         assert_eq!(worker_target(Some("w1"), Some("w1")), WorkerTarget::Same);
         assert_eq!(worker_target(Some("w1"), Some("w2")), WorkerTarget::Changed);
         assert_eq!(worker_target(None, None), WorkerTarget::Absent);
-    }
-
-    #[test]
-    fn a_refresh_is_due_when_never_made_or_when_its_interval_has_passed() {
-        assert!(check_due(None, REFRESH_INTERVAL), "never refreshed");
-        assert!(!check_due(
-            Some(Duration::from_millis(1999)),
-            REFRESH_INTERVAL
-        ));
-        assert!(check_due(Some(REFRESH_INTERVAL), REFRESH_INTERVAL));
     }
 
     #[test]
