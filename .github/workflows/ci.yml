@@ -80,6 +80,27 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace --all-targets
+      # nautilus-engine's test binary imports libcef.dll, and Windows
+      # must find it to start the process at all. cef-dll-sys copies it
+      # into target/debug/ only when its build script runs; after a full
+      # rust-cache hit it does not (the cache keeps no file of target's
+      # top level), and the tests then die before running one, with
+      # STATUS_DLL_NOT_FOUND. Put the distribution's own directory on
+      # the PATH instead, wherever its layout has the library (flat from
+      # export-cef-dir, or <version>/cef_<os>_<arch>/Release from a
+      # download); after the build, which is what downloads it on a
+      # cache miss.
+      - if: runner.os == 'Windows'
+        name: CEF's libraries on the PATH for the tests
+        shell: bash
+        run: |
+          dll=$(find .cef -name libcef.dll -type f -not -path '*/Debug/*' | head -1)
+          if [ -z "$dll" ]; then
+            echo "::error::no libcef.dll under .cef"
+            exit 1
+          fi
+          cygpath -w "$(cd "$(dirname "$dll")" && pwd)" >> "$GITHUB_PATH"
+          echo "libcef.dll is in $(dirname "$dll")"
       - run: cargo test --workspace
       # The scripted runs' hooks (the `test-hooks` feature) are in no
       # packaged build, so they are linted and tested here.
