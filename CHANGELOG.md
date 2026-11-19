@@ -8,6 +8,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- A strip with more tabs than fit says which way the rest are: the
+  row fades into the strip at an end with tabs scrolled out of sight
+  beyond it, instead of being cut off (osmena).
 - Tabs narrow to 40 points, an icon between its paddings, before the
   strip scrolls, where every tab stopped at 64 (osmena). The active
   tab keeps 64, so its close control always shows, and a tab that is
