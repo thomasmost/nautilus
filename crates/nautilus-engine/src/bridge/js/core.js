@@ -234,9 +234,22 @@
     bridge.installed.push(namespace);
   }
 
+  // The bridge's own listeners, by event name: run before the extension's,
+  // and never seen by them (`hasListener`, `hasListeners`). Tapping an event
+  // asks the engine for it, as an extension's first listener does.
+  var taps = new Map();
+  function tap(name, fn) {
+    if (!taps.has(name)) {
+      taps.set(name, []);
+      call('bridge', 'listen', [name]).catch(function () {});
+    }
+    taps.get(name).push(fn);
+  }
+
   var bridge = {
     native: native,
     call: call,
+    tap: tap,
     run: run,
     bridged: bridged,
     define: define,
@@ -246,6 +259,9 @@
   Object.defineProperty(root, '__nautilusBridge', { value: bridge });
 
   onEvent(function (name, args) {
+    (taps.get(name) || []).forEach(function (fn) {
+      try { fn.apply(undefined, args || []); } catch (e) { console.error(e); }
+    });
     var event = events.get(name);
     if (event) { event.dispatch(args || []); }
   });

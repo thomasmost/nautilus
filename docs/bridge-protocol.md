@@ -517,11 +517,20 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   context whose listeners do not answer sends nothing, so another context's answer
   wins, and a message no context answers settles as Chromium settles it. The
   `sender.tab` fields come from the context's cache (`js/runtime.js`, `strips`):
-  primed from `tabs.query` when a worker starts, and refreshed after each message
-  from the engine's `stripOf`. A tab the cache does not hold yet (a tab opened
-  since, before its first message) carries Chromium's own fields for that message
-  only (index -1); the next message from it carries the strip. This residual case
-  is the one known gap; see "Measured in review cycle 2" below.
+  primed from `tabs.query` when a worker starts, kept by the worker's own
+  listeners on `tabs.onCreated` (the tab is recorded), `tabs.onReplaced` (its
+  entry moves to the new id, and the new id's strip is fetched) and
+  `tabs.onRemoved` (the entry goes), and refreshed after each message from the
+  engine's `stripOf`. Those listeners are the bridge's (`core.js` `tap`): they ask
+  the engine for the events with `bridge.listen`, as an extension's first listener
+  does, and the extension's `hasListener` and `hasListeners` never see them. The
+  engine sends `tabs.onCreated` when it publishes a tab, under its Chromium id once
+  the table knows it, so an extension page shown as a tab is in the worker's cache
+  before the page can send its first message. The cost: a bridged worker is sent
+  every tab's creation, replacement and removal, whether or not the extension
+  listens for them. A page's cache is not primed and has no such listeners (its
+  calls wait for its own report), so in a page a tab's first message still carries
+  Chromium's own fields (index -1), and the next one the strip.
 - `tabs.stripOf(id)` is internal (see the method table); it is not a
   `chrome.tabs` member.
 - Extension pages get the bridge (`bridge/pages.rs`): an
@@ -1257,6 +1266,11 @@ owner's yes; the draft pull requests are osmena #2 and nautilus #1.
   (`review2-n3-before-phase5-run2.txt`). The unwrapped baseline could not be measured:
   the only listener outside the bridge is the helper extension's, which has none, so the
   expectation is this measured outcome, not a measured Chromium one.
+- **The sender's strip from a page's first message.** Before the worker's cache
+  followed the tabs, an extension page's first message reached the worker with
+  `index: -1` and `windowId: -1` in each of five passes
+  (`evidence/phase-5/review2-final-phase5-run1.txt` to `-run5.txt`); after it, the
+  check passed in three of three (`review2-n7-phase5-run1.txt` to `-run3.txt`).
 - **Ids.** Chromium's tab ids are session ids that can lie anywhere in the 32-bit range,
   above the synthetic base (`2 000 000 000`). A page's report of its id is accepted for
   any positive 32-bit value; a value a live tab already holds, synthetic ids included,

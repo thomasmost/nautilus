@@ -207,6 +207,27 @@ for (const viaPage of [false, true]) {
   await tick(); await tick();
   primed.messages.fire('hello', { tab: { id: 9, windowId: -1, index: -1 } }, () => {});
   assert.deepEqual(primedSenders, [[2, 4]], 'a primed tab was not given its strip');
+  // A tab opened after the prime is learnt from the engine's tabs.onCreated,
+  // so its first message carries its strip too; onReplaced moves the entry to
+  // the tab's new id, and onRemoved lets it go. The worker listens for these
+  // itself, unseen by the extension's own listeners.
+  assert.equal(primed.chrome.tabs.onCreated.hasListeners(), false, 'the cache\'s listener is visible to the extension');
+  assert.ok(primed.calls.some(([ns, method, args]) => ns === 'bridge' && method === 'listen' && args[0] === 'tabs.onCreated'), 'the worker does not ask for tabs.onCreated');
+  primed.emit('tabs.onCreated', [{ id: 11, index: 5, windowId: 4, groupId: -1, active: true, highlighted: true, selected: true, pinned: false }]);
+  primed.messages.fire('hello', { tab: { id: 11, windowId: -1, index: -1 } }, () => {});
+  assert.deepEqual(primedSenders.at(-1), [5, 4], 'a tab created after the prime was not given its strip on its first message');
+  primed.emit('tabs.onCreated', [{ id: 12, index: 6, windowId: 4 }]);
+  primed.emit('tabs.onReplaced', [2000000012, 12]);
+  primed.messages.fire('hello', { tab: { id: 2000000012, windowId: -1, index: -1 } }, () => {});
+  assert.deepEqual(primedSenders.at(-1), [6, 4], 'a replaced tab lost its strip');
+  primed.emit('tabs.onRemoved', [11, { windowId: 4, isWindowClosing: false }]);
+  primed.messages.fire('hello', { tab: { id: 11, windowId: -1, index: -1 } }, () => {});
+  assert.deepEqual(primedSenders.at(-1), [-1, -1], 'a removed tab kept its strip');
+  // A page does not listen for them (its calls wait for its own report).
+  const paged = world({ viaPage: true });
+  paged.chrome.runtime.onMessage.addListener(() => {});
+  await tick();
+  assert.ok(!paged.calls.some(([ns, method]) => ns === 'bridge' && method === 'listen'), 'a page asked for tab events for its cache');
   // An asynchronous listener keeps the channel.
   chrome.runtime.onMessage.addListener((message) => (message === 'later' ? Promise.resolve('promised') : undefined));
   assert.deepEqual(w.messages.fire('later', {}, (v) => responses.push(v)), [true]);

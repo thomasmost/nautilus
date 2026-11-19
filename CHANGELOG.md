@@ -46,8 +46,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
   the tab's strip fields from the context's cache. A context whose listeners
   do not answer sends nothing, so a popup's or an offscreen document's answer
   is the one the sender gets, and a message no context answers settles as
-  Chromium settles it. A tab the cache does not hold yet carries Chromium's
-  own fields for that first message.
+  Chromium settles it. A worker's cache follows the tabs the browser opens,
+  renames and closes, so a tab opened after the worker started (an extension
+  page shown as a tab among them) carries its strip fields from its first
+  message.
 
 ### Added
 

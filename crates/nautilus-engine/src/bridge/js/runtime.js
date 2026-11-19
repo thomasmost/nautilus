@@ -36,12 +36,22 @@
   }
 
   // A worker lists the tabs now, so the tabs that exist when it starts carry
-  // their fields from their first message. (A page's calls wait for its own tab
-  // to be reported, so a page makes none here.)
+  // their fields from their first message, and it follows the tabs the engine
+  // opens, renames and closes after that, so a tab opened later (an extension
+  // page among them) carries its fields from its first message too. The engine
+  // sends tabs.onCreated when the tab is published, with its Chromium id once
+  // the table knows it, which is before the tab's page can send. (A page's
+  // calls wait for its own tab to be reported, so a page does none of this.)
   if (root.__nautilusTransport) {
     bridge.call('tabs', 'query', [{}]).then(function (tabs) {
       (Array.isArray(tabs) ? tabs : []).forEach(remember);
     }, function () {});
+    bridge.tap('tabs.onCreated', remember);
+    bridge.tap('tabs.onReplaced', function (added, removed) {
+      if (strips[removed]) { strips[added] = strips[removed]; delete strips[removed]; }
+      fetchStrip(added);
+    });
+    bridge.tap('tabs.onRemoved', function (id) { delete strips[id]; });
   }
 
   // Delivers to this context's listeners; returns whether one kept the channel
