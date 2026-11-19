@@ -151,16 +151,47 @@ fn delivery(payload: &Value) -> String {
     )
 }
 
+/// What an extension page gets when its bridge cannot be bound: the transport
+/// script, which defines the refusal of the page's native `tabs` and `windows`
+/// and then returns (no send is bound), and the refusal itself. The namespaces
+/// are not put in, so the page's calls stay refused.
+pub(crate) fn refusal_script() -> String {
+    format!(
+        "try {{\n{PAGE_TRANSPORT_JS}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}\ntry {{ self.__nautilusRefuseNative(); }} catch (e) {{ console.error('nautilus-bridge: ' + e); }}"
+    )
+}
+
 /// Render process: put the bridge into an extension page's new context.
-/// Called from the render-process handler's `on_context_created`.
+/// Called from the render-process handler's `on_context_created`. When the
+/// bound functions cannot be made, the page gets `refusal_script` instead, so
+/// the page's native `tabs` and `windows` are refused either way.
 pub(crate) fn install(context: &mut V8Context) {
+    let script = if bind_functions(context) {
+        page_script()
+    } else {
+        refusal_script()
+    };
+    // CEF's `eval` does nothing without both out-pointers.
+    let (mut retval, mut exception) = (None, None);
+    context.eval(
+        Some(&CefString::from(script.as_str())),
+        None,
+        0,
+        Some(&mut retval),
+        Some(&mut exception),
+    );
+}
+
+/// Binds the two functions the page's transport calls on the global object.
+/// False when the global object or either function cannot be made.
+fn bind_functions(context: &mut V8Context) -> bool {
     let Some(global) = context.global() else {
-        return;
+        return false;
     };
     let name = CefString::from(SEND_FUNCTION);
     let mut handler = BridgeSend::new();
     let Some(mut function) = cef::v8_value_create_function(Some(&name), Some(&mut handler)) else {
-        return;
+        return false;
     };
     global.set_value_bykey(
         Some(&name),
@@ -172,22 +203,14 @@ pub(crate) fn install(context: &mut V8Context) {
     let Some(mut report_function) =
         cef::v8_value_create_function(Some(&report_name), Some(&mut report_handler))
     else {
-        return;
+        return false;
     };
     global.set_value_bykey(
         Some(&report_name),
         Some(&mut report_function),
         V8Propertyattribute::default(),
     );
-    // CEF's `eval` does nothing without both out-pointers.
-    let (mut retval, mut exception) = (None, None);
-    context.eval(
-        Some(&CefString::from(page_script().as_str())),
-        None,
-        0,
-        Some(&mut retval),
-        Some(&mut exception),
-    );
+    true
 }
 
 // The bound function: its one string argument becomes a process message
@@ -502,6 +525,14 @@ mod tests {
     use super::*;
 
     const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+
+    #[test]
+    fn a_page_whose_bridge_cannot_be_bound_refuses_native_tabs_and_windows() {
+        let script = refusal_script();
+        assert!(script.contains(PAGE_TRANSPORT_JS));
+        assert!(script.contains("self.__nautilusRefuseNative()"));
+        assert!(!script.contains(&namespaces_script()));
+    }
 
     #[test]
     fn a_reply_goes_only_to_the_frame_still_on_the_extension_that_called() {

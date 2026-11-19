@@ -565,4 +565,21 @@ function loadWorker(runtime) {
   await assert.rejects(Promise.resolve().then(() => chrome.windows.create({})));
   assert.deepEqual(reached, [], 'a context with no document left native tabs callable');
 }
+{
+  // A page whose bridge functions could not be bound (no `__nautilusBridgeSend`):
+  // the transport defines the refusal and returns, and the refusal, called once,
+  // leaves no native tabs or windows callable.
+  const reached = [];
+  const nativeFn = (name) => () => { reached.push(name); };
+  const chrome = { tabs: { group: nativeFn('tabs.group') }, windows: { create: nativeFn('windows.create') } };
+  const sandbox = { chrome, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Proxy };
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read('page_transport.js'), sandbox);
+  vm.runInContext('self.__nautilusRefuseNative();', sandbox);
+  await assert.rejects(Promise.resolve().then(() => chrome.tabs.group({ tabIds: [1] })));
+  await assert.rejects(Promise.resolve().then(() => chrome.windows.create({})));
+  assert.deepEqual(reached, [], 'the refusal left a native tabs or windows call callable');
+  assert.equal(sandbox.__bridgeCall, undefined, 'the transport answered without a send');
+}
 console.log('bridge scripts: ok');
