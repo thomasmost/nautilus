@@ -23,7 +23,7 @@ function nativeEvent() {
   };
 }
 
-function world({ viaPage }) {
+function world({ viaPage, prime = null }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
@@ -68,6 +68,7 @@ function world({ viaPage }) {
   const sandbox = { chrome, console: { error: (...a) => sandbox.errors.push(a.join(' ')), log() {} }, errors: [], Promise, Map, JSON, Object, Array, Error, String, setTimeout, clearTimeout };
   sandbox.self = sandbox;
   vm.createContext(sandbox);
+  if (prime) { answers.set('tabs.query', () => prime); }
   if (viaPage) {
     // The page lane: the native function and the delivery function.
     sandbox.__nautilusBridgeSend = (text) => {
@@ -82,6 +83,8 @@ function world({ viaPage }) {
   } else {
     sandbox.__bridgeCall = engine;
     sandbox.__bridgeOnEvent = (h) => { handler = h; };
+    // The worker's marker (bridge.js): the worker primes its tab cache.
+    sandbox.__nautilusTransport = { protocol: 1, portHidden: true };
   }
   for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js']) {
     vm.runInContext(read(file), sandbox);
@@ -170,30 +173,45 @@ for (const viaPage of [false, true]) {
   chrome.tabs.onSelectionChanged.addListener(() => assert.fail('never fires'));
   assert.equal(typeof chrome.tabs.onZoomChange.fire, 'function');
 
-  // runtime.onMessage: sender.tab gets the strip's fields first.
+  // runtime.onMessage: a message from a tab is delivered at once, synchronously.
+  // The strip's fields come from this context's cache: a message from a tab the
+  // cache does not hold carries the tab as Chromium gave it, and asks the engine
+  // for the tab's strip; the next message from that tab carries the strip's fields.
   w.answers.set('tabs.stripOf', ([id]) => (id === 7 ? { index: 3, windowId: 1, groupId: -1, active: true } : null));
   const senders = [];
   chrome.runtime.onMessage.addListener((message, sender, respond) => { senders.push(sender.tab && sender.tab.windowId); if (message === 'ask') { respond('answer'); } });
   assert.equal(w.messages.count(), 1);
   const responses = [];
-  assert.deepEqual(w.messages.fire('ask', { tab: { id: 7, windowId: -1 } }, (v) => responses.push(v)), [true]);
-  await tick(); await tick();
-  assert.deepEqual(senders, [1]);
+  // A listener that answers at once does not keep the channel open.
+  assert.deepEqual(w.messages.fire('ask', { tab: { id: 7, windowId: -1 } }, (v) => responses.push(v)), [false]);
+  assert.deepEqual(senders, [-1], 'a tab the cache does not hold is given as Chromium gave it');
   assert.deepEqual(responses, ['answer']);
-  // Nobody here answers: this context says nothing, so it cannot send the
-  // sender an undefined that beats an answer from another context (a popup,
-  // an offscreen document) that comes later.
-  w.messages.fire('other', { tab: { id: 8, windowId: -1 } }, (v) => responses.push(['closed', v]));
   await tick(); await tick();
-  assert.deepEqual(responses, ['answer'], 'a silent listener answered the sender');
+  assert.deepEqual(w.messages.fire('ask', { tab: { id: 7, windowId: -1 } }, (v) => responses.push(v)), [false]);
+  assert.deepEqual(senders, [-1, 1], 'the next message from the tab carries its strip');
+  assert.deepEqual(responses, ['answer', 'answer']);
+  // Nobody here answers: the channel is not held (it closes as Chromium closes
+  // it), so this context cannot send the sender an undefined that beats an
+  // answer from another context (a popup, an offscreen document) that comes later.
+  assert.deepEqual(w.messages.fire('other', { tab: { id: 8, windowId: -1 } }, (v) => responses.push(['closed', v])), [false], 'a silent listener held the channel open');
+  await tick(); await tick();
+  assert.deepEqual(responses, ['answer', 'answer'], 'a silent listener answered the sender');
   // No tab: straight through, synchronously.
   assert.deepEqual(w.messages.fire('ask', {}, (v) => responses.push(v)), [false]);
-  assert.equal(responses[1], 'answer');
+  assert.equal(responses[2], 'answer');
+  // A worker's cache is primed from the tabs it lists: a tab it lists carries
+  // its strip from its first message.
+  const primed = world({ viaPage: false, prime: [{ id: 9, index: 2, windowId: 4, groupId: -1, active: false, highlighted: false, selected: false, pinned: false }] });
+  const primedSenders = [];
+  primed.chrome.runtime.onMessage.addListener((message, sender) => { primedSenders.push([sender.tab.index, sender.tab.windowId]); });
+  await tick(); await tick();
+  primed.messages.fire('hello', { tab: { id: 9, windowId: -1, index: -1 } }, () => {});
+  assert.deepEqual(primedSenders, [[2, 4]], 'a primed tab was not given its strip');
   // An asynchronous listener keeps the channel.
   chrome.runtime.onMessage.addListener((message) => (message === 'later' ? Promise.resolve('promised') : undefined));
   assert.deepEqual(w.messages.fire('later', {}, (v) => responses.push(v)), [true]);
   await tick();
-  assert.equal(responses[2], 'promised');
+  assert.equal(responses.at(-1), 'promised');
 }
 // An extension page's context, as pages.rs composes it: the transport when
 // the context is created, the namespaces (page_defer.js around them) at the

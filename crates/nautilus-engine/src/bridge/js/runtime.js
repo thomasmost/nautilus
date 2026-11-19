@@ -2,8 +2,11 @@
 // fields (index, windowId, groupId, active, highlighted, selected, pinned)
 // before the extension's listeners see it. Chromium knows none of them for
 // these tabs. One listener is registered with Chromium, and it runs the
-// extension's listeners itself, as Chromium would: the first response
-// wins; a listener that returns true or a promise keeps the channel open.
+// extension's listeners itself, as Chromium would: the first response wins; a
+// listener that returns true or a promise keeps the channel open. The wrapper
+// is synchronous, so it returns exactly what Chromium needs: true only when a
+// listener of this context kept the channel open, and false otherwise, which
+// lets Chromium close a channel that no listener of this context holds.
 (function (root) {
   'use strict';
   var bridge = root.__nautilusBridge;
@@ -12,6 +15,37 @@
   if (!bridge || !nativeEvent || bridge.installed.indexOf('runtime.onMessage') !== -1) { return; }
   var listeners = [];
 
+  // The strip's fields by tab id, as the engine last reported them. A message
+  // is delivered at once, so the fields come from here; a tab this context does
+  // not hold yet carries Chromium's own fields for its first message, and the
+  // engine's strip is fetched after each message, for the next one.
+  var FIELDS = ['index', 'windowId', 'groupId', 'active', 'highlighted', 'selected', 'pinned'];
+  var strips = Object.create(null);
+
+  function remember(tab) {
+    if (!tab || typeof tab.id !== 'number') { return; }
+    var strip = {};
+    FIELDS.forEach(function (field) { if (field in tab) { strip[field] = tab[field]; } });
+    strips[tab.id] = strip;
+  }
+
+  function fetchStrip(id) {
+    bridge.call('tabs', 'stripOf', [id]).then(function (strip) {
+      if (strip) { remember(Object.assign({ id: id }, strip)); }
+    }, function () {});
+  }
+
+  // A worker lists the tabs now, so the tabs that exist when it starts carry
+  // their fields from their first message. (A page's calls wait for its own tab
+  // to be reported, so a page makes none here.)
+  if (root.__nautilusTransport) {
+    bridge.call('tabs', 'query', [{}]).then(function (tabs) {
+      (Array.isArray(tabs) ? tabs : []).forEach(remember);
+    }, function () {});
+  }
+
+  // Delivers to this context's listeners; returns whether one kept the channel
+  // open (returned true or a promise).
   function deliver(message, sender, sendResponse) {
     var open = false;
     var done = false;
@@ -36,18 +70,10 @@
     if (!tab || typeof tab.id !== 'number') {
       return deliver(message, sender, sendResponse);
     }
-    // The channel is held from here, because the strip's fields are fetched
-    // before the listeners run. A listener of this context that answers does
-    // so through `sendResponse`; when none does, this context sends nothing:
-    // the first answer the sender gets is another context's, and an answer
-    // from no context leaves the channel to close as Chromium closes one.
-    bridge.call('tabs', 'stripOf', [tab.id]).then(
-      function (strip) { if (strip) { Object.assign(tab, strip); } },
-      function () {}
-    ).then(function () {
-      deliver(message, sender, sendResponse);
-    });
-    return true;
+    var strip = strips[tab.id];
+    if (strip) { Object.assign(tab, strip); }
+    fetchStrip(tab.id);
+    return deliver(message, sender, sendResponse);
   }
 
   var wrapper = {

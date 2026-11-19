@@ -129,6 +129,31 @@
       out.capture = (await chrome.tabs.captureVisibleTab()).slice(0, 23);
       return out;
     });
+    await step('content-silent', async function () {
+      // A content script's message (sent from the page's isolated world, as a
+      // content script sends it) that the worker's listener does not answer. It
+      // must settle at once: closed by Chromium, not held to a garbage collection.
+      var result = await chrome.scripting.executeScript({
+        target: { tabId: id },
+        world: 'ISOLATED',
+        func: function () {
+          return new Promise(function (resolve) {
+            var started = performance.now();
+            var timer = setTimeout(function () {
+              resolve({ outcome: 'hung', ms: Math.round(performance.now() - started), detail: null });
+            }, 5000);
+            Promise.resolve(chrome.runtime.sendMessage({ n3: 'silent' })).then(function (answer) {
+              clearTimeout(timer);
+              resolve({ outcome: 'answered', ms: Math.round(performance.now() - started), detail: answer === undefined ? null : answer });
+            }, function (error) {
+              clearTimeout(timer);
+              resolve({ outcome: 'closed', ms: Math.round(performance.now() - started), detail: String((error && error.message) || error) });
+            });
+          });
+        }
+      });
+      return result[0].result;
+    });
     await step('fail-closed', async function () {
       var out = {};
       out.group = await chrome.tabs.group({ tabIds: [id] }).then(function () { return 'resolved'; }, message);
