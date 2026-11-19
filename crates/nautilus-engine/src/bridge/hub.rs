@@ -24,6 +24,7 @@ use osmena_core::{EngineEvent, ExtensionReply, TabId};
 use osmena_engine::WindowStrip;
 use serde_json::Value;
 
+use super::pages::PageLane;
 use super::pattern::Grants;
 use super::snapshot::Snapshot;
 use super::state::{BridgeState, Effect};
@@ -59,7 +60,7 @@ struct Capture {
 pub(crate) struct Hub {
     state: RefCell<BridgeState>,
     worker: Rc<dyn BridgeTransport>,
-    pages: Option<Rc<dyn BridgeTransport>>,
+    pages: Option<Rc<PageLane>>,
     /// Calls not yet answered: the hub's id to the lane and the lane's id.
     routes: RefCell<HashMap<CallId, (Lane, CallId)>>,
     last_call: Cell<CallId>,
@@ -81,7 +82,7 @@ impl Hub {
     pub(crate) fn new(
         delegate: &Rc<DelegateState>,
         worker: Rc<dyn BridgeTransport>,
-        pages: Option<Rc<dyn BridgeTransport>>,
+        pages: Option<Rc<PageLane>>,
         table: Box<dyn Fn(TabId) -> Option<i64>>,
         reporter: Reporter,
         nudge: Box<dyn Fn()>,
@@ -164,8 +165,9 @@ impl Hub {
         self.run(effects);
     }
 
-    /// The enabled extensions that carry the bridge, with their grants.
-    pub(crate) fn set_extensions(self: &Rc<Self>, extensions: Vec<(String, Grants)>) {
+    /// The enabled extensions the bridge serves: each one's id, its grants,
+    /// and whether it has a service worker (`BridgeState::set_extensions`).
+    pub(crate) fn set_extensions(self: &Rc<Self>, extensions: Vec<(String, Grants, bool)>) {
         let effects = self.state.borrow_mut().set_extensions(extensions);
         self.run(effects);
     }
@@ -176,6 +178,13 @@ impl Hub {
         // is a CEF call, which is not made with a borrow held.
         let spent = std::mem::take(&mut *self.spent.borrow_mut());
         drop(spent);
+        // A page whose frame is gone takes its listeners with it.
+        if let Some(pages) = &self.pages {
+            let gone = pages.gone();
+            if !gone.is_empty() {
+                self.state.borrow_mut().page_gone(&gone);
+            }
+        }
         let effects = {
             let mut state = self.state.borrow_mut();
             if !state.needs_tick() {
@@ -206,10 +215,18 @@ impl Hub {
                     event,
                     args,
                 } => {
-                    log::debug!("bridge: {event} to {extension}");
+                    log::debug!("bridge: {event} to {extension}'s worker");
                     self.worker.emit(&extension, event, &args);
+                }
+                Effect::EmitPage {
+                    page,
+                    extension,
+                    event,
+                    args,
+                } => {
+                    log::debug!("bridge: {event} to {extension}'s page {page}");
                     if let Some(pages) = &self.pages {
-                        pages.emit(&extension, event, &args);
+                        pages.emit_to(page, &extension, event, &args);
                     }
                 }
                 Effect::Wake(extension) => self.worker.wake(&extension),

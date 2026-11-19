@@ -33,6 +33,10 @@ pub(crate) struct BridgeCall {
     pub method: String,
     /// The arguments without a trailing callback; `undefined` is `null`.
     pub args: Vec<Value>,
+    /// The page context the call came from: the page lane's key for the
+    /// frame (`pages::PageLane`), `None` for a service worker. Listeners are
+    /// recorded per context, so a page's registrations end with its frame.
+    pub page: Option<u64>,
 }
 
 /// One way to reach extension contexts: the relay for service workers,

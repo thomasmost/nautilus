@@ -1444,6 +1444,7 @@ impl Bridge {
                 namespace: namespace.to_string(),
                 method: name.to_string(),
                 args,
+                page: None,
             },
         );
     }

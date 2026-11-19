@@ -249,7 +249,7 @@ impl Engine {
             let hub = Hub::new(
                 &delegate,
                 bridge.clone() as Rc<dyn BridgeTransport>,
-                Some(page_lane.clone() as Rc<dyn BridgeTransport>),
+                Some(page_lane.clone()),
                 table,
                 reporter,
                 nudge,

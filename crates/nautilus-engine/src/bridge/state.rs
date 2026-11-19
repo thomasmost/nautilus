@@ -57,8 +57,15 @@ static NO_GRANTS: Grants = Grants {
 pub(crate) enum Effect {
     /// Settle a call.
     Reply(CallId, Result<Value, String>),
-    /// Run `event`'s listeners in `extension`.
+    /// Run `event`'s listeners in `extension`'s service worker.
     Emit {
+        extension: String,
+        event: &'static str,
+        args: Vec<Value>,
+    },
+    /// Run `event`'s listeners in the page context `page` of `extension`.
+    EmitPage {
+        page: u64,
         extension: String,
         event: &'static str,
         args: Vec<Value>,
@@ -108,8 +115,14 @@ pub(crate) struct BridgeState {
     held: Option<(Snapshot, Instant)>,
     ids: IdSpace,
     grants: HashMap<String, Grants>,
-    /// The events each extension has listened for this run.
+    /// The served extensions that have a service worker.
+    workers: BTreeSet<String>,
+    /// The events each extension's service worker has listened for this run.
     listeners: BTreeMap<String, BTreeSet<String>>,
+    /// The events each extension page context has listened for, by the
+    /// context's key, with the extension whose page it is. A context's
+    /// registrations end with its frame (`page_gone`).
+    page_listeners: BTreeMap<u64, (String, BTreeSet<String>)>,
     pending: HashMap<u64, Pending>,
     /// The first refusal among a call's requests.
     refused: HashMap<CallId, String>,
@@ -142,18 +155,39 @@ impl BridgeState {
         self.grants.contains_key(extension)
     }
 
-    /// The bridged extensions and what each may see. Returns a wake for
-    /// each one not known before.
-    pub(crate) fn set_extensions(&mut self, extensions: Vec<(String, Grants)>) -> Vec<Effect> {
+    /// The served extensions: each one's id, what it may see, and whether it
+    /// has a service worker (the loader). Returns a wake for each worker not
+    /// known before; an extension without a worker is served through its
+    /// pages alone.
+    pub(crate) fn set_extensions(
+        &mut self,
+        extensions: Vec<(String, Grants, bool)>,
+    ) -> Vec<Effect> {
         let woken = extensions
             .iter()
-            .filter(|(id, _)| !self.grants.contains_key(id))
-            .map(|(id, _)| Effect::Wake(id.clone()))
+            .filter(|(id, _, worker)| *worker && !self.workers.contains(id))
+            .map(|(id, _, _)| Effect::Wake(id.clone()))
             .collect();
-        self.grants = extensions.into_iter().collect();
+        self.workers = extensions
+            .iter()
+            .filter(|(_, _, worker)| *worker)
+            .map(|(id, _, _)| id.clone())
+            .collect();
+        self.grants = extensions
+            .into_iter()
+            .map(|(id, grants, _)| (id, grants))
+            .collect();
         let grants = &self.grants;
         self.listeners.retain(|id, _| grants.contains_key(id));
+        self.page_listeners
+            .retain(|_, (id, _)| grants.contains_key(id));
         woken
+    }
+
+    /// The page contexts `keys` are gone (their frames were): their
+    /// registrations go with them.
+    pub(crate) fn page_gone(&mut self, keys: &[u64]) {
+        self.page_listeners.retain(|key, _| !keys.contains(key));
     }
 
     /// A bridged function was called.
@@ -162,10 +196,21 @@ impl BridgeState {
             let event = call.args.first().and_then(Value::as_str);
             let result = match (call.method.as_str(), event) {
                 ("listen", Some(event)) => {
-                    self.listeners
-                        .entry(call.extension.clone())
-                        .or_default()
-                        .insert(event.to_string());
+                    match call.page {
+                        Some(page) => {
+                            self.page_listeners
+                                .entry(page)
+                                .or_insert_with(|| (call.extension.clone(), BTreeSet::new()))
+                                .1
+                                .insert(event.to_string());
+                        }
+                        None => {
+                            self.listeners
+                                .entry(call.extension.clone())
+                                .or_default()
+                                .insert(event.to_string());
+                        }
+                    }
                     Ok(Value::Null)
                 }
                 _ => Err(router::unsupported("bridge", &call.method)),
@@ -213,7 +258,11 @@ impl BridgeState {
             && self.published.locate(tab).is_none()
         {
             Some(Hold::Tab(tab))
-        } else if !self.held_calls.is_empty() {
+        } else if self
+            .held_calls
+            .iter()
+            .any(|held| held.call.extension == call.extension)
+        {
             Some(Hold::Queued)
         } else {
             None
@@ -298,26 +347,35 @@ impl BridgeState {
     /// Answer every waiting call the published strip now allows.
     fn settle(&mut self, now: Instant) -> Vec<Effect> {
         let mut effects = Vec::new();
-        // Held page calls, from the front: a call goes once its hold is met
-        // or its bound has passed, and a later one never goes before it.
-        while let Some(front) = self.held_calls.first() {
-            let ready = match front.hold {
+        // Held page calls, in arrival order within each extension: a call
+        // goes once its hold is met or its bound has passed, and a later call
+        // of the same extension never goes before it. Another extension's
+        // held calls do not wait for it.
+        let mut blocked: BTreeSet<String> = BTreeSet::new();
+        let mut kept = Vec::new();
+        for held in std::mem::take(&mut self.held_calls) {
+            if blocked.contains(&held.call.extension) {
+                kept.push(held);
+                continue;
+            }
+            let ready = match held.hold {
                 Hold::Queued => true,
-                Hold::Served => self.serves(&front.call.extension),
+                Hold::Served => self.serves(&held.call.extension),
                 Hold::Tab(tab) => self.published.locate(tab).is_some() || self.held.is_none(),
             };
-            let waited = now.saturating_duration_since(front.since);
+            let waited = now.saturating_duration_since(held.since);
             if !ready && waited < PUBLISH_WAIT {
-                break;
+                blocked.insert(held.call.extension.clone());
+                kept.push(held);
+                continue;
             }
-            let held = self.held_calls.remove(0);
-            match held.hold {
-                Hold::Served if !ready => {
-                    effects.push(Effect::Reply(held.call.id, Err(UNBRIDGED.to_string())));
-                }
-                _ => effects.extend(self.call(held.call)),
+            if self.serves(&held.call.extension) {
+                effects.extend(self.call(held.call));
+            } else {
+                effects.push(Effect::Reply(held.call.id, Err(UNBRIDGED.to_string())));
             }
         }
+        self.held_calls = kept;
         for waiting in std::mem::take(&mut self.waiting) {
             let settled = router::settle(
                 &waiting.then,
@@ -410,13 +468,33 @@ impl BridgeState {
         self.published = next;
         self.seq += 1;
         let mut effects = Vec::new();
+        // A worker is woken only for an event it registered, and only an
+        // extension with a worker has one.
         for (extension, names) in &self.listeners {
+            if !self.workers.contains(extension) {
+                continue;
+            }
             let view = self.view(extension);
             for event in &events {
                 if let Some((name, args)) = differ::render(event, &view)
                     && names.contains(name)
                 {
                     effects.push(Effect::Emit {
+                        extension: extension.clone(),
+                        event: name,
+                        args,
+                    });
+                }
+            }
+        }
+        for (page, (extension, names)) in &self.page_listeners {
+            let view = self.view(extension);
+            for event in &events {
+                if let Some((name, args)) = differ::render(event, &view)
+                    && names.contains(name)
+                {
+                    effects.push(Effect::EmitPage {
+                        page: *page,
                         extension: extension.clone(),
                         event: name,
                         args,
@@ -473,6 +551,7 @@ mod tests {
             namespace: namespace.to_string(),
             method: method.to_string(),
             args: args.as_array().cloned().unwrap_or_default(),
+            page: None,
         }
     }
 
@@ -488,8 +567,8 @@ mod tests {
     fn started(tabs: Vec<SnapTab>) -> (BridgeState, Instant) {
         let mut state = BridgeState::default();
         state.set_extensions(vec![
-            (EXT.to_string(), all()),
-            (OTHER.to_string(), Grants::default()),
+            (EXT.to_string(), all(), true),
+            (OTHER.to_string(), Grants::default(), true),
         ]);
         let now = Instant::now();
         assert_eq!(
@@ -511,23 +590,26 @@ mod tests {
     fn a_new_extension_is_woken_once() {
         let mut state = BridgeState::default();
         assert_eq!(
-            state.set_extensions(vec![(EXT.to_string(), all())]),
+            state.set_extensions(vec![(EXT.to_string(), all(), true)]),
             vec![Effect::Wake(EXT.to_string())]
         );
         assert_eq!(
             state.set_extensions(vec![
-                (EXT.to_string(), all()),
-                (OTHER.to_string(), Grants::default())
+                (EXT.to_string(), all(), true),
+                (OTHER.to_string(), Grants::default(), true)
             ]),
             vec![Effect::Wake(OTHER.to_string())]
         );
-        assert_eq!(state.set_extensions(vec![(EXT.to_string(), all())]), vec![]);
+        assert_eq!(
+            state.set_extensions(vec![(EXT.to_string(), all(), true)]),
+            vec![]
+        );
     }
 
     #[test]
     fn a_strip_is_held_until_the_table_knows_every_live_tab_or_two_seconds_pass() {
         let mut state = BridgeState::default();
-        state.set_extensions(vec![(EXT.to_string(), all())]);
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
         listen(&mut state, EXT, "tabs.onReplaced");
         let t0 = Instant::now();
         let strip = snapshot(vec![window(1, true, vec![tab(1, "a*"), tab(2, "b~")])]);
@@ -557,7 +639,7 @@ mod tests {
         // A tab that was published without Chromium's id holds nothing up
         // afterwards.
         let mut state = BridgeState::default();
-        state.set_extensions(vec![(EXT.to_string(), all())]);
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
         state.strip_changed(
             snapshot(vec![window(1, true, vec![tab(1, "a*")])]),
             &unknown,
@@ -616,7 +698,7 @@ mod tests {
             }]
         );
         // An extension that is gone is forgotten with its listeners.
-        state.set_extensions(vec![(EXT.to_string(), all())]);
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
         assert_eq!(state.strip_changed(snapshot(vec![]), &live, now), vec![]);
     }
 
@@ -809,7 +891,7 @@ mod tests {
     #[test]
     fn a_worker_s_current_window_is_the_one_focused_last() {
         let mut state = BridgeState::default();
-        state.set_extensions(vec![(EXT.to_string(), all())]);
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
         let now = Instant::now();
         let two = |first: bool, second: bool| {
             snapshot(vec![
@@ -849,7 +931,7 @@ mod tests {
     #[test]
     fn only_a_bridged_extension_is_served() {
         let mut state = BridgeState::default();
-        state.set_extensions(vec![(EXT.to_string(), all())]);
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
         assert!(state.serves(EXT));
         assert!(!state.serves("bcdefghijklmnopabcdefghijklmnopa"));
     }
@@ -863,6 +945,7 @@ mod tests {
             namespace: "tabs".to_string(),
             method: method.to_string(),
             args: Vec::new(),
+            page: Some(id),
         }
     }
 
@@ -879,7 +962,7 @@ mod tests {
     #[test]
     fn a_page_call_for_a_tab_not_yet_published_waits_for_the_publish() {
         let mut state = BridgeState::default();
-        state.set_extensions(vec![(EXT.to_string(), all())]);
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
         let t0 = Instant::now();
         state.strip_changed(
             snapshot(vec![window(1, true, vec![tab(1, "a*")])]),
@@ -968,7 +1051,7 @@ mod tests {
                 .is_empty()
         );
         assert!(state.needs_tick());
-        state.set_extensions(vec![(EXT.to_string(), all())]);
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
         let effects = state.tick(&unknown, t0);
         assert_eq!(answered(&effects), vec![8]);
         assert!(matches!(&effects[..], [Effect::Reply(8, Ok(_))]));
@@ -986,6 +1069,165 @@ mod tests {
         assert!(state.tick(&unknown, t0 + Duration::from_secs(1)).is_empty());
         let effects = state.tick(&unknown, t0 + PUBLISH_WAIT);
         assert_eq!(effects, vec![Effect::Reply(9, Err(UNBRIDGED.to_string()))]);
+        assert!(!state.needs_tick());
+    }
+
+    /// A page's call from `extension`'s page in the view of `tab`, on the
+    /// page lane, in the page context `id`.
+    fn page_call_from(extension: &str, id: CallId, tab: u64) -> BridgeCall {
+        BridgeCall {
+            id,
+            extension: extension.to_string(),
+            asker: Asker::View(TabId(tab)),
+            namespace: "tabs".to_string(),
+            method: "getCurrent".to_string(),
+            args: Vec::new(),
+            page: Some(id),
+        }
+    }
+
+    #[test]
+    fn an_extension_without_a_worker_is_served_and_never_woken() {
+        let mut state = BridgeState::default();
+        let t0 = Instant::now();
+        assert_eq!(
+            state.set_extensions(vec![(EXT.to_string(), all(), false)]),
+            vec![]
+        );
+        assert!(state.serves(EXT));
+        // Its page's call is not held for a worker that does not exist.
+        assert_eq!(
+            answered(&state.page_call(page_call_from(EXT, 10, 1), t0)),
+            vec![10]
+        );
+        assert!(!state.needs_tick());
+    }
+
+    #[test]
+    fn a_worker_is_woken_when_an_extension_gains_one() {
+        let mut state = BridgeState::default();
+        assert_eq!(
+            state.set_extensions(vec![(EXT.to_string(), all(), false)]),
+            vec![]
+        );
+        assert_eq!(
+            state.set_extensions(vec![(EXT.to_string(), all(), true)]),
+            vec![Effect::Wake(EXT.to_string())]
+        );
+    }
+
+    #[test]
+    fn an_unserved_extensions_held_call_does_not_hold_another_extension() {
+        let mut state = BridgeState::default();
+        let t0 = Instant::now();
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
+        // OTHER is not served, so its page's call waits for it.
+        assert!(state.page_call(page_call_from(OTHER, 1, 1), t0).is_empty());
+        // EXT's page is served: its call is answered at once.
+        assert_eq!(
+            answered(&state.page_call(page_call_from(EXT, 2, 1), t0)),
+            vec![2]
+        );
+    }
+
+    /// A page context's `bridge.listen` for `event`, from its frame `page`.
+    fn page_listen(state: &mut BridgeState, extension: &str, page: u64, event: &str) {
+        let mut listen = call(page, extension, "bridge", "listen", json!([event]));
+        listen.page = Some(page);
+        assert_eq!(
+            state.call(listen),
+            vec![Effect::Reply(page, Ok(Value::Null))]
+        );
+    }
+
+    #[test]
+    fn a_page_listener_is_emitted_to_its_page_and_never_to_the_worker() {
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        page_listen(&mut state, EXT, 5, "tabs.onCreated");
+        let effects = state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a"), tab(2, "b*")])]),
+            &live,
+            now,
+        );
+        assert!(matches!(
+            &effects[..],
+            [Effect::EmitPage { page: 5, extension, event: "tabs.onCreated", .. }] if extension == EXT
+        ));
+    }
+
+    #[test]
+    fn a_page_listener_does_not_wake_an_extension_without_a_worker() {
+        let mut state = BridgeState::default();
+        assert_eq!(
+            state.set_extensions(vec![(EXT.to_string(), all(), false)]),
+            vec![]
+        );
+        let now = Instant::now();
+        state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a*")])]),
+            &live,
+            now,
+        );
+        page_listen(&mut state, EXT, 5, "tabs.onCreated");
+        let effects = state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a"), tab(2, "b*")])]),
+            &live,
+            now,
+        );
+        assert!(matches!(&effects[..], [Effect::EmitPage { page: 5, .. }]));
+    }
+
+    #[test]
+    fn each_listening_page_context_is_emitted_to_and_the_worker_only_its_own_events() {
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        listen(&mut state, EXT, "tabs.onRemoved");
+        page_listen(&mut state, EXT, 5, "tabs.onCreated");
+        page_listen(&mut state, EXT, 6, "tabs.onCreated");
+        let effects = state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a"), tab(2, "b*")])]),
+            &live,
+            now,
+        );
+        let pages: Vec<u64> = effects
+            .iter()
+            .map(|effect| match effect {
+                Effect::EmitPage {
+                    page,
+                    event: "tabs.onCreated",
+                    ..
+                } => *page,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(pages, vec![5, 6]);
+    }
+
+    #[test]
+    fn a_page_contexts_listeners_end_with_its_frame() {
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        page_listen(&mut state, EXT, 5, "tabs.onCreated");
+        state.page_gone(&[5]);
+        let effects = state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a"), tab(2, "b*")])]),
+            &live,
+            now,
+        );
+        assert_eq!(effects, vec![]);
+    }
+
+    #[test]
+    fn calls_held_for_an_unserved_extension_are_refused_in_order_at_the_bound() {
+        let mut state = BridgeState::default();
+        let t0 = Instant::now();
+        assert!(state.page_call(page_call_from(OTHER, 1, 1), t0).is_empty());
+        assert!(state.page_call(page_call_from(OTHER, 3, 1), t0).is_empty());
+        assert_eq!(
+            state.tick(&unknown, t0 + PUBLISH_WAIT),
+            vec![
+                Effect::Reply(1, Err(UNBRIDGED.to_string())),
+                Effect::Reply(3, Err(UNBRIDGED.to_string())),
+            ]
+        );
         assert!(!state.needs_tick());
     }
 }

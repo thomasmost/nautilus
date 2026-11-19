@@ -933,6 +933,7 @@ mod tests {
                 namespace: namespace.to_string(),
                 method: method.to_string(),
                 args: args.as_array().cloned().unwrap_or_default(),
+                page: None,
             };
             route(&call, &self.view())
         }

@@ -173,6 +173,7 @@ mod tests {
                     namespace: namespace.to_string(),
                     method: method.clone(),
                     args: Vec::<Value>::new(),
+                    page: None,
                 };
                 let unrouted = router::route(&call, &view)
                     == Outcome::Reject(router::unsupported(namespace, &method));

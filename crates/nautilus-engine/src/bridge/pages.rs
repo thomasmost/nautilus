@@ -31,7 +31,7 @@ use super::hub::Lane;
 use super::ids::SYNTHETIC_BASE;
 use super::install::HELPER_ID;
 use super::relay::RELAY_PATH;
-use super::transport::{Asker, BridgeCall, BridgeTransport, CallId};
+use super::transport::{Asker, BridgeCall, CallId};
 use super::{PAGE_TRANSPORT_JS, namespaces_script};
 
 /// The deferred install's observer (`js/page_defer.js`), which
@@ -261,10 +261,19 @@ pub(crate) struct PageLane {
     /// for the call.
     calls: RefCell<HashMap<CallId, (Frame, u64)>>,
     last: Cell<CallId>,
-    /// The frames of each extension that have called: where its events
-    /// go. Only valid frames are kept; no event is kept for a frame that
-    /// is not there.
-    frames: RefCell<HashMap<String, Vec<Frame>>>,
+    /// The frames that have called, by the key the page context carries
+    /// (`BridgeCall::page`): where their events go. A frame that is gone is
+    /// dropped by `gone`, and no event is kept for it.
+    pages: RefCell<HashMap<u64, PageFrame>>,
+    /// The key of each frame, by its identifier, so a frame keeps its key.
+    keys: RefCell<HashMap<String, u64>>,
+    last_key: Cell<u64>,
+}
+
+/// A frame that has called, and the extension whose page it is.
+struct PageFrame {
+    extension: String,
+    frame: Frame,
 }
 
 impl PageLane {
@@ -309,7 +318,7 @@ impl PageLane {
         self.last.set(id);
         // A fresh id: nothing is displaced.
         let _ = self.calls.borrow_mut().insert(id, (frame.clone(), call.id));
-        self.remember(&extension, frame);
+        let page = self.key_of(frame, &extension);
         hub.call(
             Lane::Page,
             BridgeCall {
@@ -319,6 +328,7 @@ impl PageLane {
                 namespace: call.namespace,
                 method: call.method,
                 args: call.args,
+                page: Some(page),
             },
         );
         true
@@ -360,65 +370,56 @@ impl PageLane {
         true
     }
 
-    /// The frames of `extension` that are still valid. The list is taken
-    /// out of the map while they are asked, and given back pruned; the
-    /// invalid ones are let go outside the borrow.
-    fn live_frames(&self, extension: &str) -> Vec<Frame> {
-        let Some(candidates) = self.frames.borrow_mut().remove(extension) else {
-            return Vec::new();
-        };
-        let (live, gone): (Vec<Frame>, Vec<Frame>) = candidates
-            .into_iter()
-            .partition(|frame| frame.is_valid() != 0);
-        if !live.is_empty() {
-            let displaced = self
-                .frames
-                .borrow_mut()
-                .insert(extension.to_string(), live.clone());
-            drop(displaced);
-        }
-        drop(gone);
-        live
+    /// The key of `frame`, as a page of `extension`: the frame's own key,
+    /// made on its first call. The frame is kept until `gone` finds it
+    /// invalid.
+    fn key_of(&self, frame: &Frame, extension: &str) -> u64 {
+        let identifier = CefString::from(&frame.identifier()).to_string();
+        let key = *self.keys.borrow_mut().entry(identifier).or_insert_with(|| {
+            let key = self.last_key.get() + 1;
+            self.last_key.set(key);
+            key
+        });
+        let displaced = self.pages.borrow_mut().insert(
+            key,
+            PageFrame {
+                extension: extension.to_string(),
+                frame: frame.clone(),
+            },
+        );
+        drop(displaced);
+        key
     }
 
-    fn remember(&self, extension: &str, frame: &Frame) {
-        let key = CefString::from(&frame.identifier()).to_string();
-        let mut list = self.live_frames(extension);
-        if !list
-            .iter()
-            .any(|known| CefString::from(&known.identifier()).to_string() == key)
-        {
-            list.push(frame.clone());
-        }
-        let displaced = self.frames.borrow_mut().insert(extension.to_string(), list);
-        drop(displaced);
+    /// The keys of the frames that are gone, which are let go. The map is
+    /// taken out of its cell while the frames are asked, since asking is a
+    /// CEF call.
+    pub(crate) fn gone(&self) -> Vec<u64> {
+        let all = std::mem::take(&mut *self.pages.borrow_mut());
+        let (live, gone): (HashMap<u64, PageFrame>, HashMap<u64, PageFrame>) = all
+            .into_iter()
+            .partition(|(_, page)| page.frame.is_valid() != 0);
+        self.pages.borrow_mut().extend(live);
+        let keys: Vec<u64> = gone.keys().copied().collect();
+        self.keys.borrow_mut().retain(|_, key| !keys.contains(key));
+        drop(gone);
+        keys
     }
 
     /// Let go of every frame and call, before CEF shuts down. Taken out of
     /// the cells first: letting go is a CEF call.
     pub(crate) fn clear(&self) {
         let calls = std::mem::take(&mut *self.calls.borrow_mut());
-        let frames = std::mem::take(&mut *self.frames.borrow_mut());
+        let pages = std::mem::take(&mut *self.pages.borrow_mut());
+        let keys = std::mem::take(&mut *self.keys.borrow_mut());
         drop(calls);
-        drop(frames);
+        drop(pages);
+        drop(keys);
     }
-}
 
-/// Evaluate `payload`'s delivery in `frame`, if it is still a page of
-/// `extension`.
-fn deliver(frame: &Frame, extension: &str, payload: &Value) {
-    if frame.is_valid() == 0 {
-        return;
-    }
-    let url = CefString::from(&frame.url()).to_string();
-    if extension_of(&url).as_deref() != Some(extension) {
-        return;
-    }
-    frame.execute_java_script(Some(&CefString::from(delivery(payload).as_str())), None, 0);
-}
-
-impl BridgeTransport for PageLane {
-    fn reply(&self, call: CallId, result: Result<Value, String>) {
+    /// Answer the page call `call`: the page's own number, in the frame
+    /// that asked, if that frame is still an extension's page.
+    pub(crate) fn reply(&self, call: CallId, result: Result<Value, String>) {
         let removed = self.calls.borrow_mut().remove(&call);
         let Some((frame, id)) = removed else {
             return;
@@ -433,18 +434,33 @@ impl BridgeTransport for PageLane {
         }
     }
 
-    /// At most once, to the pages that have called and are still there;
-    /// an event for a page that is gone is dropped, never kept.
-    fn emit(&self, extension: &str, event: &str, args: &[Value]) {
-        let frames = self.live_frames(extension);
-        let payload = json!({ "event": event, "args": args });
-        for frame in &frames {
-            deliver(frame, extension, &payload);
+    /// Deliver `event` to the page `page`, a frame of `extension` that has
+    /// called and is still there. An event for a frame that is gone is
+    /// dropped, never kept.
+    pub(crate) fn emit_to(&self, page: u64, extension: &str, event: &str, args: &[Value]) {
+        let frame = self
+            .pages
+            .borrow()
+            .get(&page)
+            .filter(|known| known.extension == extension)
+            .map(|known| known.frame.clone());
+        if let Some(frame) = frame {
+            deliver(&frame, extension, &json!({ "event": event, "args": args }));
         }
     }
+}
 
-    /// Pages are awake while they exist.
-    fn wake(&self, _extension: &str) {}
+/// Evaluate `payload`'s delivery in `frame`, if it is still a page of
+/// `extension`.
+fn deliver(frame: &Frame, extension: &str, payload: &Value) {
+    if frame.is_valid() == 0 {
+        return;
+    }
+    let url = CefString::from(&frame.url()).to_string();
+    if extension_of(&url).as_deref() != Some(extension) {
+        return;
+    }
+    frame.execute_java_script(Some(&CefString::from(delivery(payload).as_str())), None, 0);
 }
 
 #[cfg(test)]

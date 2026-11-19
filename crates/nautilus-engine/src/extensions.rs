@@ -1144,7 +1144,7 @@ mod native {
             let mut known = Vec::new();
             let mut extensions = Vec::new();
             let mut helper_loaded = false;
-            let mut granted: Vec<(String, Grants)> = Vec::new();
+            let mut granted: Vec<(String, Grants, bool)> = Vec::new();
             for item in items {
                 let text = |key: &str| {
                     item.get(key)
@@ -1221,8 +1221,11 @@ mod native {
                     .worker
                     .as_deref()
                     .is_some_and(bridge::rewrite::is_loader);
-                if enabled && bridged {
-                    granted.push((id.clone(), manifest.grants.clone()));
+                // Every enabled extension is served, with or without a
+                // worker: store.rs bridges each extension page, and the
+                // worker (the loader) is the only thing woken.
+                if enabled {
+                    granted.push((id.clone(), manifest.grants.clone(), bridged));
                 }
                 let action = manifest.facts.action.as_ref();
                 known.push(Known {
