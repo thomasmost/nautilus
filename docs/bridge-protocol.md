@@ -135,6 +135,15 @@ a `call` as it came, a `hello` as `{hello}`, and the port's end as
 `{gone: true}` (the worker stopped, or the extension was reloaded; the
 relay learns of it only if the port reports it).
 
+**Which port is the bridge's.** The worker adopts the port named
+`nautilus-bridge-1` only from its extension's relay page: `sender.id` is the
+extension's, `sender.tab` is absent, and `sender.url` is the relay page's
+address (`runtime.getURL('nautilus-bridge/relay.html')`). The relay adopts only
+its extension's worker's port: `sender.id` is the extension's and `sender.tab`
+is absent. A port from a content script has a sender tab and is never adopted.
+The relay's port is adopted and its calls are answered in the scripted run
+(`phase5.py`), which is the measurement of the `sender.url` field.
+
 **A port with no listener.** The worker may open its own port before the relay
 page listens (a worker started before the engine has opened the relay). Chromium
 closes such a port at once with "Could not establish connection. Receiving end
@@ -378,7 +387,8 @@ The call's `method` is split at its first dot into the namespace and the
 function, and the hub routes it (`hub.rs`, `router.rs`). `tabs.query`, the
 other `tabs` and `windows` functions, and the `bridge.listen` message are
 answered by the engine from its strip or its own state, with no CEF call; a
-forwarded call goes to Chromium by name with the translated ids; a request
+forwarded call goes to Chromium by name with the translated ids, and the
+script accepts a forward only for the methods in `router::FORWARDED`; a request
 (create, close, move, activate, open) waits for the model's answer; and a
 method the router does not know is rejected, never passed to Chromium. A
 worker's answer goes back down the relay under the worker instance that made
@@ -387,13 +397,22 @@ worker's own call id for each call the hub is answering). Phase 5 answers
 from the strip, so a query no longer waits for the helper's list of targets;
 the helper's page is needed only for the debugger and for clicks. 
 
+**Bounds.** A worker's call and a page's call are each refused after 10 s if
+the engine has not answered (`bridge.js`, `page_transport.js`: "was not
+answered"). A page's call of an extension that is not served waits up to 2 s
+for it and is then refused ("the extension is not bridged."). Held calls are
+kept in order within their own extension, so one extension's held calls never
+hold another's. A page call the browser cannot take is answered with an error
+when its number can be read; a frame that is not an extension's page gets no
+answer. A screenshot fails when its browser is gone or after 10 s.
+
 ## Events (engine to bridge)
 
 | `event` | Carries | The bridge does | Since |
 |---------|---------|-----------------|-------|
 | `action.onClicked` | `tabId` (Chromium's) | `chrome.action.onClicked.dispatch(await <Chromium's chrome.tabs.get>(tabId))` | 1 |
 
-Since Task 9, any other event is handed to every listener that the
+Any other event is handed to every listener that the
 namespace scripts registered with `__bridgeOnEvent`, as
 `(event, args)`, in the order they were registered. The receipt is posted
 before the listeners run. A listener that throws is logged, and the others
@@ -404,10 +423,15 @@ failure, which the engine never retries (`policy::after_delivery`). Chromium's
 `tabs.get` for the click is the one `core.js` kept in `native` before it
 replaced the namespace, so a click never reaches the engine.
 
-Phase 5's events are the same messages: the engine sends `deliver` with
-`{id, event, args}` for each listener's event (`tabs.onCreated`,
-`windows.onFocusChanged`, and the rest of `differ.rs`'s list) and for
-`bridge.wake`, which starts a stopped worker and nothing else. A delivery
+The engine's events are the same messages. It sends `deliver` with
+`{id, event, args}` to a service worker only for an event that the worker's
+own listeners registered (`tabs.onCreated`, `windows.onFocusChanged`, and the
+rest of `differ.rs`'s list), and `bridge.wake` only when a served extension
+with a worker is first seen; it starts a stopped worker and nothing else. So a
+stopped worker is started only by an event it listens for. An extension page
+is sent an event only for a listener its own frame registered, and that
+registration ends with the frame (`state.rs`, `page_listeners`;
+`pages.rs`, `PageLane::emit_to`; `Hub::tick`). A delivery
 is queued as a job (`Job::Emit`) with a bound of 256 queued jobs, and each
 has one delivery id, kept across its attempts, so an instance that ran it
 ignores a repeat. An event is retried once, on a fresh relay, only when the
@@ -468,6 +492,27 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   protocol 1 history. `windowId` and `index` are the strip's, not Chromium's.
 - Only the methods in the table above are answered; everything else is
   refused, never passed to Chromium.
+- An extension without a service worker is served through its pages alone:
+  no worker is woken for it, and its pages get `chrome.tabs` and
+  `chrome.windows` like a worker's.
+- A host pattern is a host permission: in Manifest V3 only `host_permissions`
+  grants one (Chrome ignores a pattern under `permissions`). `<all_urls>` and
+  every pattern leave out file pages, since this browser grants no file access.
+- An extension page's `iframe`s (`srcdoc`, `about:blank`) have a `chrome`
+  object with no `tabs` or `windows`: measured on the bundle, with a probe page
+  in a worker-less test extension, `typeof` is `undefined` for both. If an
+  extension page's bridge cannot be put in, its native `tabs` and `windows`
+  are replaced with namespaces that refuse every call (`page_transport.js`,
+  `__nautilusRefuseNative`), so a native `tabs.group` is never called.
+- A message from a tab (`sender.tab`) is answered by this context only when one
+  of its listeners answers. A context whose listeners do not answer sends
+  nothing, so an answer from a popup or an offscreen document is the one the
+  sender gets. Chromium then closes the sender's channel with its own error when
+  no context answers, where it would give no error and an `undefined` answer.
+  That difference is the chosen trade-off: a context cannot know, before its
+  listeners run, whether another context will answer.
+- `tabs.stripOf(id)` is internal (see the method table); it is not a
+  `chrome.tabs` member.
 - Extension pages get the bridge (`bridge/pages.rs`): an
   extension's popup, its options page and any page shown as a tab. The
   transport goes in when the page's context is created; the namespaces go in
@@ -562,6 +607,16 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   leaves the copy and its marker as they were. A failure while the bridge
   files are being written could leave some of them new; the next load
   rewrites all of them.
+- Replacing a copy renames the old copy aside, moves the staging folder in,
+  and deletes the old copy. A failed move renames the old copy back. Staging
+  and aside folders carry a per-process number; copies are made one at a time;
+  a load removes only the leftovers with exactly its copy's staging or aside
+  names (`install.rs`, `replace_dir` and `sweep_leftovers`).
+- A user's folder that an earlier build loaded (`bridge/migrate.rs`) is
+  switched off while its copy is made. It is removed once the copy is listed:
+  a keyless extension's copy has a new id, so the data stored under the old id
+  goes with it. If the copy cannot be made, the original stays switched off,
+  with a message.
 
 ## Phase 5 reconciliation
 
@@ -700,7 +755,8 @@ browser to ask).
 | `highlight({tabs, windowId?})` | R / S | activates the tab at the first index (`ActivateTab`); resolves with the populated window. `No tab at index: N.` |
 | `discard(id?)` | S | resolves `undefined` ("not discarded"), after checking the id. Never forwarded. |
 | `group`, `ungroup` | X | `tabs.group is not supported.` until tab groups arrive |
-| `captureVisibleTab(windowId?, options?)` | engine | needs `<all_urls>` in the manifest; `Page.captureScreenshot` on the window's active tab's browser; resolves `data:image/<format>;base64,…` |
+| `captureVisibleTab(windowId?, options?)` | engine | needs `<all_urls>` in the manifest; the window's active tab must be an `http`, `https`, `ftp` or `data` page, or one of the extension's own pages (any other, a file page included, is refused with a message that names its URL); `Page.captureScreenshot` on the window's active tab's browser; resolves `data:image/<format>;base64,…` |
+| `stripOf(id)` | S | internal, and not a `chrome.tabs` member: the seven strip fields of tab `id`, or `null`. `runtime.js` asks for it to lay the strip over `sender.tab`. Any bridged caller can reach it through the transport, and it gives nothing `get` does not (no URL, no title). |
 | `reload`, `goBack`, `goForward`, `getZoom`, `setZoom`, `getZoomSettings`, `setZoomSettings`, `detectLanguage` (tab id optional) | F | the id translated, or filled in with the current window's active tab (Chromium has no current window to fall back on) |
 | `executeScript`, `insertCSS`, `removeCSS` (Manifest V2 only) | F | the same, defined only where Chromium defines them |
 | `sendMessage`, `connect` | D | Chromium's own functions, bound |

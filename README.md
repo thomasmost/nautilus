@@ -692,15 +692,24 @@ Upstream causes and the features they block are tracked in
   cannot be moved between windows, and `tabs.group` rejects until tab
   groups arrive. A page's address and title are given only to an
   extension whose manifest has the `tabs` permission or a matching host
-  permission (`activeTab` and optional permissions are not counted).
+  permission (`activeTab` and optional permissions are not counted; in
+  Manifest V3 a host pattern counts only under `host_permissions`). No file
+  page's address or title is given, since this browser grants no file access.
+  `captureVisibleTab` captures only a web page (`http`, `https`, `ftp`,
+  `data`) or the extension's own pages.
   An unpacked extension runs from a copy in the profile; load the
-  folder again to pick up edits.
+  folder again to pick up edits. An unpacked extension that an earlier build
+  loaded from your own folder moves into such a copy: one without a `key` gets
+  a new id, so the data stored under its old id is removed. An extension whose
+  bridge cannot be put in is switched off, with a message.
   A click on an action with no popup reaches the extension's worker
-  through the bridge. Every loaded extension's worker is bridged (store
-  installs, "Load unpacked…" and the test control alike); an extension's
-  pages (popup, options page, a page shown as a tab) are bridged on their own
-  lane, so a page's `chrome.tabs` calls are answered like a worker's. The relay
-  page and the helper's pages are not bridged. A tab an extension is
+  through the bridge. An extension with a service worker has the worker
+  bridged (store installs, "Load unpacked…" and the test control alike), and
+  every enabled extension's pages (popup, options page, a page shown as a tab)
+  are bridged on their own lane, with or without a worker, so a page's
+  `chrome.tabs` calls are answered like a worker's. An extension page's
+  `iframe`s have no `chrome.tabs`. The relay page and the helper's pages are
+  not bridged. A tab an extension is
   debugging is kept painted, for any extension whose worker is bridged; a background tab nothing
   reported as debugged is hidden, so DevTools ("Inspect") on a background
   tab is slow until it is shown. A debugged tab is hidden again when its
