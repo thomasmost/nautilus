@@ -12,6 +12,7 @@
 
 pub(crate) mod debugger;
 pub(crate) mod install;
+pub(crate) mod migrate;
 pub(crate) mod policy;
 pub(crate) mod rewrite;
 pub(crate) mod table;

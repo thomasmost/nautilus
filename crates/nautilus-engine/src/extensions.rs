@@ -476,6 +476,9 @@ mod native {
         /// Extensions whose directory was already looked at for the bridge
         /// this run (`on_list`), so each is bridged once per run.
         checked: HashSet<String>,
+        /// The user-folder extensions being moved into the profile's copies
+        /// (`bridge::migrate`).
+        migrations: bridge::migrate::Migrations,
     }
 
     /// The management browser (never shown) and what it learnt. One per
@@ -538,6 +541,7 @@ mod native {
                     list_hold: None,
                     list_held: false,
                     checked: HashSet::new(),
+                    migrations: Default::default(),
                 }),
             });
             let mut client = ManagerClient::new(
@@ -797,10 +801,22 @@ mod native {
         /// Load what the unpacking threads finished. Called by the engine
         /// on every spin.
         pub(crate) fn poll_unpacked(&self) {
-            for (id, outcome) in self.unpacked.take() {
+            for (name, outcome) in self.unpacked.take() {
+                let migration = self.inner.borrow_mut().migrations.finish(&name, &outcome);
                 match outcome {
-                    Ok(dir) => self.load_unpacked(dir),
-                    Err(e) => self.report_error(format!("cannot install extension {id}: {e}")),
+                    Ok(dir) => self.load_unpacked(match migration {
+                        Some(bridge::migrate::Next::Load(copy)) => copy,
+                        _ => dir,
+                    }),
+                    Err(e) => match migration {
+                        Some(bridge::migrate::Next::Disable(original)) => {
+                            self.set_enabled(&original, false);
+                            self.report_error(format!(
+                                "{name} was switched off: its copy in the profile could not be made ({e})"
+                            ));
+                        }
+                        _ => self.report_error(format!("cannot install extension {name}: {e}")),
+                    },
                 }
             }
         }
@@ -1178,18 +1194,33 @@ mod native {
                     if !dir.starts_with(&self.store_dir) {
                         // Loaded by an earlier build from the user's own folder,
                         // which is never written to: run it from a copy instead.
-                        // Without a `key` its id follows its path, so the old one
-                        // is removed, and what it stored goes with it.
+                        // The original stays until its copy is made and listed
+                        // (`bridge::migrate`), and is switched off if the copy
+                        // cannot be made.
                         if first_look {
-                            if !manifest.has_key {
-                                self.report_error(format!(
-                                    "{name} now runs from a copy inside the profile; its id changed and its stored data did not move"
-                                ));
-                                self.uninstall(&id);
+                            let source = dir.display().to_string();
+                            self.inner.borrow_mut().migrations.start(
+                                &source,
+                                &id,
+                                manifest.has_key,
+                            );
+                            // Off until its copy is listed: the original runs
+                            // unbridged, with Chromium's own tab functions, until then.
+                            if enabled {
+                                self.set_enabled(&id, false);
                             }
                             self.load_bridged(dir);
                         }
                         continue;
+                    }
+                    let replaced = self.inner.borrow_mut().migrations.listed(&dir);
+                    if let Some(original) = replaced {
+                        // Without a `key` the copy has a new id, so the original's
+                        // stored data goes with the original.
+                        self.report_error(format!(
+                            "{name} now runs from a copy inside the profile; its id changed, so the data stored under its old id is removed"
+                        ));
+                        self.uninstall(&original);
                     }
                     if first_look {
                         match bridge_into(&dir) {
