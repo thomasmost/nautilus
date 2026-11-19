@@ -14,6 +14,7 @@
   var chrome = root.chrome;
   if (typeof call !== 'function' || typeof onEvent !== 'function' || !chrome) {
     console.error('nautilus-bridge: no transport or no chrome in this context');
+    if (typeof root.__nautilusRefuseNative === 'function') { root.__nautilusRefuseNative(); }
     return;
   }
   // Chromium's own namespaces, kept as plain objects of bound functions

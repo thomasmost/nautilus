@@ -8,6 +8,7 @@
 // once.
 if (!root.document || typeof root.MutationObserver !== 'function') {
   console.error('nautilus-bridge: no document to wait for in this context');
+  if (typeof root.__nautilusRefuseNative === 'function') { root.__nautilusRefuseNative(); }
   return;
 }
 var observer = new root.MutationObserver(function () {

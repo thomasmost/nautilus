@@ -535,4 +535,33 @@ function loadWorker(runtime) {
   assert.equal(outcome, 'Nautilus: query was not answered.');
   assert.ok(Date.now() - started >= 9000, 'the bound is the worker\'s, about ten seconds');
 }
+{
+  // Fail closed: a context whose bridge cannot be put in (no transport for
+  // core.js, or no document for the deferred install) keeps no callable native
+  // tabs or windows: a native tabs.group reaches Chromium and traps it.
+  const reached = [];
+  const nativeFn = (name) => () => { reached.push(name); };
+  const chrome = { tabs: { group: nativeFn('tabs.group'), TAB_ID_NONE: -1 }, windows: { create: nativeFn('windows.create') } };
+  const sandbox = { chrome, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Proxy };
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  // The page's transport runs first in every extension page (page_script).
+  vm.runInContext(read('page_transport.js'), sandbox);
+  vm.runInContext(read('core.js'), sandbox);
+  await assert.rejects(Promise.resolve().then(() => chrome.tabs.group({ tabIds: [1] })));
+  assert.deepEqual(reached, [], 'core.js left a native tabs.group callable');
+}
+{
+  const reached = [];
+  const nativeFn = (name) => () => { reached.push(name); };
+  const chrome = { tabs: { group: nativeFn('tabs.group') }, windows: { create: nativeFn('windows.create') } };
+  const sandbox = { chrome, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Proxy };
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read('page_transport.js'), sandbox);
+  vm.runInContext(`(function (root, install) {\n${read('page_defer.js')}\n})(self, function () { throw new Error('install ran'); });`, sandbox);
+  await assert.rejects(Promise.resolve().then(() => chrome.tabs.group({ tabIds: [1] })));
+  await assert.rejects(Promise.resolve().then(() => chrome.windows.create({})));
+  assert.deepEqual(reached, [], 'a context with no document left native tabs callable');
+}
 console.log('bridge scripts: ok');
