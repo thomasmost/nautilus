@@ -224,9 +224,15 @@ fn copy_and_bridge(
     store_dir: &Path,
     version: &str,
 ) -> Result<(PathBuf, Bridged), String> {
-    let copy = store_dir.join(copy_name(source));
-    let staging = store_dir.join(format!("{}.partial", copy_name(source)));
-    let _ = fs::remove_dir_all(&staging);
+    // The copies are made one at a time: a load's sweep of its leftovers
+    // cannot take another load's staging folder.
+    let _turn = COPIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let name = copy_name(source);
+    let copy = store_dir.join(&name);
+    sweep_leftovers(store_dir, &name);
+    let staging = store_dir.join(format!("{name}.{}.partial", unique_suffix()));
     match stage(source, &staging, &copy, version) {
         Ok(bridged) => Ok((copy, bridged)),
         Err(e) => {
@@ -245,12 +251,93 @@ fn stage(source: &Path, staging: &Path, copy: &Path, version: &str) -> Result<Br
         bridged = rewrite_in_place(at, &skipped)?;
         Ok(())
     })?;
-    if copy.exists() {
-        fs::remove_dir_all(copy).map_err(|e| format!("clearing {}: {e}", copy.display()))?;
-    }
-    fs::rename(staging, copy)
-        .map_err(|e| format!("moving the copy into {}: {e}", copy.display()))?;
+    replace_dir(staging, copy)?;
     Ok(bridged)
+}
+
+/// Serialises the copies of folders (`copy_and_bridge`).
+static COPIES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A part of a staging or aside folder's name that no other call in this
+/// process has, and that a crashed earlier process cannot have used again.
+fn unique_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{n}", std::process::id())
+}
+
+/// Put `staging` in place of `copy`, the store's copy of a folder. The old
+/// copy is renamed aside first, so a failed move never leaves the copy half
+/// deleted: when the staging folder cannot be renamed into place, the old
+/// copy is renamed back. The aside folder is deleted once the new copy is in
+/// place; one that cannot be deleted is left for `sweep_leftovers`.
+fn replace_dir(staging: &Path, copy: &Path) -> Result<(), String> {
+    let name = copy
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{} has no name", copy.display()))?;
+    let aside = copy.with_file_name(format!("{name}.old-{}", unique_suffix()));
+    let had_old = copy.exists();
+    if had_old {
+        fs::rename(copy, &aside)
+            .map_err(|e| format!("setting the old copy at {} aside: {e}", copy.display()))?;
+    }
+    if let Err(e) = fs::rename(staging, copy) {
+        if had_old {
+            let _ = fs::rename(&aside, copy);
+        }
+        return Err(format!("moving the copy into {}: {e}", copy.display()));
+    }
+    if had_old {
+        let _ = fs::remove_dir_all(&aside);
+    }
+    Ok(())
+}
+
+/// Delete what an earlier call left beside the copy named `name` in
+/// `store_dir`: a staging folder (`<name>.<n>.partial`) or an aside folder
+/// (`<name>.old-<n>`). Only entries whose names have exactly those forms are
+/// touched, so no other folder in the store is ever deleted.
+fn sweep_leftovers(store_dir: &Path, name: &str) {
+    let Ok(entries) = fs::read_dir(store_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if is_leftover(file_name, name) {
+            let path = entry.path();
+            let _ = fs::remove_dir_all(&path).or_else(|_| fs::remove_file(&path));
+        }
+    }
+}
+
+/// Whether `entry` is a leftover of the copy named `name`: its name is
+/// `name`, a dot, and either `<pid>-<n>.partial` or `old-<pid>-<n>`.
+fn is_leftover(entry: &str, name: &str) -> bool {
+    let numbered = |text: &str| {
+        let mut parts = text.split('-');
+        matches!(
+            (parts.next(), parts.next(), parts.next()),
+            (Some(a), Some(b), None)
+                if !a.is_empty()
+                    && !b.is_empty()
+                    && a.bytes().all(|c| c.is_ascii_digit())
+                    && b.bytes().all(|c| c.is_ascii_digit())
+        )
+    };
+    let Some(rest) = entry
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix('.'))
+    else {
+        return false;
+    };
+    match rest.strip_suffix(".partial") {
+        Some(id) => numbered(id),
+        None => rest.strip_prefix("old-").is_some_and(numbered),
+    }
 }
 
 /// Copy the source at `source` into `dest`, replacing what `dest` held,
@@ -1080,6 +1167,101 @@ mod tests {
             .unwrap_or_default();
         assert!(leftovers.is_empty(), "{leftovers:?}");
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn names_in(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_replacement_that_cannot_be_moved_in_keeps_the_old_copy() {
+        let store = tempfile::tempdir().unwrap();
+        let copy = store.path().join("unpacked-a-0123abcd");
+        fs::create_dir(&copy).unwrap();
+        put(&copy.join("old.txt"), "old");
+        // The staging folder does not exist, so its move fails.
+        let missing = store.path().join("unpacked-a-0123abcd.1-1.partial");
+        assert!(replace_dir(&missing, &copy).is_err());
+        assert_eq!(fs::read_to_string(copy.join("old.txt")).unwrap(), "old");
+        assert_eq!(
+            names_in(store.path()),
+            vec!["unpacked-a-0123abcd".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_replacement_moves_the_new_copy_in_and_leaves_no_old_one_behind() {
+        let store = tempfile::tempdir().unwrap();
+        let copy = store.path().join("unpacked-a-0123abcd");
+        fs::create_dir(&copy).unwrap();
+        put(&copy.join("old.txt"), "old");
+        let staging = store.path().join("unpacked-a-0123abcd.1-2.partial");
+        fs::create_dir(&staging).unwrap();
+        put(&staging.join("new.txt"), "new");
+        replace_dir(&staging, &copy).unwrap();
+        assert_eq!(fs::read_to_string(copy.join("new.txt")).unwrap(), "new");
+        assert!(!copy.join("old.txt").exists());
+        assert_eq!(
+            names_in(store.path()),
+            vec!["unpacked-a-0123abcd".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_leftover_of_this_copy_is_swept_and_nothing_else_is() {
+        let store = tempfile::tempdir().unwrap();
+        let name = "unpacked-a-0123abcd";
+        for leftover in [format!("{name}.7-2.partial"), format!("{name}.old-7-3")] {
+            fs::create_dir(store.path().join(leftover)).unwrap();
+        }
+        for kept in [
+            name.to_string(),
+            format!("{name}.notes"),
+            format!("{name}.x-1.partial"),
+            "unpacked-b-4567cdef.7-2.partial".to_string(),
+        ] {
+            fs::create_dir(store.path().join(kept)).unwrap();
+        }
+        sweep_leftovers(store.path(), name);
+        let mut kept = vec![
+            name.to_string(),
+            format!("{name}.notes"),
+            format!("{name}.x-1.partial"),
+            "unpacked-b-4567cdef.7-2.partial".to_string(),
+        ];
+        kept.sort();
+        assert_eq!(names_in(store.path()), kept);
+    }
+
+    #[test]
+    fn staging_names_are_unique_within_a_process() {
+        assert_ne!(unique_suffix(), unique_suffix());
+    }
+
+    #[test]
+    fn two_loads_of_one_folder_at_once_both_succeed_and_leave_one_copy() {
+        let source = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        put(&source.path().join("manifest.json"), MANIFEST);
+        put(&source.path().join("sw.js"), "// worker");
+        let (first, second) = std::thread::scope(|scope| {
+            let a = scope.spawn(|| bridge_source(source.path(), store.path(), "v1"));
+            let b = scope.spawn(|| bridge_source(source.path(), store.path(), "v1"));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        first.unwrap();
+        second.unwrap();
+        assert_eq!(
+            names_in(store.path()).len(),
+            1,
+            "{:?}",
+            names_in(store.path())
+        );
     }
 
     #[test]
