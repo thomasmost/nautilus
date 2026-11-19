@@ -259,7 +259,7 @@ fn send_to_browser(name: &str, arguments: Option<&[Option<V8Value>]>) -> ::std::
 pub(crate) struct PageLane {
     /// Calls not yet answered: the frame that asked and its own number
     /// for the call.
-    calls: RefCell<HashMap<CallId, (Frame, u64)>>,
+    calls: RefCell<HashMap<CallId, (Frame, u64, String)>>,
     last: Cell<CallId>,
     /// The frames that have called, by the key the page context carries
     /// (`BridgeCall::page`): where their events go. A frame that is gone is
@@ -327,7 +327,10 @@ impl PageLane {
         let id = self.last.get() + 1;
         self.last.set(id);
         // A fresh id: nothing is displaced.
-        let _ = self.calls.borrow_mut().insert(id, (frame.clone(), call.id));
+        let _ = self
+            .calls
+            .borrow_mut()
+            .insert(id, (frame.clone(), call.id, extension.clone()));
         let page = self.key_of(frame, &extension);
         hub.call(
             Lane::Page,
@@ -428,20 +431,17 @@ impl PageLane {
     }
 
     /// Answer the page call `call`: the page's own number, in the frame
-    /// that asked, if that frame is still an extension's page.
+    /// that asked, if that frame is still a page of the extension that asked.
     pub(crate) fn reply(&self, call: CallId, result: Result<Value, String>) {
         let removed = self.calls.borrow_mut().remove(&call);
-        let Some((frame, id)) = removed else {
+        let Some((frame, id, extension)) = removed else {
             return;
         };
         let payload = match result {
             Ok(value) => json!({ "id": id, "ok": value }),
             Err(message) => json!({ "id": id, "error": message }),
         };
-        let url = CefString::from(&frame.url()).to_string();
-        if let Some(extension) = extension_of(&url) {
-            deliver(&frame, &extension, &payload);
-        }
+        deliver(&frame, &extension, &payload);
     }
 
     /// Deliver `event` to the page `page`, a frame of `extension` that has
@@ -476,6 +476,12 @@ fn refuse(frame: &Frame, extension: &str, text: Option<&str>, message: &str) {
     deliver(frame, extension, &json!({ "id": id, "error": message }));
 }
 
+/// Whether a frame at `url` may be given a message for `extension`: it is
+/// still a page of that extension.
+pub(crate) fn deliverable(url: &str, extension: &str) -> bool {
+    extension_of(url).as_deref() == Some(extension)
+}
+
 /// Evaluate `payload`'s delivery in `frame`, if it is still a page of
 /// `extension`.
 fn deliver(frame: &Frame, extension: &str, payload: &Value) {
@@ -483,7 +489,7 @@ fn deliver(frame: &Frame, extension: &str, payload: &Value) {
         return;
     }
     let url = CefString::from(&frame.url()).to_string();
-    if extension_of(&url).as_deref() != Some(extension) {
+    if !deliverable(&url, extension) {
         return;
     }
     frame.execute_java_script(Some(&CefString::from(delivery(payload).as_str())), None, 0);
@@ -496,6 +502,21 @@ mod tests {
     use super::*;
 
     const ID: &str = "abcdefghijklmnopabcdefghijklmnop";
+
+    #[test]
+    fn a_reply_goes_only_to_the_frame_still_on_the_extension_that_called() {
+        const OTHER: &str = "ponmlkjihgfedcbaponmlkjihgfedcba";
+        assert!(deliverable(
+            &format!("chrome-extension://{ID}/page.html"),
+            ID
+        ));
+        // The frame navigated to another extension's page, or to the web.
+        assert!(!deliverable(
+            &format!("chrome-extension://{OTHER}/page.html"),
+            ID
+        ));
+        assert!(!deliverable("https://example.com/", ID));
+    }
 
     #[test]
     fn a_call_number_is_read_from_a_call_that_is_not_well_formed() {
