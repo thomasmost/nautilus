@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-18 (an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-19 (review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -310,7 +310,13 @@ Ninja on `PATH`:
   comes before the page's first script runs). Not the relay page, not the
   helper's pages. The page's calls come back over the page lane (`PageLane`, a process message the
   browser process answers from the calling frame's own address; `Hub::serves`
-  refuses a page of an extension the bridge does not serve).
+  refuses a page of an extension the bridge does not serve). An extension
+  without a service worker is served through its pages alone
+  (`BridgeState::set_extensions` takes each served extension's worker flag),
+  and a page's listeners are recorded for its frame (`BridgeCall::page`), so an
+  event reaches only the pages that registered it. A user folder that an
+  earlier build loaded is moved into its copy by `bridge/migrate.rs`, which
+  removes the original only once the copy is listed.
 - **A tab a debugger is on is painted.** The bridge reports each
   bridged extension's `chrome.debugger` attach and detach, by tab id or
   by `{targetId}` (`debugger.attached` and `debugger.detached`,
@@ -462,6 +468,89 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-19, review 1 of Phase 5)
+
+The code-review feedback on `fc83621..fcea1f1` (and the two commits after it)
+was handled finding by finding: each one reproduced first (a red engine or node
+test, a mutation, or a measurement on the bundle), then fixed, then committed.
+The commits are `f2e854a`..`31a7dd7`; the docs are `5f071c8` and the status here.
+
+What changed, by area (`bridge/state.rs` unless named):
+
+- **Extensions without a worker** (`extensions.rs`, `set_extensions`): every
+  enabled extension is served with its grants and a worker flag; only a worker
+  is woken. A page's held call waits only behind earlier held calls of its own
+  extension (`settle`), so one stalled extension cannot hold another. The bundle
+  answered `chrome.tabs.query` in a probe page of a worker-less extension.
+- **Listeners per context** (`page_listeners`, `BridgeCall::page`,
+  `PageLane::emit_to`, `Hub::tick`): the worker is sent only the events it
+  registered, a page only the events its frame registered, and a frame that is
+  gone takes its registrations with it.
+- **The bridge's ports** (`js/bridge.js`, `js/relay.js`): a port is adopted by
+  its address (the relay page's URL for the worker; a URL inside this extension
+  for the relay), not by the lack of a tab. The relay page is hosted in a tab,
+  so its port has one. The first version of this check refused a sender tab; it
+  was wrong, and it lost the first wake in the scripted run (`31a7dd7` corrects
+  it, `review1-failing-run-wake-lines.txt`).
+- **Forwards** (`router::FORWARDED`, `js/core.js`): the script takes a forward
+  only for the methods the router makes; a test keeps the two lists equal.
+- **Tab messages** (`js/runtime.js`): a context whose listeners do not answer
+  sends nothing. A trade-off to decide: a message nobody answers now closes with
+  Chromium's closed-channel error, not an `undefined` answer.
+- **Migration and copies** (`bridge/migrate.rs`, `install.rs` `replace_dir`,
+  `sweep_leftovers`): the original of a user folder is switched off while its
+  copy is made and removed once the copy is listed; a copy replacement renames
+  the old copy aside first, and the sweep removes only this copy's leftovers.
+- **Capture** (`router.rs` `capturable`): only `http`, `https`, `ftp`, `data`
+  and the extension's own pages; a file page is refused.
+- **Bounds** (`js/page_transport.js`, `pages.rs` `refuse`, `hub.rs`
+  `CAPTURE_WAIT`, `capture_spent`): a page's call is refused after 10 s; a
+  screenshot fails when its browser is gone or after 10 s; DevTools results are
+  queued and answered on the next tick, not inside their observer.
+- **Fail closed** (`js/page_transport.js` `__nautilusRefuseNative`): a page whose
+  bridge cannot be put in refuses Chromium's `tabs` and `windows`.
+- **Patterns** (`pattern.rs`): MV3 takes host patterns from `host_permissions`
+  only; `<all_urls>` and every pattern skip file pages; hosts match without case.
+- **Minor**: the six `allow(dead_code)` on the view and popup items are gated
+  (`delegate.rs`); plan and review labels are out of the comments; a page reply
+  is checked against the extension that asked (`pages.rs` `deliverable`).
+
+Measured on the bundle (`evidence/phase-5/review1-probe*`): a worker-less
+extension's page answers `tabs.query`; its `srcdoc` and `about:blank` iframes
+have a `chrome` object and no `chrome.tabs` (`typeof` undefined). The relay's
+port sender carries a tab and the worker's carries
+`chrome-extension://<id>/background/nautilus-loader.js`
+(`review1-relay-sender-measure-run.txt`).
+
+Tests, red first where the defect could be shown: `bridge/state.rs` (the
+per-extension hold, the worker-less served extension, the per-context
+listeners, the frame-gone case; a mutation routing page listeners to the worker
+fails four of them); `bridge/router.rs` (`capture_takes_only_...`, the forward
+list); `bridge/install.rs` (the replacement, the sweep, the concurrent load:
+the shared-staging mutant fails 6 of 6); `bridge/migrate.rs` (five cases);
+`bridge/pattern.rs` (MV3, the case, the file pages); `bridge/pages.rs` (the call
+number, the delivery rule); `bridge/hub.rs` (`capture_spent`);
+`ci/side-panel/bridge_check.mjs` (the forward, the ports, the silent listener,
+the page timeout, the fail-closed paths; the old bridge scripts fail the port
+checks). Two existing expectations changed, because they encoded a defect: the
+silent-listener assertion (it expected `undefined` to the sender), and the
+file-page rows of the pattern table (`<all_urls>` and `file:///tmp/*` now match
+no file page). The node harness's page context answers its calls by default now.
+
+Still open: `#[allow(dead_code)]` appears 17 more times on this branch than on
+`origin/main` (in `extensions.rs`, `lib.rs`, `delegate.rs`), which the review did
+not name; Windows was not built (only the Apple Silicon target is installed);
+the scripted runs were not clicked by hand; the keyed extension's migration
+(a user folder with a `key`) was not run on the bundle.
+
+Verified on `31a7dd7` (exit status in brackets): `cargo fmt --all --check` [0];
+`cargo clippy --workspace --all-targets -- -D warnings` [0]; `cargo test
+--workspace` [0; 251 and 2 passed]; `cargo build --workspace --all-targets` [0];
+`node ci/side-panel/bridge_check.mjs` [0]; `cargo xtask bundle-mac` [0].
+`phase5.py`: three passes [0, 0, 0; 72 PASS, 0 FAIL each]. The regression
+modes: `spike` [0, 54 PASS], `pump` [0, 7], `reload` [0, 7], `zombie` [0, 21],
+`stop` [0, 17], `idle` [0, 9], `broken` [0, 14].
 
 ## Status and handoff (2026-11-18, the page's report)
 

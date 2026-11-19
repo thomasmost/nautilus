@@ -235,15 +235,16 @@ belongs to one running Nautilus at a time.
   move, id-addressed calls, the failed-closed methods, the events, an
   extension page opened as a tab, `windows.create`) and the `restore` suite
   (a deferred tab's first show). The owner's own Nautilus may run beside it:
-  its windows are not counted. **Status:** on 2026-11-18, after the page's
-  namespaces were installed at its first document change, the browser no longer
-  traps, the extension page is bridged, and its calls are held for their tab and
-  extension. Six passes on the page-report build each exit 0, with 72
-  checks passing and none failing: the restored worker's first call is sent again
-  once a relay listens, and an extension page reports its own tab id, so
-  `sender.tab` carries the strip's fields. The page's own checks failed in some
-  earlier runs, before the report; the status is described in
-  `docs/bridge-protocol.md`, "The scripted run (phase5.py)".(phase5.py)".
+  its windows are not counted. **Status:** on 2026-11-19, on the review-1 build
+  (`31a7dd7`), three passes of `phase5.py` each exit 0 with 72 checks passing
+  and none failing, and every regression mode exits 0 (`spike` 54 checks,
+  `pump` 7, `reload` 7, `zombie` 21, `stop` 17, `idle` 9, `broken` 14, none
+  failing). The browser no longer traps, the extension page is bridged and its
+  calls are held for their tab and extension, the restored worker's first call
+  is sent again once a relay listens, and an extension page reports its own tab
+  id, so `sender.tab` carries the strip's fields. The relay page's port is
+  adopted although the engine hosts that page in a tab. The status is described
+  in `docs/bridge-protocol.md`, "The scripted run (phase5.py)".
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
   browser read commands from the named directory: `load` an unpacked
   extension, `click` an action, send a raw DevTools message on the

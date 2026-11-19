@@ -137,12 +137,15 @@ relay learns of it only if the port reports it).
 
 **Which port is the bridge's.** The worker adopts the port named
 `nautilus-bridge-1` only from its extension's relay page: `sender.id` is the
-extension's, `sender.tab` is absent, and `sender.url` is the relay page's
-address (`runtime.getURL('nautilus-bridge/relay.html')`). The relay adopts only
-its extension's worker's port: `sender.id` is the extension's and `sender.tab`
-is absent. A port from a content script has a sender tab and is never adopted.
-The relay's port is adopted and its calls are answered in the scripted run
-(`phase5.py`), which is the measurement of the `sender.url` field.
+extension's and `sender.url` is the relay page's address
+(`runtime.getURL('nautilus-bridge/relay.html')`). The engine hosts the relay
+page in a tab, so its port's sender carries a `tab`; that is not refused. The
+relay adopts only its extension's worker's port: `sender.id` is the extension's
+and `sender.url` is inside the extension (measured: the worker's
+`background/nautilus-loader.js`). A content script's port carries the web
+page's address, so it is refused in both places. Measured in the scripted run
+(`phase5.py`): the relay's port has a sender tab and is adopted; a check that
+refused a sender tab left the first wake undelivered.
 
 **A port with no listener.** The worker may open its own port before the relay
 page listens (a worker started before the engine has opened the relay). Chromium
@@ -888,6 +891,19 @@ with `the extension is not bridged.`. A page's call always gets a reply.
 What the run established, on the macOS bundle built from this tree (2026-11-18).
 Each figure is from the kept files under `evidence/phase-5/` (not committed);
 the names are the run's `.out` files, and `-logs/` directories hold the logs.
+
+**Review 1 (2026-11-19, `31a7dd7`).** Three passes of `phase5.py` each exit 0
+with 72 PASS and no FAIL (`review1-phase5-pass1..3.txt`). The regression modes
+each exit 0: `spike` 54 PASS (`review1-run-spike.txt`), `pump` 7, `reload` 7,
+`zombie` 21, `stop` 17, `idle` 9, `broken` 14, none failing (`review1-run-*.txt`).
+Between the review's first commits and the port fix, the scripted run failed
+"every event the engine sent was taken by the worker" in its first pass
+(`review1-failing-run-wake-lines.txt`): the relay page's port has a sender tab,
+and a check that refused it lost the first wake. The probes that measured the
+two senders are `review1-port-probe-failing-run2.txt` and
+`review1-relay-sender-measure-run.txt`. The page probe that measured
+`chrome.tabs` in a worker-less extension's page and its iframes is
+`review1-probe-measure.txt`, with its script under `review1-probe/`.
 
 **The regression modes (B15).** Each earlier mode, on the build with
 `ext/phase5.js` imported by the worker and `webNavigation` in the manifest:
