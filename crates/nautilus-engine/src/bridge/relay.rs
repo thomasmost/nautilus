@@ -18,9 +18,9 @@ use cef::rc::Rc as _;
 use cef::{
     Browser, BrowserSettings, CefString, Client, DevToolsMessageObserver, DialogHandler,
     DisplayHandler, Frame, ImplBrowser, ImplBrowserHost, ImplClient, ImplDevToolsMessageObserver,
-    ImplDictionaryValue, ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler,
-    ImplRenderHandler, ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity, Rect,
-    Registration, RenderHandler, RequestHandler, TerminationStatus, WindowInfo, WrapClient,
+    ImplDisplayHandler, ImplFrame, ImplLifeSpanHandler, ImplLoadHandler, ImplRenderHandler,
+    ImplRequestHandler, LifeSpanHandler, LoadHandler, LogSeverity, Rect, Registration,
+    RenderHandler, RequestHandler, TerminationStatus, WindowInfo, WrapClient,
     WrapDevToolsMessageObserver, WrapDisplayHandler, WrapLifeSpanHandler, WrapLoadHandler,
     WrapRenderHandler, WrapRequestHandler, wrap_client, wrap_dev_tools_message_observer,
     wrap_display_handler, wrap_life_span_handler, wrap_load_handler, wrap_render_handler,
@@ -133,19 +133,9 @@ impl HiddenPage {
     /// Evaluate `expression` (a promise is awaited, the value returned
     /// by value); the DevTools message id the answer will carry.
     fn evaluate(browser: &Browser, expression: &str) -> Option<i32> {
-        let host = browser.host()?;
-        let mut params = cef::dictionary_value_create()?;
-        params.set_string(
-            Some(&"expression".into()),
-            Some(&CefString::from(expression)),
-        );
-        params.set_bool(Some(&"awaitPromise".into()), 1);
-        params.set_bool(Some(&"returnByValue".into()), 1);
         // Id 0 asks CEF for the next id of this browser; a caller's
         // own id may be raised, so the returned one is what counts.
-        let id =
-            host.execute_dev_tools_method(0, Some(&"Runtime.evaluate".into()), Some(&mut params));
-        (id != 0).then_some(id)
+        crate::devtools::evaluate(&browser.host()?, 0, expression)
     }
 
     fn close(&self) {
