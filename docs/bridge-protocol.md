@@ -748,6 +748,53 @@ worker once when it first learns of the extension (`state::set_extensions`),
 so top-level listeners are registered. A delivered event starts a stopped
 worker that listens for it (see "The scripted run", below).
 
+**The page's own tab (the report).** An extension page shown as a tab reports
+its own Chromium tab id, so the table has a row for it as it has for a web page
+(`sender.tab` in a worker then carries the strip's fields). The page's bridge
+reads `chrome.tabs.getCurrent()` from Chromium's own function, which `core.js`
+keeps in `native` when it replaces the namespaces; `js/page_report.js` runs in
+the deferred install after the replacement. The report is one process message,
+`nautilus-bridge-tab` (`pages::REPORT_MESSAGE`), whose one string argument is
+`{"tab": n}` (`pages::report_of`): an object with only that key, holding a
+positive integer below `SYNTHETIC_BASE`. It carries no view, tab or extension.
+
+The browser process decides the view. `pages::report_source` accepts a report
+only from the main frame of a bridged extension's page (`extension_of`, which
+refuses the relay page and the helper's pages) whose browser is a tab view
+(`Asker::View`, so not a popup, a worker, or a view that is no tab). A refused
+report is logged once with its reason and ignored.
+
+`TabTable::report` (`bridge/table.rs`) records or refuses the id (`Report`):
+- a view with no DevTools target yet, or whose target is not a page of the
+  extension the report came from, is refused;
+- a view that already has an id from any source keeps it: the same id is
+  `Same`, another id is refused, so a page's report never overwrites a row the
+  helper's listing gave;
+- an id the listing names for another target is refused, and so is an id another
+  tab has;
+- otherwise the report is recorded and the rows are joined again.
+
+A recorded report is a row only while its view's target is still a page of the
+extension it was made from (`prune_reports`), so it does not outlive that page:
+it ends when the view navigates to a web page or another extension, and when the
+view closes (`forget`). Then the helper's listing joins the web page as before. A
+recorded report calls `table_changed` at once (`Hub::report_tab`), so the strip
+publishes the id: a tab that was published with a synthetic id takes its
+Chromium id by the existing path, and an extension sees `tabs.onReplaced` with the
+new and the old id (the state test "the table catches up").
+
+The page's calls wait for the report. `js/page_transport.js` holds each call
+until `__nautilusReportWait` releases it; `page_report.js` releases the calls
+after the report is sent, or after `REPORT_WAIT_MS` (1 s), whichever comes first.
+The report is sent before the first call on the same ordered channel, so the
+browser handles it first, and a call is never held for longer than that bound. A
+page that is no tab, an answer that fails, or an answer that never comes sends
+no report and releases its calls after the bound.
+
+Known limit: a page could report the id of a tab the helper has not listed yet.
+The helper's listing wins once it names that id for another target (the report's
+row is skipped, and new reports for it are refused).
+
 **Id spaces** (`bridge/ids.rs`):
 
 - **Tab ids.** An extension sees **Chromium's tab id** for a tab that has a browser and is not deferred, so every id-addressed Chromium API accepts it unchanged. A tab with no Chromium id (a deferred tab; a live tab whose id the table could not learn within two seconds) has a **synthetic id**: the first free integer at or above `2_000_000_000` (`ids::SYNTHETIC_BASE`), never one the table holds, stable for that tab until it closes. A deferred tab that is being warmed has a browser, but stays on its synthetic id: the warm's browser is temporary.
@@ -889,16 +936,11 @@ the page was not bridged, and the browser process trapped. What was measured
   same code's working tree, one pass failed 5 (`task13d-p5-run1.out`, with
   `AC3.3` and `AC3.4`) and another 3 (`task13d-p5-run2.out`). The browser does not
   trap and exits cleanly in all of them, and the page is bridged. The failures that remain:
-  - `sender.tab carries the strip's fields` (every pass, the last one included).
-    The page's own tab never gets a Chromium id in the table. The helper lists
-    the page's target as `type other` with no tab id: `TabId(5)` is a DevTools
-    target whose `tabId` is `null`, so `table::join` (which takes only `page`
-    targets that have a tab id) matches nothing. The lines are in
-    `task13e-e2-target-lines.txt` (`TASK13E target …` for `p5page.html`, each
-    `type other tab None`). Chromium's own id for the tab (433682305 in one run) is
-    what `sender.tab` carries, so `windowId` and `index` are `-1`. No listing the
-    bridge reads gives that id for this tab. Not fixed; see "The sender's tab"
-    below for the options.
+  - `sender.tab carries the strip's fields` (failed in every pass before the page's
+    report). The page's own tab had no Chromium id in the table: the helper lists
+    its target as `type other` with no tab id (`task13e-e2-target-lines.txt`), and
+    `table::join` takes only `page` targets with a tab id. Fixed by the page's
+    report (see "The page's own tab (the report)"); passes after it are below.
   - `restore-list` and `restore-show`: fixed in this cycle (below, "The restored
     worker's port"); both pass in the final runs.
   - `AC3.3` (a created tab still `loading`) and `AC3.4` (two ids above
@@ -943,16 +985,13 @@ the page was not bridged, and the browser process trapped. What was measured
   `task13e-e1-logs/main.log`. The log does not name the API. The bridge's page
   transport is installed in both launches' pages, so the transport alone does not
   explain the difference. Not identified and not the cause of a failure here.
-- **The sender's tab (not fixed; a design decision).** The join for an extension
-  page's tab needs a Chromium tab id that no listing the bridge reads has for it.
-  The options, none built: (a) the page transport reports its own id, which the
-  page reads natively with `chrome.tabs.getCurrent()` before it replaces the
-  namespace (the id is Chromium's, per the Phase 5 measurements above), as a new
-  page-lane message the engine turns into a table row; (b) the helper lists
-  `chrome.tabs.query({})` with the URLs (it needs the `tabs` permission) and the
-  engine joins an extension page's target to a tab by URL, when that URL is
-  unique; (c) leave the fields off `sender.tab` for an extension page. (a) and (b)
-  change a message format, so they wait for a decision.
+- **The sender's tab (fixed by the page's report).** The join for an extension
+  page's tab had no Chromium id to use: the helper's listing gave none
+  (`type other`, no tab id). Option (a) was built, and the page reports its own
+  id (see "The page's own tab (the report)"). Option (b), the helper listing
+  `chrome.tabs.query` by URL, was not built: it needs the helper to hold the
+  `tabs` permission and a join by URL that is ambiguous when two tabs show the
+  same page. Option (c), leaving the fields off, was the state before this change.
 - **A page's `getCurrent` answered `null` once (not in the final passes).** In the
   run `task13e-e2-p5.out` (the same code as the restore fix, with a temporary
   log), `chrome.tabs.getCurrent()` in the page answered nothing, so the page's
@@ -968,7 +1007,8 @@ the page was not bridged, and the browser process trapped. What was measured
   and passed in the final runs of `task13d` and in both passes of this cycle. In
   the kept logs, three of the full passes since the page-call holds show it
   (`task13d-diag-p5.out`, `task13d-e9-p5.out`, `task13e-e2-p5.out`); the failure
-  is intermittent.
+  is intermittent. The report (above) puts the page's id in the table before its
+  first call, so the snapshot locates the tab; no `null` came in the six final passes.
 - **The regression modes** on the same tree, each judged by its exit status
   (`task13d-final-mode-*.out.status`): `spike` 0 (54 PASS), `pump` 0 (7 PASS), `reload` 0
   (7 PASS), `zombie` 0 (21 PASS), `stop` 0 (17 PASS), `idle` 0 (9 PASS), and
@@ -1010,6 +1050,24 @@ One pass before the final two (`task13e-e2-p5.out`, with the port fix and a
 temporary log of the helper's targets, since reverted) had 68 PASS and 4 FAIL:
 the three page checks above and `sender.tab`.
 
+**The run after the page's report (2026-11-18).** The baseline first, on the
+tree before the report (`evidence/phase-5/task13f-before-p5-run1.out`, `-run2.out`,
+exit 1 both, 71 PASS and 1 FAIL, `sender.tab`): the page's first call
+(`getCurrent`, timed in the page with `performance.now`) answered in 1993 ms and
+2017 ms, the publish wait. On the tree with the report: six passes of
+`phase5.py`, each exit 0 with 72 PASS and 0 FAIL (`task13f-final-p5-run1.out`
+to `-run6.out`). The page's first call answered in 154, 1, 8, 3, 1 and 5 ms
+(the `INFO` line of each pass). The regression modes, each exit 0:
+`spike` (54 PASS), `pump` (7), `reload` (7), `zombie` (21), `stop` (17), `idle`
+(9), `broken` (14), none with a FAIL line (`task13f-final-mode-*.out.status`).
+The log of a pass shows the report and the row
+(`bridge: ...'s page reports TabId(5) is Chromium tab 751615618`, then the table row,
+before the strip's first publish of that tab; `task13f-final-run6-logs/main.log`
+lines 295 to 307).
+No late report (after a synthetic publish) was provoked in these runs; that path
+is the existing one in `state.rs` (`table_changed` replaces the id, with
+`tabs.onReplaced`).
+
 **Still open.** Whether CEF answers `Target.getTargetInfo` inside the call (B8)
 is not determined by these runs. The owner's toolbar click, real popups and
 Windows were not run. The helper extension's page is not bridged: not observed,
@@ -1040,25 +1098,31 @@ Decisions taken in the build:
 - A worker's call that finds no listener is sent again on a new port every
   100 ms for up to 3 s from the first close, then fails with `found no listener
   in the browser` (`bridge.js` `resend`).
+- An extension page shown as a tab reports its own Chromium tab id, once, from
+  its first document; the browser accepts it only from that page's main frame
+  and only for its own tab view, and a page's calls leave after the report or a
+  1 s bound (`js/page_report.js`, `pages::report_source`, `TabTable::report`).
+  The owner chose this over the helper listing and over leaving the gap open.
 - Owner's acceptance of 2026-11-18, for now, to be revisited: a delivered tab or
   window event starts a stopped worker that listens for it; `tabs.query` from a
   worker before the first strip publish answers an empty list.
 
 Verified by unit tests: the id spaces, the router's method table, the differ's
 order, the publish hold, `tabs.create` resolving after the publish, and the
-marker and copy in `install.rs`. The last recorded gate (2026-11-18, the
-page-call holds): `cargo fmt --all --check`, `cargo clippy --workspace
---all-targets -- -D warnings`, `cargo test --workspace` (219 and 2 passing),
-`node ci/side-panel/bridge_check.mjs`, all exit 0.
+marker and copy in `install.rs`. The last recorded gate (the page's report, 2026-11-18): `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
+(227 and 2 passing), `cargo build --workspace --all-targets`,
+`node ci/side-panel/bridge_check.mjs` and `cargo xtask bundle-mac`, all exit 0
+(`evidence/phase-5/task13f-gate-*`).all exit 0.
 
 Verified in the running browser (`ci/side-panel/phase5.py`, macOS, 2026-11-18,
 an ordinary bundle, the test extension loaded through `NAUTILUS_TEST_CONTROL`):
-two passes, each 71 PASS and 1 FAIL (exit 1). The one FAIL in both is
-`sender.tab carries the strip's fields` (below); the PASS lines are in the kept
-files `evidence/phase-5/task13e-final-p5-run1.out` and `...-run2.out`, not
-copied here. The regression modes, each judged by its exit status, all exit 0:
-`spike` (54 PASS), `pump` (7), `reload` (7), `zombie` (21), `stop` (17), `idle`
-(9), `broken` (14), none with a FAIL line (`task13e-final-mode-*.out.status`).
+six passes on the final tree, each exit 0 with 72 PASS and 0 FAIL
+(`evidence/phase-5/task13f-final-p5-run1.out` to `-run6.out`). The regression
+modes, each judged by its exit status, all exit 0: `spike` (54 PASS), `pump` (7),
+`reload` (7), `zombie` (21), `stop` (17), `idle` (9), `broken` (14), none with a
+FAIL line (`task13f-final-mode-*.out.status`). The earlier passes, before the
+report, are in `task13e-*` (71 PASS and 1 FAIL, `sender.tab`).
 - Window counts over the run: not recorded by the script's output.
 - "Chromium asked for a default client" count: 0.
 - Whether Chromium's bindings were on `chrome` when the page bridge went in
@@ -1077,17 +1141,19 @@ Not verified:
 - Manifest V2 extensions (callback-only contexts, `tabs.executeScript`).
 - Real clicks on the toolbar; anything on Windows (nothing was run there
   locally; CI builds and tests on Windows).
-- Open, measured, not fixed: `sender.tab` for an extension page shown as a tab
-  lacks the strip's fields (`windowId` and `index` are -1), because the engine
-  has no Chromium tab id for it (see "The sender's tab"; a decision is pending).
+- `sender.tab` for an extension page shown as a tab carried the strip's fields
+  only after the page's report (see "The page's own tab (the report)"); it passes
+  in all six final passes. Before the report it lacked them (`windowId` and
+  `index` were -1).
 - Intermittent, not explained: the page's own `getCurrent` answering `null` in
-  some runs (three page checks), `AC3.3` and `AC3.4` failing once in two passes,
-  and `Failed to create API on Chrome object` in the restore launch.
+  some earlier runs (three page checks; no `null` in the six final passes), `AC3.3`
+  and `AC3.4` failing once in two earlier passes, and `Failed to create API on
+  Chrome object` in the restore launch (not identified).
 - Whether CEF answers `Target.getTargetInfo` inside the probe's call (the basis
   of the reservation in the reconciliation's B8).
 
 For the next phase: the protocol and the method tables above are the contract;
 a namespace is added as "How a later phase adds a namespace" describes. The
-`sender.tab` decision (options in "The sender's tab") changes a message format
-and needs the owner's choice first. The release (a merge to `main`) needs the
+`sender.tab` decision was taken by the owner: option (a), the page's report
+(`Messages Phase 5 adds`). The release (a merge to `main`) needs the
 owner's yes; the draft pull requests are osmena #2 and nautilus #1.

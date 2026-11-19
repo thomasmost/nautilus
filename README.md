@@ -238,12 +238,12 @@ belongs to one running Nautilus at a time.
   its windows are not counted. **Status:** on 2026-11-18, after the page's
   namespaces were installed at its first document change, the browser no longer
   traps, the extension page is bridged, and its calls are held for their tab and
-  extension. Both passes exit 1, with 71 checks passing and 1 failing: the
-  page's own tab has no Chromium id in the table (`sender.tab`). The restored
-  worker's first call is sent again once a relay listens, so the restore suite
-  passes. Not a pass. The page's own checks fail in some runs, intermittently;
-  both failures are described in `docs/bridge-protocol.md`, "The scripted run
-  (phase5.py)".
+  extension. Six passes on the page-report build each exit 0, with 72
+  checks passing and none failing: the restored worker's first call is sent again
+  once a relay listens, and an extension page reports its own tab id, so
+  `sender.tab` carries the strip's fields. The page's own checks failed in some
+  earlier runs, before the report; the status is described in
+  `docs/bridge-protocol.md`, "The scripted run (phase5.py)".(phase5.py)".
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
   browser read commands from the named directory: `load` an unpacked
   extension, `click` an action, send a raw DevTools message on the
@@ -712,11 +712,7 @@ Upstream causes and the features they block are tracked in
   debuggers are kept (the browser forgets a debugger only on the worker's
   own word, or when the extension is off or its tab closes). A debugger
   called from an extension page (popup, options, side panel) is not reported
-  (see `docs/bridge-protocol.md`, "Limits in protocol 1"). For an extension
-  page shown as a tab, `sender.tab` in the receiving worker lacks the strip's
-  fields: `windowId` and `index` are -1, because the engine has no Chromium
-  tab id for such a tab. This is open; a decision is pending
-  (`docs/bridge-protocol.md`, "The sender's tab"). A symlink in an
+  (see `docs/bridge-protocol.md`, "Limits in protocol 1"). A symlink in an
   unpacked extension is not copied: it is skipped with a warning that
   names it, and a worker entry that is a link or missing fails the load.
   Dot-files and dot-directories (`.git`, `.DS_Store`) are not copied
