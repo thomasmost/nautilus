@@ -312,6 +312,35 @@ inserting emoji from the palette and dictated text. **Workaround:**
 none yet; the palette opens, and typing works. A fix needs either a
 winit change or osmena taking over that method of winit's view.
 
+### C15: a popup widget is never painted while two other windowless views are
+
+With GPU compositing, each windowless view is read back through a
+video capturer of its own (`CefVideoConsumerOSR`, made in
+`CefRenderWidgetHostViewOSR::ShowWithVisibility`), and so is a popup
+widget, the list of a `<select>`. While two tab views are visible
+(not `WasHidden`: two windows, each showing a tab), a popup widget in
+either gets `OnPopupShow(true)` and `OnPopupSize` and then no
+`OnPaint(PET_POPUP)` at all, for as long as it is open;
+`Invalidate(PET_POPUP)` only asks the same capturer for a frame and
+changes nothing, and neither does lowering the other view's
+`windowless_frame_rate`. With one visible view the widget paints,
+with a second view hidden it paints, and with
+`--disable-gpu-compositing` (frames through the software output
+device, no capturer) it paints whatever is visible. The bridge's
+hidden pages do not count. Nothing in CEF's two files is shared
+between browsers, so the limit is expected to be in viz's capture;
+it was not traced further. Seen with CEF 154 on Windows, on a local
+page with one `<select>`, 2026-11-22; macOS was not tried and is
+expected to be the same (the report of 2026-11-19 came from a Mac
+with two profiles open). **Blocks:** every `<select>` (and any other
+popup widget) whenever a second window is open. **Workaround:**
+`popup_pause.rs`: from `on_popup_show(true)`, which comes before the
+widget's capturer exists, to `on_popup_show(false)`, every other tab
+view that is painting, in every window of every profile, is told it
+is hidden (`was_hidden(1)`), and shown again after. The cost: while
+a list is open the other windows keep their last frame, and their
+pages see `visibilitychange`.
+
 ### C4: Chromium's extension dialogs crash a windowless browser
 
 `chrome.webstorePrivate.beginInstallWithManifest3` (the store's "Add to

@@ -47,6 +47,7 @@ use osmena_engine::PixelRect;
 use crate::extensions::ExtensionManager;
 use crate::frame::Frame;
 use crate::input;
+use crate::popup_pause;
 use crate::store::StoreRequest;
 
 /// A CEF dirty rectangle as the shell's; `None` if it is not a
@@ -197,6 +198,7 @@ impl DelegateState {
     /// Let go of the views and popups of the browser `id`. Each removed value
     /// is let go of after its borrow is released.
     fn forget_views(&self, id: std::os::raw::c_int) {
+        popup_pause::forget(id);
         let views: Vec<(TabId, (std::os::raw::c_int, Browser))> = {
             let mut views = self.views.borrow_mut();
             let tabs: Vec<TabId> = views
@@ -222,6 +224,9 @@ impl DelegateState {
     /// A tab's view is gone (`TabHost::close_tab`, or the host dropped).
     pub(crate) fn unregister_view(&self, tab: TabId) {
         let removed = self.views.borrow_mut().remove(&tab);
+        if let Some((id, _)) = &removed {
+            popup_pause::forget(*id);
+        }
         drop(removed);
     }
 
@@ -522,6 +527,9 @@ pub(crate) struct ViewState {
     /// it (`bridge::debugger`). A hidden renderer answers no input, so a
     /// debugged tab keeps painting even while it is hidden.
     pub debugged: Cell<bool>,
+    /// Whether the tab is told it is hidden while another tab's popup
+    /// widget is open (`popup_pause`).
+    pub paused: Cell<bool>,
     /// The drag the page is carrying out, while it is.
     pub drag: RefCell<Option<DragSession>>,
     /// The cursor the page last asked for, to put back after a drag
@@ -537,9 +545,10 @@ pub(crate) struct ViewState {
 
 impl ViewState {
     /// Whether the tab's renderer should be told it is hidden: it is
-    /// behind another tab and no extension is debugging it.
+    /// behind another tab and no extension is debugging it, or another
+    /// tab's popup widget is open (`popup_pause`).
     pub(crate) fn wants_hidden(&self) -> bool {
-        self.hidden.get() && !self.debugged.get()
+        self.paused.get() || (self.hidden.get() && !self.debugged.get())
     }
 
     /// Report an event that names no tab.
@@ -572,6 +581,7 @@ impl ViewState {
             focused: Cell::new(false),
             hidden: Cell::new(false),
             debugged: Cell::new(false),
+            paused: Cell::new(false),
             drag: RefCell::new(None),
             cursor: Cell::new(Cursor::Default),
             media_requests: RefCell::new(HashMap::new()),
@@ -952,7 +962,16 @@ wrap_render_handler! {
             1
         }
 
-        fn on_popup_show(&self, _browser: Option<&mut Browser>, show: ::std::os::raw::c_int) {
+        fn on_popup_show(&self, browser: Option<&mut Browser>, show: ::std::os::raw::c_int) {
+            // Before the widget's first frame: Chromium paints none
+            // while two other views are being painted (C15).
+            if let Some(id) = browser.map(|b| b.identifier()) {
+                if show != 0 {
+                    popup_pause::opened(id);
+                } else {
+                    popup_pause::closed(id);
+                }
+            }
             // Logged because its absence is the symptom to look for: a
             // `<select>` that takes the click and opens nothing was
             // never handed to this view as a popup widget.

@@ -169,6 +169,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- A `<select>` opens its list when more than one window is open. With
+  two windows showing a page each (two profiles, or two windows of
+  one), a click on a `<select>` took the focus and showed nothing:
+  Chromium announced the list and never painted it. While a list is
+  open the pages in the other windows now stop painting, keeping
+  their last frame, and go on when it closes (C15 in
+  `docs/upstream-issues.md`).
 - Two fingers spread or pinched on a touchpad zoom the page, a step
   at a time, as Ctrl (Cmd) and the wheel do (osmena). Before, the
   gesture scrolled the page on Windows and did nothing on macOS.

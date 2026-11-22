@@ -35,6 +35,7 @@ mod keycodes;
 #[cfg(target_os = "macos")]
 mod mac_app;
 mod popup;
+mod popup_pause;
 mod store;
 // A scripted run's control: only in a build made for one.
 #[cfg(feature = "test-hooks")]

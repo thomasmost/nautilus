@@ -347,6 +347,7 @@ impl TabHostApi for TabHost {
         match browser {
             Some(browser) => {
                 self.delegate.register_view(tab, &browser);
+                crate::popup_pause::track(&view, &browser);
                 self.extensions.track_tab(tab, &browser, view.clone());
                 self.tabs.insert(tab, TabEntry { browser, view });
             }
@@ -377,6 +378,7 @@ impl TabHostApi for TabHost {
                 }
                 view.adopt(tab);
                 self.delegate.register_view(tab, &browser);
+                crate::popup_pause::track(&view, &browser);
                 self.extensions.track_tab(tab, &browser, view.clone());
                 self.tabs.insert(tab, TabEntry { browser, view });
                 true
@@ -456,14 +458,20 @@ impl TabHostApi for TabHost {
         self.with(tab, |entry| entry.browser.stop_load());
     }
 
-    /// The tab is the window's visible tab: paint it.
+    /// The tab is the window's visible tab: paint it, unless another
+    /// tab's popup widget is holding the others (`popup_pause`), which
+    /// lets it go when the widget closes.
     fn show(&self, tab: TabId) {
-        if let Some(entry) = self.tabs.get(&tab) {
-            entry.view.hidden.set(false);
-        }
+        let Some(entry) = self.tabs.get(&tab) else {
+            return;
+        };
+        entry.view.hidden.set(false);
+        let hidden = entry.view.wants_hidden();
         self.with_host(tab, |host| {
-            host.was_hidden(0);
-            host.invalidate(cef::PaintElementType::VIEW);
+            host.was_hidden(i32::from(hidden));
+            if !hidden {
+                host.invalidate(cef::PaintElementType::VIEW);
+            }
         });
     }
 
