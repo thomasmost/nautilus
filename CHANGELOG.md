@@ -8,6 +8,17 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- The profile avatars are redrawn as plain silhouettes that read on
+  the toolbar's small disc, where the outlined emoji they had been
+  since the palettes turned to grey there. The whale is the one
+  profiles had before the palettes. The emoji faces are their features
+  on the disc itself. Every avatar keeps its name and its place in the
+  dialog (osmena 7e4ebfa).
+- The toolbar's and the strip's glyphs are drawn on one grid in one
+  weight and are sharp at 100% scale. The extensions button is a
+  puzzle piece in outline, like the star beside it; the Launch
+  Settings' gear is a cog; the find bar's previous, next and close and
+  the downloads popover's close are glyphs in a disc.
 - Every profile is a window of the one Nautilus. Opening another
   profile (the Profiles menu, "Open in profile", a new or guest
   profile) no longer starts a second Nautilus: its window opens in the
@@ -169,6 +180,8 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- The toolbar's Reload is an arrow again, an arc turning clockwise
+  into an arrowhead; it had been drawn as a ring with a tick on it.
 - A `<select>` opens its list when more than one window is open. With
   two windows showing a page each (two profiles, or two windows of
   one), a click on a `<select>` took the focus and showed nothing:
