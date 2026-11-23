@@ -468,9 +468,10 @@ impl TabHostApi for TabHost {
         entry.view.hidden.set(false);
         let hidden = entry.view.wants_hidden();
         self.with_host(tab, |host| {
-            host.was_hidden(i32::from(hidden));
-            if !hidden {
-                host.invalidate(cef::PaintElementType::VIEW);
+            if hidden {
+                host.was_hidden(1);
+            } else {
+                crate::delegate::show_view(host);
             }
         });
     }

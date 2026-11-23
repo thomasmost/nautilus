@@ -189,13 +189,23 @@ has no releases yet; `Unreleased` holds everything on `main`.
   open the pages in the other windows now stop painting, keeping
   their last frame, and go on when it closes (C15 in
   `docs/upstream-issues.md`).
+- A tab comes back when it is shown again. With two profiles open and
+  an extension installed (or with three windows open), a tab that had
+  been behind another, or in another window while a `<select>`'s list
+  was open, froze for good the moment it was shown: its last picture
+  stayed, it took no click and no key, and resizing the window did
+  nothing to it; the tabs of a window went one after another as each
+  took its turn behind the other. Chromium drops a hidden page's
+  surface once two other pages are showing, an extension's unseen
+  pages counting among them, and did not give it a new one. Every tab
+  is now given one when it is shown, and an extension's unseen pages
+  no longer count (C16 in `docs/upstream-issues.md`).
 - A `<select>` opens its list with a second window open when an
   extension is installed too. The first fix held only in a profile
   without extensions: each extension keeps a page nobody sees, which
   Chromium counted as it counts a window's page, so with Proton Pass
   (or any extension) and a second window the list still never
-  appeared. Those pages now pause with the other windows' pages while
-  a list is open.
+  appeared. Those pages no longer count as showing at all.
 - Two fingers spread or pinched on a touchpad zoom the page, a step
   at a time, as Ctrl (Cmd) and the wheel do (osmena). Before, the
   gesture scrolled the page on Windows and did nothing on macOS.

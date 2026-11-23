@@ -343,9 +343,10 @@ fn set_tab_debugged(browser: &Browser, view: &ViewState, debugged: bool) -> bool
         return false;
     }
     if let Some(host) = browser.host() {
-        host.was_hidden(i32::from(view.wants_hidden()));
-        if debugged {
-            host.invalidate(cef::PaintElementType::VIEW);
+        if view.wants_hidden() {
+            host.was_hidden(1);
+        } else {
+            crate::delegate::show_view(&host);
         }
     }
     true

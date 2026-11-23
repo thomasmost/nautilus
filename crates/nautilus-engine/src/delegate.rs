@@ -543,6 +543,25 @@ pub(crate) struct ViewState {
     pub media_requests: RefCell<HashMap<u64, (MediaAccessCallback, u32)>>,
 }
 
+/// Tell a view that was told it is hidden that it is shown again, and
+/// have it painted.
+///
+/// `was_hidden(0)` alone does not bring every view back. While a view
+/// is hidden Chromium may evict its surface (it keeps only so many, and
+/// the views being shown count against the number), and CEF's
+/// windowless view does not give an evicted view a new one when it is
+/// shown: the page says it is visible and never gets another frame, nor
+/// any input (C16 in `docs/upstream-issues.md`). `was_resized` asks for
+/// a new surface, but CEF lets one resize be in flight at a time and
+/// waits for a frame to end it, so after a resize that reached the view
+/// while it was hidden it does nothing at all. The screen-information
+/// notice asks for the same synchronisation and is not held back.
+pub(crate) fn show_view(host: &cef::BrowserHost) {
+    host.was_hidden(0);
+    host.notify_screen_info_changed();
+    host.invalidate(cef::PaintElementType::VIEW);
+}
+
 impl ViewState {
     /// Whether the tab's renderer should be told it is hidden: it is
     /// behind another tab and no extension is debugging it, or another

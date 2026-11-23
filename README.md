@@ -341,7 +341,11 @@ engine glue. Each item must pass.
    and the pointer becomes a hand; over text it becomes an I-beam. A
    `<select>` opens its list over the page and picks on click, also
    while a second window is open (Ctrl+N first, then try again), and
-   with an extension installed and a second window open.
+   with an extension installed and a second window open. With a
+   second profile's window open and an extension installed, switch
+   between two tabs of one window a few times, resizing the window
+   once in between: each tab paints, follows the new size and takes
+   clicks every time it comes forward.
    **Drag and drop.** On a page with draggable elements and a drop
    zone (any HTML5 drag-and-drop demo), press on an element and drag:
    an image of it follows the pointer, the zone reacts as the pointer
@@ -673,6 +677,9 @@ disabled in it. A rerun of a workflow run replaces that run's release.
   other permission prompts (notifications, location) are refused. On
   macOS the system asks for the microphone once more itself, per
   build, since the bundle is signed ad hoc.
+
+- With four windows open a `<select>`'s list does not appear (three
+  are fine); C15 in `docs/upstream-issues.md` has what is known.
 
 Upstream causes and the features they block are tracked in
 `docs/upstream-issues.md`.

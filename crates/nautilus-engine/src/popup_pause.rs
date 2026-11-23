@@ -1,29 +1,31 @@
-//! Every other windowless view stops painting while one tab's popup
-//! widget is open.
+//! Every other tab stops painting while one tab's popup widget is open.
 //!
 //! Chromium paints a popup widget (a `<select>`'s list) through a video
 //! capturer of its own, and with GPU compositing that capturer delivers
-//! no frame while too many other windowless views are being captured:
-//! two windows, each showing a tab, and no list ever appears in either
-//! (C15 in `docs/upstream-issues.md`). The extension bridge's hidden
-//! pages are such views too, and count. So from the moment a popup
-//! widget is announced until it is gone, every view but its own is told
-//! it is hidden, which stops its capturer: the tabs that are painting,
-//! in every window of every profile, which keep their last frame on
-//! screen, and the bridge's pages, which nobody sees. All come back
-//! when the widget closes. What is left is the one arrangement known
-//! to paint: a single view and its widget.
+//! no frame while two other windowless views are being captured: two
+//! windows, each showing a tab, and no list ever appears in either (C15
+//! in `docs/upstream-issues.md`). So from the moment a popup widget is
+//! announced until it is gone, the tabs that are painting, in every
+//! window of every profile, are told they are hidden, which stops their
+//! capturers; they keep their last frame on screen and come back when
+//! the widget closes, through `show_view`, which is what brings back a
+//! view whose surface went while it was hidden (C16).
 //!
-//! The lists are the process's (the browser process's UI thread), not a
-//! profile's: the limit does not know profiles.
+//! The extension bridge's hidden pages are windowless views too and
+//! would count, but they are told they are hidden for as long as they
+//! live (`bridge/hidden_page.rs`), so there is nothing of theirs to
+//! pause here.
+//!
+//! The list of views is the process's (the browser process's UI thread),
+//! not a profile's: the limit does not know profiles.
 
 use std::cell::RefCell;
 use std::os::raw::c_int;
 use std::rc::{Rc, Weak};
 
-use cef::{Browser, ImplBrowser, ImplBrowserHost, PaintElementType};
+use cef::{Browser, ImplBrowser, ImplBrowserHost};
 
-use crate::delegate::ViewState;
+use crate::delegate::{ViewState, show_view};
 
 struct Tracked {
     id: c_int,
@@ -34,10 +36,6 @@ struct Tracked {
 #[derive(Default)]
 struct State {
     views: Vec<Tracked>,
-    /// The bridge's hidden pages, by their browsers' identifiers. They
-    /// are never hidden for a reason of their own, so they are paused
-    /// exactly while a widget has an owner.
-    pages: Vec<(c_int, Browser)>,
     /// The browser whose popup widget the others are paused for.
     owner: Option<c_int>,
 }
@@ -88,41 +86,6 @@ pub(crate) fn track(view: &Rc<ViewState>, browser: &Browser) {
     drop(displaced);
 }
 
-/// A hidden page of the extension bridge has a browser: a view nobody
-/// sees, which is captured all the same. One opened while a popup widget
-/// is open is paused with the rest.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-pub(crate) fn track_page(browser: &Browser) {
-    let id = browser.identifier();
-    let (displaced, pause) = STATE.with_borrow_mut(|state| {
-        let (gone, kept) = std::mem::take(&mut state.pages)
-            .into_iter()
-            .partition(|(page, _)| *page == id);
-        state.pages = kept;
-        state.pages.push((id, browser.clone()));
-        (gone, state.owner.is_some())
-    });
-    let _: Vec<(c_int, Browser)> = displaced;
-    if pause && let Some(host) = browser.host() {
-        host.was_hidden(1);
-    }
-}
-
-/// The hidden page of the browser `id` is gone. Called when the page is
-/// let go of, which may be as the thread ends: then there is no list.
-#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
-pub(crate) fn forget_page(id: c_int) {
-    let gone = STATE.try_with(|state| {
-        let mut state = state.borrow_mut();
-        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut state.pages)
-            .into_iter()
-            .partition(|(page, _)| *page == id);
-        state.pages = kept;
-        gone
-    });
-    drop(gone);
-}
-
 /// The browser `id` is closing: its view paints no more, and a pause
 /// held for its popup widget ends.
 pub(crate) fn forget(id: c_int) {
@@ -140,8 +103,7 @@ pub(crate) fn forget(id: c_int) {
 /// The browser `id` announced a popup widget (`on_popup_show`, before
 /// the widget's first frame): pause the others.
 pub(crate) fn opened(id: c_int) {
-    type Plan = (Vec<Browser>, Option<Browser>, Vec<Browser>);
-    let (pause, release, pages): Plan = STATE.with_borrow_mut(|state| {
+    let (pause, release): (Vec<Browser>, Option<Browser>) = STATE.with_borrow_mut(|state| {
         let alive: Vec<(&Tracked, Rc<ViewState>)> = state
             .views
             .iter()
@@ -169,46 +131,37 @@ pub(crate) fn opened(id: c_int) {
                 }
             }
         }
-        // The pages are paused already if an earlier widget has them.
-        let pages = match state.owner {
-            Some(_) => Vec::new(),
-            None => state.pages.iter().map(|(_, b)| b.clone()).collect(),
-        };
-        drop(alive);
         state.owner = Some(id);
-        (pause, release, pages)
+        (pause, release)
     });
     // Outside the borrow: hiding a view closes a popup widget of its
     // own, which comes back here through `closed`.
     if let Some(host) = release.and_then(|browser| browser.host()) {
-        host.was_hidden(0);
+        show_view(&host);
     }
-    if !pause.is_empty() || !pages.is_empty() {
+    if !pause.is_empty() {
         log::debug!(
-            "a popup widget opened: {} other view(s) and {} hidden page(s) paused",
-            pause.len(),
-            pages.len()
+            "a popup widget opened: {} other view(s) paused",
+            pause.len()
         );
     }
-    for browser in pause.into_iter().chain(pages) {
+    for browser in pause {
         if let Some(host) = browser.host() {
             host.was_hidden(1);
         }
     }
 }
 
-/// The popup widget of the browser `id` is gone: the views and pages
-/// paused for it paint again. The end of any other browser's widget
-/// changes nothing (a paused view's own widget closes because it was
-/// paused).
+/// The popup widget of the browser `id` is gone: the views paused for it
+/// paint again. The end of any other browser's widget changes nothing
+/// (a paused view's own widget closes because it was paused).
 pub(crate) fn closed(id: c_int) {
-    let (resume, pages): (Vec<Browser>, Vec<Browser>) = STATE.with_borrow_mut(|state| {
+    let resume: Vec<Browser> = STATE.with_borrow_mut(|state| {
         if state.owner != Some(id) {
-            return (Vec::new(), Vec::new());
+            return Vec::new();
         }
         state.owner = None;
-        let pages = state.pages.iter().map(|(_, b)| b.clone()).collect();
-        let resume = state
+        state
             .views
             .iter()
             .filter_map(|t| {
@@ -218,18 +171,11 @@ pub(crate) fn closed(id: c_int) {
                 }
                 Some(t.browser.clone())
             })
-            .collect();
-        (resume, pages)
+            .collect()
     });
-    for browser in pages {
-        if let Some(host) = browser.host() {
-            host.was_hidden(0);
-        }
-    }
     for browser in resume {
         if let Some(host) = browser.host() {
-            host.was_hidden(0);
-            host.invalidate(PaintElementType::VIEW);
+            show_view(&host);
         }
     }
 }

@@ -344,13 +344,54 @@ with two profiles open). **Blocks:** every `<select>` (and any other
 popup widget) whenever a second window is open. **Workaround:**
 `popup_pause.rs`: from `on_popup_show(true)`, which comes before the
 widget's capturer exists, to `on_popup_show(false)`, every other tab
-view that is painting, in every window of every profile, and every
-hidden page of the extension bridge, is told it is hidden
-(`was_hidden(1)`), and shown again after. The cost: while a list is
-open the other windows keep their last frame, and their pages and
-the bridge's see `visibilitychange`. A windowless browser added
-later must be listed there too (`track` or `track_page`), or it
-brings the fault back.
+view that is painting, in every window of every profile, is told it
+is hidden (`was_hidden(1)`), and shown again after (`show_view`, see
+C16). The bridge's hidden pages are told they are hidden when they
+are made and never shown (`bridge/hidden_page.rs`, since 2026-11-23;
+for one day before that they were paused with the tabs). The cost:
+while a list is open the other windows keep their last frame, and
+their pages see `visibilitychange`. A windowless browser added later
+must be listed there (`track`) or be hidden for as long as it lives,
+or it brings the fault back. **Still open (2026-11-23):** with four
+windows, each showing a tab, and no extension, the list was announced
+and never painted in 4 opens of 4 though the three other views were
+paused; with three windows, with and without an extension, it painted
+every time. Not traced.
+
+### C16: a windowless view shown again after its surface was evicted never paints
+
+While a windowless view is hidden (`WasHidden(true)`) Chromium may
+evict its surface: `CefRenderWidgetHostViewOSR::is_evicted_` reads
+true for it. It does so as soon as two other windowless views are
+showing, whatever they are: two other windows' tabs, or one other
+window's tab and the extension bridge's pages (16 by 16, never
+looked at, but showing until they are told otherwise). Told it is
+shown again (`WasHidden(false)`, `Invalidate`), the evicted view
+gets no surface: the page reads `visibilityState` as `visible`, runs
+its timers, and receives no animation frame, no paint and no input,
+for as long as it lives. It is the same with
+`--disable-gpu-compositing`, so it is not C15's capturer. `WasResized`
+at that moment brings the view back, and so does a real change of
+size, unless a resize reached the view while it was hidden: CEF
+allows one resize in flight (`hold_resize_`) and ends it at the next
+frame, a hidden view has no next frame, and from then on every
+`WasResized` only sets `pending_resize_`. `NotifyScreenInfoChanged`
+asks for the same synchronisation without that hold and brings the
+view back in every case tried. Seen with CEF 154 on Windows,
+2026-11-23: in the owner's browser (two profiles' windows and Proton
+Pass in each; every tab of the second profile dead after its first
+turn behind another tab, both of its views with `hold_resize_` and
+`pending_resize_` set, read from a dump with CEF's symbols), and in
+scripted runs where a page counts its own animation frames (three
+windows without an extension; two windows with one). One window with
+an extension never showed it, which is why it waited for the day
+every profile came into one process. macOS was not tried. **Blocks:**
+every tab switch once two other views are showing. **Workaround:**
+`delegate::show_view`, the one way a view is told it is shown again
+(`TabHost::show`, the end of a popup widget's pause, a debugger
+attached to a hidden tab): `was_hidden(0)`, `notify_screen_info_changed`,
+`invalidate`. And the bridge's pages are hidden from the start, so
+they hold no surface against the tabs.
 
 ### C4: Chromium's extension dialogs crash a windowless browser
 
