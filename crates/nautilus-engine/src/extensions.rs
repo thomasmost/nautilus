@@ -348,7 +348,7 @@ mod native {
     /// extension; `prodversion` must be a Chromium version the store
     /// serves (any recent one does).
     const CRX_URL: &str = "https://clients2.google.com/service/update2/crx?\
-         response=redirect&prodversion=154.0.0.0&acceptformat=crx3&x=id%3D{id}%26uc";
+         response=redirect&prodversion=156.0.0.0&acceptformat=crx3&x=id%3D{id}%26uc";
 
     // The scripts, each an expression yielding a promise of a plain
     // object, evaluated through the DevTools protocol (`Runtime.evaluate`

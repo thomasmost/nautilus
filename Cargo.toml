@@ -29,7 +29,7 @@ log = "0.4"
 # version; the sys crate downloads the matching binary distribution (or
 # uses `CEF_PATH`) and builds libcef_dll_wrapper with CMake and Ninja.
 # `nautilus_engine::INFO.version` names the Chromium major: bump both.
-cef = { version = "=154.5.0", default-features = false }
+cef = { version = "=156.7.0", default-features = false }
 
 [profile.release]
 # Line tables only: enough to symbolize a crash dump or a cdb stack from the

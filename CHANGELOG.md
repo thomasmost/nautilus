@@ -8,6 +8,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- Chromium 156 (CEF 156.0.31, Chromium 156.0.8078.100; it was 154),
+  with two milestones of Chromium's security fixes. A start no longer
+  asks `accounts.google.com` for the profile's Google accounts.
+
 - Three Chromium features are off, after Thorium's defaults. Google's
   AI Mode for Chrome's address bar, which Nautilus has no use for: with
   it on, Nautilus asked `www.google.com` at every start whether the

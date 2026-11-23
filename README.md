@@ -25,7 +25,7 @@ this repository holds only what is Chromium's.
   location and units, the Google account, and the tiles themselves,
   dragged to reorder or closed to remove. All of it is osmena's; the
   Google client id is this build's.
-- **Chromium under the hood.** Pages render through Chromium (CEF 154),
+- **Chromium under the hood.** Pages render through Chromium (CEF 156),
   with its site isolation, sandboxless for now (see Known limitations). The
   chrome is drawn with egui; menus are the system's own popup menus.
 - **Crashes stay in their tab.** Each page runs in one of Chromium's
@@ -126,7 +126,7 @@ this repository holds only what is Chromium's.
 | Layer     | Choice                                                            |
 | --------- | ----------------------------------------------------------------- |
 | Language  | Rust 1.97.1 (pinned in `rust-toolchain.toml`), edition 2024       |
-| Engine    | Chromium 154 through CEF (the `cef` crate 154.5), confined to `crates/nautilus-engine` |
+| Engine    | Chromium 156 through CEF (the `cef` crate 156.7), confined to `crates/nautilus-engine` |
 | Shell     | [osmena](https://github.com/thomasmost/osmena): the model, the egui 0.34 chrome on winit 0.30, the settings window, pinned by git revision |
 | Chrome GL | osmena's glutin surface (Chromium paints into memory, so the chrome owns the GL context) |
 | Pages     | CEF off-screen rendering: each tab paints BGRA frames that osmena draws as a texture |
@@ -174,7 +174,7 @@ shared copy, which survives `cargo clean` and is reused by every checkout.
 To set one up once:
 
 ```sh
-cargo install export-cef-dir --version 154.5.0 --locked
+cargo install export-cef-dir --version 156.7.0 --locked
 export-cef-dir --force ~/.local/share/cef        # downloads and unpacks
 export CEF_PATH=~/.local/share/cef               # add to your shell profile
 ```
@@ -689,18 +689,16 @@ Upstream causes and the features they block are tracked in
   and on macOS a signed helper layout; Nautilus starts CEF with
   `no_sandbox` until that is built (roadmap). Site isolation and separate
   renderer processes still apply.
-- **Chromium is two milestones behind.** CEF 154 is Chromium 154; the
-  `cef` crate has 156, and Chromium's stable channel is at 158. Every
-  milestone carries security fixes, so the bump (see `CLAUDE.md`, "The
-  CEF binary distribution") is the security work that matters most
-  after the sandbox.
+- **Chromium is a milestone behind.** CEF 156 is Chromium 156, the
+  newest the `cef` crate has; Chromium's stable channel is at 158.
+  Every milestone carries security fixes, so move the pin (see
+  `CLAUDE.md`, "The CEF binary distribution") when the crate has the
+  next one.
 - **Chromium still talks to Google at start.** With a page that asks
-  for nothing, a start makes two requests of its own: Chromium's
-  account check (`accounts.google.com/ListAccounts`, no switch found
-  for it) and the component updater (`update.googleapis.com`, kept on
-  purpose: it brings the certificate revocation sets). The AI Mode
-  eligibility check is switched off (`DISABLED_FEATURES` in
-  `engine.rs`).
+  for nothing, a start makes one request of its own: the component
+  updater (`update.googleapis.com`, kept on purpose: it brings the
+  certificate revocation sets). The AI Mode eligibility check is
+  switched off (`DISABLED_FEATURES` in `engine.rs`).
 - Page frames go through system memory (CEF's software off-screen path);
   CEF's shared-texture path would skip the copy and is a later step.
 - A popup is always a tab: the size and position a page gives

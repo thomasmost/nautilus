@@ -40,7 +40,7 @@ use crate::host::TabHost;
 /// Chromium major of the `cef` crate pinned in the workspace `Cargo.toml`.
 pub static INFO: EngineInfo = EngineInfo {
     name: "Chromium",
-    version: "154",
+    version: "156",
     data_dir: "chromium",
     supports_stop: true,
     // Chromium's find-in-page (`BrowserHost::find`, the find handler).
