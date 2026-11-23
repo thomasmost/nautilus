@@ -1024,6 +1024,62 @@ impl PumpScheduler {
     }
 }
 
+/// Chromium features turned off, after Thorium's defaults
+/// (`disable-privacy-sandbox.patch` and
+/// `disable-ai-entrypoints-by-default.patch` there, which change the
+/// defaults in Chromium's source; a switch is what a binary
+/// distribution leaves us).
+///
+/// The first two are the Privacy Sandbox's advertising side: with the
+/// override on, which is Chromium's default, pages get the fenced
+/// frames ad auctions render in, and the second is the `<iframe>` form
+/// of the same. Chrome's settings page is what lets a person turn
+/// those off, and Nautilus has no such page.
+///
+/// `AimEnabled` is Google's AI Mode in Chrome's address bar, which
+/// Nautilus does not have. On, the browser asks
+/// `www.google.com/async/folae` at every start whether the profile is
+/// eligible, with the profile's Google cookies.
+const DISABLED_FEATURES: &[&str] = &[
+    "PrivacySandboxAdsAPIsM1Override",
+    "AllowURNsInIframes",
+    "AimEnabled",
+];
+
+/// The switches whose value is a comma-separated list of features.
+const LIST_SWITCHES: &[&str] = &[
+    "enable-features",
+    "disable-features",
+    "enable-blink-features",
+    "disable-blink-features",
+];
+
+/// `existing`, a comma-separated list, with the names of `add` it does
+/// not have yet at its end.
+fn merged_list(existing: &str, add: &[&str]) -> String {
+    let mut names: Vec<&str> = existing
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    for name in add.iter().map(|name| name.trim()) {
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names.join(",")
+}
+
+/// Add `names` to the list switch `name`, keeping what is there.
+fn add_to_list_switch(command_line: &mut CommandLine, name: &str, names: &[&str]) {
+    let switch = CefString::from(name);
+    let existing = CefString::from(&command_line.switch_value(Some(&switch))).to_string();
+    let merged = merged_list(&existing, names);
+    if merged != existing {
+        command_line.append_switch_with_value(Some(&switch), Some(&merged.as_str().into()));
+    }
+}
+
 // The application handler: the same type serves `execute_process` (every
 // process) and `initialize` (the browser process), where it carries the
 // pump scheduler.
@@ -1087,16 +1143,33 @@ wrap_app! {
             );
             #[cfg(target_os = "macos")]
             command_line.append_switch(Some(&"use-mock-keychain".into()));
+            let browser_process = process_type.is_none_or(|t| t.to_string().is_empty());
+            // Feature defaults, in the browser process, which hands its
+            // children the outcome. CEF puts features of its own in
+            // `disable-features` before this callback, and a switch
+            // appended again replaces the value, so ours are added to
+            // the list (`add_to_list_switch`): replacing CEF's list
+            // crashes Chromium at startup (C18 in
+            // `docs/upstream-issues.md`).
+            if browser_process {
+                add_to_list_switch(command_line, "disable-features", DISABLED_FEATURES);
+            }
             // Chromium switches for a scripted run (CI's smoke test on a
             // runner without a GPU, a verbose Chromium log): a
             // comma-separated list of `name` or `name=value`, without the
             // dashes. Browser process only; Chromium hands its children
             // the switches they need.
-            if process_type.is_none_or(|t| t.to_string().is_empty())
-                && let Ok(switches) = std::env::var("NAUTILUS_CHROMIUM_SWITCHES")
+            if browser_process && let Ok(switches) = std::env::var("NAUTILUS_CHROMIUM_SWITCHES")
             {
                 for switch in switches.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                     match switch.split_once('=') {
+                        // A list of features is added to, never replaced
+                        // (see above); several names are separated by
+                        // `;` here, the comma being this list's own.
+                        Some((name, value)) if LIST_SWITCHES.contains(&name) => {
+                            let names: Vec<&str> = value.split(';').collect();
+                            add_to_list_switch(command_line, name, &names);
+                        }
                         Some((name, value)) => command_line.append_switch_with_value(
                             Some(&name.into()),
                             Some(&value.into()),
@@ -1241,9 +1314,19 @@ mod tests {
 
     #[cfg(feature = "test-hooks")]
     use super::pump_interval;
-    use super::{armed_after_spin, data_to_adopt, next_deadline};
+    use super::{armed_after_spin, data_to_adopt, merged_list, next_deadline};
 
     const TICK: Option<Duration> = Some(Duration::from_millis(33));
+
+    #[test]
+    fn a_feature_list_is_added_to_and_what_is_there_stays() {
+        assert_eq!(merged_list("", &["A", "B"]), "A,B");
+        assert_eq!(merged_list("X,Y", &["A"]), "X,Y,A");
+        // Named already: nothing twice, and the order stays.
+        assert_eq!(merged_list("X, A ,Y", &["A", "B"]), "X,A,Y,B");
+        assert_eq!(merged_list("X", &[]), "X");
+        assert_eq!(merged_list("X", &["", " "]), "X");
+    }
 
     #[test]
     fn a_profiles_own_chromium_data_is_moved_once_and_never_over_what_is_there() {

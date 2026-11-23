@@ -420,6 +420,26 @@ second launch after another profile was open. **Workaround:**
 which Chromium reads before the preference. Re-check on a CEF bump
 with the three runs above.
 
+### C18: a feature switch appended in `OnBeforeCommandLineProcessing` replaces CEF's own list
+
+CEF's Chrome bootstrap puts features of its own in `disable-features`
+before it calls the application's `on_before_command_line_processing`,
+and `CefCommandLine::AppendSwitchWithValue` replaces a switch's value.
+An embedder that appends `disable-features=<anything>` there, even a
+name Chromium does not know, drops CEF's list, and the browser process
+dies with an access violation inside `cef::initialize`. Seen with CEF
+154 on Windows (2026-11-23: every run with
+`NAUTILUS_CHROMIUM_SWITCHES=disable-features=...` exited 139 before a
+page loaded; the segfault noted under C6's diagnosis runs may be the
+same). Which of CEF's features is the fatal one was not looked for.
+**Blocks:** nothing, with the workaround. **Workaround:**
+`add_to_list_switch` in `engine.rs` reads the switch's value and
+appends to it; the feature defaults (`DISABLED_FEATURES`) and the
+environment hook's four list switches go through it. Never
+`append_switch_with_value` on `enable-features`, `disable-features`
+or the two `blink` lists. Re-check on a CEF bump by running with
+`NAUTILUS_CHROMIUM_SWITCHES=disable-features=NoSuchFeature`.
+
 ### C4: Chromium's extension dialogs crash a windowless browser
 
 `chrome.webstorePrivate.beginInstallWithManifest3` (the store's "Add to

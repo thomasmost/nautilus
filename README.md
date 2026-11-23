@@ -689,6 +689,18 @@ Upstream causes and the features they block are tracked in
   and on macOS a signed helper layout; Nautilus starts CEF with
   `no_sandbox` until that is built (roadmap). Site isolation and separate
   renderer processes still apply.
+- **Chromium is two milestones behind.** CEF 154 is Chromium 154; the
+  `cef` crate has 156, and Chromium's stable channel is at 158. Every
+  milestone carries security fixes, so the bump (see `CLAUDE.md`, "The
+  CEF binary distribution") is the security work that matters most
+  after the sandbox.
+- **Chromium still talks to Google at start.** With a page that asks
+  for nothing, a start makes two requests of its own: Chromium's
+  account check (`accounts.google.com/ListAccounts`, no switch found
+  for it) and the component updater (`update.googleapis.com`, kept on
+  purpose: it brings the certificate revocation sets). The AI Mode
+  eligibility check is switched off (`DISABLED_FEATURES` in
+  `engine.rs`).
 - Page frames go through system memory (CEF's software off-screen path);
   CEF's shared-texture path would skip the copy and is a later step.
 - A popup is always a tab: the size and position a page gives

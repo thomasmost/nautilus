@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-23 (the default profile is pinned to `Default/`: `--profile-directory=Default`, or Chromium hands the global context the profile used last, see the status section of 2026-11-23, the shared cookies, and C17; before that, the same day, a tab shown again is given a new surface: every way of showing a view goes through `delegate::show_view`, and the bridge's hidden pages are told they are hidden for as long as they live, see the status section of 2026-11-23, the frozen tabs, and C16; before that, the same day, a `<select>` opens with a second window open and an extension installed, see the status section of 2026-11-23, `<select>` with two windows and an extension, whose pausing of the bridge's pages the later change replaced; before that, 2026-11-22, a `<select>` opens with more than one window open: `popup_pause.rs` tells the other tab views they are hidden while a popup widget is open, see the status section of 2026-11-22 and C15; before that, 2026-11-19, every profile in one process: one `Runtime` (CEF) per process and an `Engine` per open profile, each profile but the default one a request context under the default profile's `chromium/`, see the status section of 2026-11-19, one process; before that, the relay and the tab probe choose their own DevTools message ids, see the status section of 2026-11-19, the message ids; before that, the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-23 (three Chromium features are off after Thorium's defaults, and a feature list is added to, never replaced: `DISABLED_FEATURES` and `add_to_list_switch` in `engine.rs`, C18, see the status section of 2026-11-23, the performance review; before that, the same day, the default profile is pinned to `Default/`: `--profile-directory=Default`, or Chromium hands the global context the profile used last, see the status section of 2026-11-23, the shared cookies, and C17; before that, the same day, a tab shown again is given a new surface: every way of showing a view goes through `delegate::show_view`, and the bridge's hidden pages are told they are hidden for as long as they live, see the status section of 2026-11-23, the frozen tabs, and C16; before that, the same day, a `<select>` opens with a second window open and an extension installed, see the status section of 2026-11-23, `<select>` with two windows and an extension, whose pausing of the bridge's pages the later change replaced; before that, 2026-11-22, a `<select>` opens with more than one window open: `popup_pause.rs` tells the other tab views they are hidden while a popup widget is open, see the status section of 2026-11-22 and C15; before that, 2026-11-19, every profile in one process: one `Runtime` (CEF) per process and an `Engine` per open profile, each profile but the default one a request context under the default profile's `chromium/`, see the status section of 2026-11-19, one process; before that, the relay and the tab probe choose their own DevTools message ids, see the status section of 2026-11-19, the message ids; before that, the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -78,7 +78,9 @@ Ninja on `PATH`:
   creation, load start, loading state and title (and the extension
   manager's page); `NAUTILUS_CHROMIUM_SWITCHES=name,name=value` appends
   Chromium switches in the browser process
-  (`on_before_command_line_processing`); `NAUTILUS_CEF_LOG=info|verbose`
+  (`on_before_command_line_processing`; a list of features, as in
+  `disable-features=A;B`, separates its names with `;` and is added
+  to what CEF set, C18); `NAUTILUS_CEF_LOG=info|verbose`
   raises CEF's own log level from warnings; `NAUTILUS_TEST_PAGE_SCRIPT`
   runs a script in a page when its load finishes. The macOS smoke test
   in CI launches the bundle up to three times on the `ci-smoke`
@@ -461,6 +463,18 @@ Ninja on `PATH`:
   is a Chrome window to Chromium's session service, which restores it as
   a visible window after an unclean exit; `Engine::new` deletes
   `Default/Sessions` before `cef::initialize`.
+- **A list of features is added to, never replaced.** CEF sets
+  `disable-features` itself before `on_before_command_line_processing`,
+  and appending the switch again replaces the value, which crashes
+  Chromium at startup (C18). Features go through `add_to_list_switch`
+  (`engine.rs`), in the browser process only; the defaults are
+  `DISABLED_FEATURES`, each with the reason and the Thorium patch it
+  follows. A source patch of Thorium's can be followed only where a
+  feature or a switch reaches the same code: Nautilus ships CEF's
+  binary, so nothing of Thorium's build (`-O3`, AVX, ThinLTO, PGO) or
+  of its source changes applies. Add a feature only with a run that
+  shows its effect (a page probe, or a network log:
+  `NAUTILUS_CHROMIUM_SWITCHES=log-net-log=<file>`).
 - **DirectComposition is off.** With it on, the GPU process crashes
   three times and Chromium falls back to software rendering whenever a
   windowed Chrome-style browser exists beside the windowless tabs.
@@ -539,6 +553,59 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-23, the performance review)
+
+The owner asked for a performance review against Thorium's repository
+history, with what applies of its performance and security patches.
+
+What Thorium is, read from its repository at `b2882865` (M158): build
+arguments (`-O3`, AVX or AVX2, ThinLTO, PGO), which is where its speed
+comes from, and about 150 source patches, nearly all its own UI,
+branding, codecs and flags. None of the first kind applies to a
+browser that ships CEF's binary. Of the second, three feature defaults
+could be followed with a switch and were (the CHANGELOG's entry;
+`DISABLED_FEATURES`). Its security is its Chromium milestone: 158
+there, 154 here, 156 in the `cef` crate (156.7.0).
+
+Measured on Windows with regatta against a release build of this
+tree (scratch results, not kept): scrolling 59 frames a second of 60
+(it was 47 on 2026-11-09), click to pixel 66 ms (Thorium 17), page
+interactive 1.2 to 1.3 s, the same as Edge and ahead of Thorium that
+day, a second of it Chromium's proxy auto-detection timing out on
+`wpad` with a VPN up (329 ms on 2026-11-09 without). With the shell's
+swap interval at 0 (a temporary switch in osmena's `glutin.rs`, not
+committed) click to pixel was 50 ms: one frame of the 66 is the
+window's own wait for the display, which also stops the message
+pump. Taking that for real needs the shell to pace its own redraws
+(pointer moves and egui's animations would otherwise redraw without
+limit), which is osmena's work and not done.
+
+Verified, debug and release builds on scratch `--data-dir`s: a page
+that reports what it finds (`HTMLFencedFrameElement` a function
+before, undefined after; `document.browsingTopics` is a stub in
+Chromium 154 either way); a network log of an idle start (three
+requests before: `accounts.google.com/ListAccounts`,
+`www.google.com/async/folae`, `update.googleapis.com`; the second
+gone after, and gone with `AimEnabled` alone); a run with
+`NAUTILUS_CHROMIUM_SWITCHES=disable-features=NoSuchFeature`, which
+exited 139 before `add_to_list_switch` and 0 after. `cargo fmt --all
+--check`, clippy with and without `--all-features`, `cargo test
+--workspace`.
+
+Tried and left out: `ParallelDownloading` (Thorium's default). A
+throttled 96 MB download from a server with ranges and a strong
+validator still came over one connection, so nothing showed it
+working. A release profile with ThinLTO: the measured gaps are the
+display wait and CEF's own work, not this repository's code.
+
+Not verified: macOS; the owner's profiles; sites that use fenced
+frames (none is known to need them).
+
+Left, in the order of what they are worth: the CEF bump to 156 (the
+security catch-up; every `C` entry to re-check, the bridge's scripted
+runs on the Mac); the sandbox (C1); the shell's redraw pacing with
+swap interval 0; `ListAccounts` at start.
 
 ## Status and handoff (2026-11-23, the shared cookies)
 

@@ -8,6 +8,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Changed
 
+- Three Chromium features are off, after Thorium's defaults. Google's
+  AI Mode for Chrome's address bar, which Nautilus has no use for: with
+  it on, Nautilus asked `www.google.com` at every start whether the
+  profile is eligible, with the profile's Google cookies, and no longer
+  does. And the Privacy Sandbox's advertising override with its
+  `<iframe>` form: pages no longer get the fenced frames that ad
+  auctions render in (`HTMLFencedFrameElement` is gone).
+
 - The profile avatars are redrawn as plain silhouettes that read on
   the toolbar's small disc, where the outlined emoji they had been
   since the palettes turned to grey there. The whale is the one
