@@ -189,6 +189,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
   open the pages in the other windows now stop painting, keeping
   their last frame, and go on when it closes (C15 in
   `docs/upstream-issues.md`).
+- A `<select>` opens its list with a second window open when an
+  extension is installed too. The first fix held only in a profile
+  without extensions: each extension keeps a page nobody sees, which
+  Chromium counted as it counts a window's page, so with Proton Pass
+  (or any extension) and a second window the list still never
+  appeared. Those pages now pause with the other windows' pages while
+  a list is open.
 - Two fingers spread or pinched on a touchpad zoom the page, a step
   at a time, as Ctrl (Cmd) and the wheel do (osmena). Before, the
   gesture scrolled the page on Windows and did nothing on macOS.

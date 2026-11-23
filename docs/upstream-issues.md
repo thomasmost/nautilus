@@ -327,7 +327,15 @@ changes nothing, and neither does lowering the other view's
 with a second view hidden it paints, and with
 `--disable-gpu-compositing` (frames through the software output
 device, no capturer) it paints whatever is visible. The bridge's
-hidden pages do not count. Nothing in CEF's two files is shared
+hidden pages (16 by 16, one frame a second) count too, though not
+one for one: a tab, the helper's page and a relay page, all visible,
+still paint the widget, and the same three with a second window's
+tab told it is hidden at `OnPopupShow` do not (2026-11-23, 4 opens of
+4, where the same run without an extension painted every one). With
+the pages told they are hidden as well, the widget paints, with two
+windows and with three. So no count of visible views explains what
+was measured; the only arrangement relied on is one visible view and
+its widget. Nothing in CEF's two files is shared
 between browsers, so the limit is expected to be in viz's capture;
 it was not traced further. Seen with CEF 154 on Windows, on a local
 page with one `<select>`, 2026-11-22; macOS was not tried and is
@@ -336,10 +344,13 @@ with two profiles open). **Blocks:** every `<select>` (and any other
 popup widget) whenever a second window is open. **Workaround:**
 `popup_pause.rs`: from `on_popup_show(true)`, which comes before the
 widget's capturer exists, to `on_popup_show(false)`, every other tab
-view that is painting, in every window of every profile, is told it
-is hidden (`was_hidden(1)`), and shown again after. The cost: while
-a list is open the other windows keep their last frame, and their
-pages see `visibilitychange`.
+view that is painting, in every window of every profile, and every
+hidden page of the extension bridge, is told it is hidden
+(`was_hidden(1)`), and shown again after. The cost: while a list is
+open the other windows keep their last frame, and their pages and
+the bridge's see `visibilitychange`. A windowless browser added
+later must be listed there too (`track` or `track_page`), or it
+brings the fault back.
 
 ### C4: Chromium's extension dialogs crash a windowless browser
 

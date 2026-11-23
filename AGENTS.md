@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-22 (a `<select>` opens with more than one window open: `popup_pause.rs` tells the other tab views they are hidden while a popup widget is open, see the status section of 2026-11-22 and C15; before that, 2026-11-19, every profile in one process: one `Runtime` (CEF) per process and an `Engine` per open profile, each profile but the default one a request context under the default profile's `chromium/`, see the status section of 2026-11-19, one process; before that, the relay and the tab probe choose their own DevTools message ids, see the status section of 2026-11-19, the message ids; before that, the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-23 (a `<select>` opens with a second window open and an extension installed: `popup_pause.rs` pauses the bridge's hidden pages as well as the other tab views, see the status section of 2026-11-23; before that, 2026-11-22, a `<select>` opens with more than one window open: `popup_pause.rs` tells the other tab views they are hidden while a popup widget is open, see the status section of 2026-11-22 and C15; before that, 2026-11-19, every profile in one process: one `Runtime` (CEF) per process and an `Engine` per open profile, each profile but the default one a request context under the default profile's `chromium/`, see the status section of 2026-11-19, one process; before that, the relay and the tab probe choose their own DevTools message ids, see the status section of 2026-11-19, the message ids; before that, the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -44,8 +44,9 @@ Rendering: each tab is a windowless CEF browser. CEF calls the tab's
 and raise `EngineEvent::FrameReady`; `TabHost::paint_page` hands the frame
 to the shell as a `PagePaint::Frame`, and the shell uploads it to a texture
 under the toolbar. `<select>` popups arrive as a second paint element and
-are composed into the frame; while one is open the other tabs' views are
-paused (`popup_pause.rs`, C15). The chrome's GL context is osmena's glutin
+are composed into the frame; while one is open every other windowless
+view is paused, the other tabs' and the bridge's hidden pages
+(`popup_pause.rs`, C15). The chrome's GL context is osmena's glutin
 surface (the `glutin` feature of `osmena-engine`).
 
 ## Commands
@@ -592,7 +593,53 @@ Chromium's root-level files that nothing reads any more (only
 inside the default profile's `chromium/`, which is where Chromium needs
 them and not where a person would look.
 
-## Status and handoff (2026-11-22, `<select>` with two windows: fixed)
+## Status and handoff (2026-11-23, `<select>` with two windows and an extension)
+
+The owner, on build 89 (which has the fix of 2026-11-22, below): the
+list still does not appear with a second window open. Their session
+differed from the run that verified that fix in one thing that
+matters: an extension (Proton Pass). Each bridged extension keeps a
+relay page, and the profile a helper page, in windowless browsers
+nobody sees (`bridge/hidden_page.rs`), and Chromium counts those
+against a popup widget's painting as it counts a tab's view. C15's
+"the bridge's hidden pages do not count" was wrong and is corrected
+there, with what was measured; no simple count of views fits it.
+
+The fix: `popup_pause.rs` lists the hidden pages too (`track_page`
+from `HiddenPage::open`, `forget_page` when a `HiddenPage` is
+dropped) and tells them they are hidden from `on_popup_show(true)`
+to the owner's `on_popup_show(false)`, with the other tabs; a page
+opened while a widget is open starts paused. What is left visible is
+one view and its widget, the arrangement that has always painted.
+The rule for the future is in C15: every windowless browser must be
+on one of the two lists.
+
+Verified on Windows with a debug build (`--features test-hooks`), a
+scratch `--data-dir`, the test extension loaded through
+`NAUTILUS_TEST_CONTROL`, and a local page that opens and closes its
+own `<select>` every 8 s through a temporary hook (a page's console
+line turned into `send_mouse_click_event`, and a log line for each
+`PET_POPUP` paint; neither committed). Before: the default
+profile's window, a second profile's window, the extension: `popup
+widget shown` 4 times, painted 0. With one window and the extension:
+painted every time. After: two profiles' windows, painted 4 of 4;
+three profiles' windows, 4 of 4; without an extension, 3 of 3; and
+an action click sent while a list was open, after three lists had
+opened and closed, was taken by the worker after one attempt. Also
+`cargo fmt --all --check`, clippy with and without `--all-features`,
+`cargo test --workspace` (248 and 3).
+
+Not verified: the owner's own profile with Proton Pass (the test
+extension stood in for it); the list by eye (the paint was read from
+the log; the composition is unchanged); macOS; the scripted bridge
+runs (`run.sh`, `phase5.py`: macOS only), which matter here because
+the relay's long poll now sits in a page that is told it is hidden
+for as long as a list is open: a `Runtime.evaluate` answered during
+that time in the run above, but a list left open for minutes was not
+tried; an extension's action popup or DevTools open beside a list
+(windowed browsers, on neither list).
+
+## Status and handoff (2026-11-22, `<select>` with two windows: see 2026-11-23)
 
 The owner's `<select>` that does not open (2026-11-19, below) was
 reproduced on Windows and has nothing to do with the page: with two

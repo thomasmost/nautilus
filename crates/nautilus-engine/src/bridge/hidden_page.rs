@@ -83,6 +83,9 @@ impl HiddenPage {
             .host()
             .and_then(|host| host.add_dev_tools_message_observer(Some(&mut observer)));
         log::debug!("bridge: page {key} opening at {url}");
+        // A view nobody sees is captured like any other, and counts
+        // against a popup widget's painting (C15).
+        crate::popup_pause::track_page(&browser);
         Some(HiddenPage {
             browser,
             generation,
@@ -103,6 +106,12 @@ impl HiddenPage {
         if let Some(host) = self.browser.host() {
             host.close_browser(1);
         }
+    }
+}
+
+impl Drop for HiddenPage {
+    fn drop(&mut self) {
+        crate::popup_pause::forget_page(self.browser.identifier());
     }
 }
 

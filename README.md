@@ -340,7 +340,8 @@ engine glue. Each item must pass.
    Hovering a link shows its URL in the status overlay at the bottom left
    and the pointer becomes a hand; over text it becomes an I-beam. A
    `<select>` opens its list over the page and picks on click, also
-   while a second window is open (Ctrl+N first, then try again).
+   while a second window is open (Ctrl+N first, then try again), and
+   with an extension installed and a second window open.
    **Drag and drop.** On a page with draggable elements and a drop
    zone (any HTML5 drag-and-drop demo), press on an element and drag:
    an image of it follows the pointer, the zone reacts as the pointer
