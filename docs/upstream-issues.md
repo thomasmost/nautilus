@@ -393,6 +393,33 @@ attached to a hidden tab): `was_hidden(0)`, `notify_screen_info_changed`,
 `invalidate`. And the bridge's pages are hidden from the start, so
 they hold no surface against the tabs.
 
+### C17: the global request context is the profile a Chrome-style window last used
+
+CEF gives the global request context (a browser created with no
+request context, when `cache_path` is the root) the profile
+`ProfileManager::GetInitialProfileDir` names
+(`ChromeBrowserContext::InitializeAsync`, `GetPrimaryUserProfile`),
+and Chromium answers that with `profile.last_used` from `Local
+State`, not with `Default`. Chromium sets that preference from its
+own Chrome-style windows, and the extension manager's hidden window
+is one in every profile. So once a profile other than the default one
+had been open and was the last to have such a window, the next
+launch's global context was that profile: the default profile's tabs,
+extension manager and bridge ran in `profile-<name>/`, sharing its
+cookies, storage and extensions with that profile's own windows, and
+`Default/` was not opened at all. Seen with CEF 154 on Windows,
+2026-11-23: the owner's Personal (default) and Work windows signed in
+to the same Google account, `Default/` not written since the start
+while `profile-work/` was, `profile.last_used` reading `profile-work`;
+and in scripted runs on a scratch `--data-dir` (default, then work,
+then default again: the third run wrote 49 files under
+`profile-work/` and none under `Default/`). macOS was not tried; the
+code is not per platform. **Blocks:** separate profiles, from the
+second launch after another profile was open. **Workaround:**
+`--profile-directory=Default` in `on_before_command_line_processing`,
+which Chromium reads before the preference. Re-check on a CEF bump
+with the three runs above.
+
 ### C4: Chromium's extension dialogs crash a windowless browser
 
 `chrome.webstorePrivate.beginInstallWithManifest3` (the store's "Add to

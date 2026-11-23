@@ -180,6 +180,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- The default profile keeps its own cookies, storage and extensions
+  after another profile has been open. Since every profile came into
+  one Nautilus, a start that followed a session with a second profile
+  could open the default profile's windows on that profile's Chromium
+  data: both were signed in to the same accounts, and what was done
+  in the default profile's windows was kept with the other profile's.
+  Nothing of the default profile's own data was lost; it was not
+  opened in such a session, and is as it was left.
 - The toolbar's Reload is an arrow again, an arc turning clockwise
   into an arrowhead; it had been drawn as a ring with a tick on it.
 - A `<select>` opens its list when more than one window is open. With

@@ -133,6 +133,10 @@ fn load_framework(helper: bool) {
 #[cfg(not(target_os = "macos"))]
 fn load_framework(_helper: bool) {}
 
+/// The directory, under Chromium's root, of the profile its global
+/// request context is: the default profile's data.
+const DEFAULT_PROFILE_DIRECTORY: &str = "Default";
+
 /// How long a profile's request context may take to load before its
 /// engine gives up.
 const CONTEXT_PATIENCE: Duration = Duration::from_secs(15);
@@ -204,7 +208,7 @@ impl Shared {
     /// Start Chromium with `root` as its user-data directory.
     fn initialize(root: &Path, waker: Arc<dyn Waker>) -> Result<Shared, EngineError> {
         let root = resolved_dir(root)?;
-        forget_chromium_session(&root.join("Default"));
+        forget_chromium_session(&root.join(DEFAULT_PROFILE_DIRECTORY));
         #[cfg(target_os = "macos")]
         crate::mac_app::adopt_cef_app_protocol();
         let cache_path = CefString::from(root.to_string_lossy().as_ref());
@@ -1051,6 +1055,20 @@ wrap_app! {
             // to the windowless tabs with DirectComposition on; the tabs
             // paint into memory and never use it.
             command_line.append_switch(Some(&"disable-direct-composition".into()));
+            // The default profile is Chromium's global request context,
+            // and CEF gives that context the profile Chromium would
+            // start with, which is the one a Chrome-style window last
+            // used (`profile.last_used` in `Local State`), not
+            // `Default`. The extension manager's window is such a
+            // window, so after another profile had been open the
+            // default profile's tabs were created in that profile's
+            // cookies, storage and extensions (C17 in
+            // `docs/upstream-issues.md`). The switch outranks the
+            // preference.
+            command_line.append_switch_with_value(
+                Some(&"profile-directory".into()),
+                Some(&DEFAULT_PROFILE_DIRECTORY.into()),
+            );
             // A page that marks the dragged element in its `dragstart`
             // handler the common way, with `pointer-events: none`,
             // could not be dragged at all: after dispatching

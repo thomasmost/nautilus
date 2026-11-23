@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-23 (a tab shown again is given a new surface: every way of showing a view goes through `delegate::show_view`, and the bridge's hidden pages are told they are hidden for as long as they live, see the status section of 2026-11-23, the frozen tabs, and C16; before that, the same day, a `<select>` opens with a second window open and an extension installed, see the status section of 2026-11-23, `<select>` with two windows and an extension, whose pausing of the bridge's pages the later change replaced; before that, 2026-11-22, a `<select>` opens with more than one window open: `popup_pause.rs` tells the other tab views they are hidden while a popup widget is open, see the status section of 2026-11-22 and C15; before that, 2026-11-19, every profile in one process: one `Runtime` (CEF) per process and an `Engine` per open profile, each profile but the default one a request context under the default profile's `chromium/`, see the status section of 2026-11-19, one process; before that, the relay and the tab probe choose their own DevTools message ids, see the status section of 2026-11-19, the message ids; before that, the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-23 (the default profile is pinned to `Default/`: `--profile-directory=Default`, or Chromium hands the global context the profile used last, see the status section of 2026-11-23, the shared cookies, and C17; before that, the same day, a tab shown again is given a new surface: every way of showing a view goes through `delegate::show_view`, and the bridge's hidden pages are told they are hidden for as long as they live, see the status section of 2026-11-23, the frozen tabs, and C16; before that, the same day, a `<select>` opens with a second window open and an extension installed, see the status section of 2026-11-23, `<select>` with two windows and an extension, whose pausing of the bridge's pages the later change replaced; before that, 2026-11-22, a `<select>` opens with more than one window open: `popup_pause.rs` tells the other tab views they are hidden while a popup widget is open, see the status section of 2026-11-22 and C15; before that, 2026-11-19, every profile in one process: one `Runtime` (CEF) per process and an `Engine` per open profile, each profile but the default one a request context under the default profile's `chromium/`, see the status section of 2026-11-19, one process; before that, the relay and the tab probe choose their own DevTools message ids, see the status section of 2026-11-19, the message ids; before that, the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -149,7 +149,11 @@ Ninja on `PATH`:
   (`Profile::shared_engine_dir`), and takes a profile's directory only
   as a direct child of it. The default profile is Chromium's global
   context (`Default/` there, as it always was, so nothing of it
-  moves); any other profile is a `RequestContext` at
+  moves), and only because `on_before_command_line_processing`
+  passes `--profile-directory=Default`: without it the global context
+  is whichever profile a Chrome-style window used last, and the
+  default profile's windows share that profile's cookies (C17); any
+  other profile is a `RequestContext` at
   `profile-<name>/` (`Profile::shared_engine_data`), made in
   `Shared::context_at`, which pumps the message loop until Chromium
   has loaded it (a browser cannot be created in it before) and fails
@@ -535,6 +539,49 @@ A task is complete only when:
   issues Nautilus depends on and the features each one blocks. Add an entry
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
+
+## Status and handoff (2026-11-23, the shared cookies)
+
+The owner, on the build with the frozen-tabs fix: "my Work and
+Personal Profiles are sharing cookies? I'm logged into the same
+Google account across both". Personal is the default profile.
+
+The cause is C17 in `docs/upstream-issues.md`: the default profile is
+Chromium's global request context, and CEF gives that context the
+profile `Local State` names as last used, which the extension
+manager's Chrome-style window sets. After a session in which Work was
+the last such profile, the next start opened the default profile's
+tabs, extension manager and bridge in `profile-work/`. In the owner's
+data directory `Default/` had not been written since that start
+(9:07) while `profile-work/` had, `profile.last_used` read
+`profile-work`, and both profiles' `extensions.toml` were written in
+the same second.
+
+The fix is one switch, `--profile-directory=Default`
+(`DEFAULT_PROFILE_DIRECTORY`, `on_before_command_line_processing` in
+`engine.rs`), which Chromium reads before the preference.
+
+Verified on Windows with debug builds and a scratch `--data-dir`, a
+local page that sets a cookie and `localStorage`, each launch with
+`--exit-after 12`, counting the files written under each Chromium
+profile during the launch. Before: default alone, 161 under
+`Default/`; work, 162 under `profile-work/` (and `last_used` now
+`profile-work`); default again, 0 under `Default/` and 49 under
+`profile-work/`. After, with `last_used` forced to `profile-work`:
+default, 49 under `Default/` and 0 under `profile-work/`; work, 49
+under `profile-work/`; default again, 49 under `Default/` and 0 under
+`profile-work/`. `cargo fmt --all --check`, clippy with and without
+`--all-features`, `cargo test --workspace`.
+
+Not verified: two profiles open in one process (each run had one);
+the owner's own profiles and the release build; macOS; that the page
+read back the earlier run's cookie (files were counted, not values).
+
+Left for the owner: what was done in the default profile's windows
+during an affected session (sign-ins, an extension installed or
+removed) is in the other profile's Chromium data and stays there;
+nothing moves it back. The default profile's own data was not opened
+in such a session and is as it was.
 
 ## Status and handoff (2026-11-19, one process)
 
