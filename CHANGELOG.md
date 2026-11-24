@@ -192,6 +192,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- PDFs are shown again, as a tab's document and inside a page's frame.
+  Since extensions' pages were given the browser's tabs and windows,
+  Chromium's own PDF viewer, which is an extension page too, was given
+  them as well and refused, so a PDF came up as an empty dark page.
+
 - The default profile keeps its own cookies, storage and extensions
   after another profile has been open. Since every profile came into
   one Nautilus, a start that followed a session with a second profile

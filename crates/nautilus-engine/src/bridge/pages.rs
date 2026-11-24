@@ -54,17 +54,32 @@ pub(crate) const CALL_MESSAGE: &str = "nautilus-bridge-call";
 /// object; the page transport takes it and deletes it.
 const SEND_FUNCTION: &str = "__nautilusBridgeSend";
 
+/// Chromium's own extensions whose pages a user sees. They are part of the
+/// browser, not something the user installed: the bridge never serves them,
+/// so with it in their pages every `chrome.tabs` call would be refused.
+/// They keep Chromium's namespaces.
+///
+/// The PDF viewer: every PDF, as a tab's document or in a page's frame, is
+/// shown by its `index.html`, which reads the tab's zoom through
+/// `chrome.tabs` before it draws a page. Refused, it drew nothing.
+const CHROMIUM_OWN: [&str; 1] = ["mhjfbmdgcfjbbpaeojofohoefgiehjai"];
+
 /// The extension whose page `url` is, if it is one the bridge goes into:
 /// any `chrome-extension://<id>/...` address but the relay page (which
-/// talks to the engine in its own way) and the helper extension's pages
-/// (which are the engine's own, not bridged).
+/// talks to the engine in its own way), the helper extension's pages
+/// (which are the engine's own, not bridged) and the pages of Chromium's
+/// own extensions (`CHROMIUM_OWN`).
 pub(crate) fn extension_of(url: &str) -> Option<String> {
     let url = Url::parse(url).ok()?;
     if url.scheme() != "chrome-extension" {
         return None;
     }
     let id = url.host_str()?;
-    if !crx::is_extension_id(id) || id == HELPER_ID || url.path() == RELAY_PATH {
+    if !crx::is_extension_id(id)
+        || id == HELPER_ID
+        || CHROMIUM_OWN.contains(&id)
+        || url.path() == RELAY_PATH
+    {
         return None;
     }
     Some(id.to_string())
@@ -608,6 +623,17 @@ mod tests {
             (format!("chrome-extension://{ID}/"), Some(ID)),
             (format!("chrome-extension://{ID}{RELAY_PATH}"), None),
             (format!("chrome-extension://{HELPER_ID}/helper.html"), None),
+            // Chromium's PDF viewer, as a tab's document and inside a
+            // page's frame: it keeps Chromium's own `chrome.tabs`.
+            (
+                "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html".to_string(),
+                None,
+            ),
+            (
+                "chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai/index.html?https://example.com/a.pdf"
+                    .to_string(),
+                None,
+            ),
             ("chrome-extension://not-an-id/popup.html".to_string(), None),
             (format!("https://{ID}/popup.html"), None),
             ("https://example.com/".to_string(), None),

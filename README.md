@@ -762,7 +762,8 @@ Upstream causes and the features they block are tracked in
   are bridged on their own lane, with or without a worker, so a page's
   `chrome.tabs` calls are answered like a worker's. An extension page's
   `iframe`s have no `chrome.tabs`. The relay page and the helper's pages are
-  not bridged. A tab an extension is
+  not bridged, and neither is Chromium's own PDF viewer, which is an
+  extension page too and keeps Chromium's `chrome.tabs`. A tab an extension is
   debugging is kept painted, for any extension whose worker is bridged; a background tab nothing
   reported as debugged is hidden, so DevTools ("Inspect") on a background
   tab is slow until it is shown. A debugged tab is hidden again when its

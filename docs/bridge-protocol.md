@@ -841,7 +841,8 @@ positive integer below `SYNTHETIC_BASE`. It carries no view, tab or extension.
 
 The browser process decides the view. `pages::report_source` accepts a report
 only from the main frame of a bridged extension's page (`extension_of`, which
-refuses the relay page and the helper's pages) whose browser is a tab view
+refuses the relay page, the helper's pages and Chromium's own extensions,
+`CHROMIUM_OWN`: the PDF viewer) whose browser is a tab view
 (`Asker::View`, so not a popup, a worker, or a view that is no tab). A refused
 report is logged once with its reason and ignored.
 
