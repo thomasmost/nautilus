@@ -70,10 +70,23 @@
   const removed = {}; // tab id -> when tabs.onRemoved fired (ms)
 
   chrome.runtime.onMessage.addListener((message, sender) => {
-    if (message && message.report) post(message.report.kind, message.report.data);
+    if (message && message.report) {
+      // A content script's report, with the tab the worker sees as its
+      // sender: a content script's sender keeps its tab, with the strip's
+      // fields.
+      const tab = sender.tab ? { id: sender.tab.id, index: sender.tab.index, windowId: sender.tab.windowId } : null;
+      post(message.report.kind, Object.assign({ senderTab: tab }, message.report.data));
+    }
     // A panel page says who it is: what the worker sees as its sender.
     if (message && message.whoami) {
-      post('sender', { page: message.whoami, tab: sender.tab || null, url: sender.url || null, frameId: sender.frameId });
+      post('sender', {
+        page: message.whoami,
+        late: message.late === true,
+        hasTab: 'tab' in sender,
+        tab: sender.tab || null,
+        url: sender.url || null,
+        frameId: sender.frameId,
+      });
     }
   });
   chrome.tabs.onRemoved.addListener((id) => {

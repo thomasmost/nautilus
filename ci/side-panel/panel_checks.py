@@ -67,7 +67,9 @@ RUN_SH = HERE / "run.sh"
 PORT = 47616
 PANEL_WIDTH = 360  # osmena-chrome theme::SIDE_PANEL_WIDTH, in points
 # A page's reports come every half second, a hidden page's once a second
-# (Chromium throttles its timers): a page silent for this long has closed.
+# (Chromium throttles its timers): a page silent for this long has stopped
+# reporting. That alone is true of a hung page too, so a check that says
+# "closed" also reads the engine's log for the view's close (`closed`).
 FRESH = 3.0
 # As run.sh's and phase5.py's: what a launch's log must not hold.
 MARKERS = ("panicked at", "fatal runtime error", "already borrowed",
@@ -312,6 +314,19 @@ class Harness:
     def alive(self, page):
         return fresh(latest("panel", lambda d: d.get("page") == page))
 
+    def view_closed(self, page):
+        """The engine's log says the browser of the view last opened at
+        `page` has closed (`on_before_close`)."""
+        log = self.log_text()
+        views = re.findall(r"side panel (TabId\(\d+\)): chrome-extension://[a-p]{32}/" + re.escape(page) + r"(?:[?#]\S*)?$",
+                           log, re.MULTILINE)
+        return bool(views) and f"tab side panel {views[-1]}: browser closed" in log
+
+    def closed(self, page):
+        """The page at `page` is closed: it reports no more (true of a hung
+        page too) and the engine says its view's browser closed."""
+        return not self.alive(page) and self.view_closed(page)
+
     def shown(self, page):
         record = latest("panel", lambda d: d.get("page") == page)
         return fresh(record) and record["data"].get("visibility") == "visible"
@@ -427,13 +442,13 @@ def panel_checks(h):
         "path-changed": lambda: path_changed(h),
         "path-restored": lambda: h.check(
             "setOptions({path}) back shows the first page again",
-            wait(lambda: h.shown("panel.html") and not h.alive("panel-tab.html"), 10),
-            [h.panel("panel.html"), h.panel("panel-tab.html")]),
+            wait(lambda: h.shown("panel.html") and h.closed("panel-tab.html"), 10),
+            [h.panel("panel.html"), h.panel("panel-tab.html"), h.view_closed("panel-tab.html")]),
         "panel-opened-tab": lambda: panel_opened_tab(h),
         "tab-closed-with-panel": lambda: h.check(
             "the closed tab's panel page is gone and the window's is still shown",
-            wait(lambda: h.shown("panel.html") and not h.alive("panel-tab.html"), 10),
-            [h.panel("panel.html"), h.panel("panel-tab.html")]),
+            wait(lambda: h.shown("panel.html") and h.closed("panel-tab.html"), 10),
+            [h.panel("panel.html"), h.panel("panel-tab.html"), h.view_closed("panel-tab.html")]),
         "second-window": lambda: second_window(h),
         "second-window-closed": lambda: h.check(
             "with the second window closed the first window's panel is still shown",
@@ -499,14 +514,32 @@ def window_panel(h):
     )
     h.check("tabs.getCurrent() in the panel is undefined", data.get("getCurrent") is True, data)
     h.check("getContexts({windowIds}) from the panel finds itself", data.get("windowContexts") == 1, data)
-    sender = wait(lambda: latest("sender", lambda d: d.get("page") == "panel.html"), 10)
-    # In Chrome a side panel's sender has no tab. Here Chromium takes the
-    # panel's browser for a tab of its own, so the worker sees one, with
-    # index -1 and windowId -1: recorded, not judged (a known difference).
-    tab = sender["data"].get("tab") if sender else "no message arrived"
-    h.note("sender.tab of a message from the panel's page: " + (
+    # In Chrome a side panel's sender has no tab. Chromium here takes the
+    # panel's browser for a tab of its own; the engine tells the worker that
+    # tab id is a panel's, and the bridge takes sender.tab off. The page's
+    # first message, sent as it loads, races its own report to the engine
+    # and is only noted; the one it sends 2.5 s later is judged.
+    first = wait(lambda: latest("sender", lambda d: d.get("page") == "panel.html" and not d.get("late")), 10)
+    tab = first["data"].get("tab") if first else "no message arrived"
+    h.note("sender.tab of the panel page's first message, sent as it loads: " + (
         "none" if tab is None else json.dumps(tab if not isinstance(tab, dict) else
                                               {key: tab.get(key) for key in ("id", "index", "windowId", "url")})))
+    late = wait(lambda: latest("sender", lambda d: d.get("page") == "panel.html" and d.get("late")), 10)
+    h.check("a message from the panel's page reaches the worker with no sender.tab",
+            late is not None and late["data"].get("hasTab") is False and late["data"].get("tab") is None,
+            late["data"] if late else "no later message arrived")
+    h.check("and still names the panel's page as its sender",
+            late is not None and str(late["data"].get("url", "")).endswith("/panel.html"),
+            late["data"] if late else None)
+    since = time.time()
+    script = wait(lambda: latest("tab", lambda d: d.get("url", "").startswith(h.active_url or "-")
+                                 and isinstance(d.get("senderTab"), dict)), 10)
+    seen = script["data"].get("senderTab") if script and script["at"] >= since - 10 else None
+    h.check("a content script's message still has sender.tab, with the strip's fields",
+            isinstance(seen, dict) and seen.get("id") == h.active_id
+            and isinstance(seen.get("index"), int) and seen["index"] >= 0
+            and isinstance(seen.get("windowId"), int) and seen["windowId"] >= 1,
+            script["data"] if script else "no content script report with a sender")
     h.shot("2-window-panel")
 
 
@@ -541,12 +574,14 @@ def window_panel_again(h):
 
 def tab_panel_closed(h):
     h.check("AC5.2 setOptions({enabled: false}) closed the tab panel's page",
-            wait(lambda: not h.alive("panel-tab.html"), 10), h.panel("panel-tab.html"))
+            wait(lambda: h.closed("panel-tab.html"), 10),
+            [h.panel("panel-tab.html"), h.view_closed("panel-tab.html")])
     h.check("the window's panel is still open", h.alive("panel.html"))
 
 
 def window_closed_by_page(h):
-    h.check("AC5.2 window.close() in the panel closed its page", wait(lambda: not h.alive("panel.html"), 10))
+    h.check("AC5.2 window.close() in the panel closed its page", wait(lambda: h.closed("panel.html"), 10),
+            [h.panel("panel.html"), h.view_closed("panel.html")])
     if h.full is None:
         h.check("the page has its full width again", False, "no width was reported before the panel")
     else:
@@ -562,7 +597,8 @@ def click_open(h):
 
 def click_close(h):
     h.send({"click": h.ext_id})
-    h.check("a second click closes it", wait(lambda: not h.alive("panel.html"), 15))
+    h.check("a second click closes it", wait(lambda: h.closed("panel.html"), 15),
+            [h.panel("panel.html"), h.view_closed("panel.html")])
 
 
 def bystander(h):
@@ -586,9 +622,9 @@ def bystander_page(h):
 
 
 def path_changed(h):
-    ok = wait(lambda: h.shown("panel-tab.html") and not h.alive("panel.html"), 10)
+    ok = wait(lambda: h.shown("panel-tab.html") and h.closed("panel.html"), 10)
     h.check("setOptions({path}) on the open window panel shows the new page", ok,
-            [h.panel("panel-tab.html"), h.panel("panel.html")])
+            [h.panel("panel-tab.html"), h.panel("panel.html"), h.view_closed("panel.html")])
     h.shot("7-new-path")
 
 
@@ -737,8 +773,9 @@ def sample_checks(h, source):
         h.note("the sample's panel page: " + json.dumps(h.panel("sidepanel.html")))
     h.shot("1-open")
     h.send({"click": ext_id})
-    closed = wait(lambda: not h.alive("sidepanel.html"), 15)
-    h.check("a second click closes the sample's panel", closed)
+    closed = wait(lambda: h.closed("sidepanel.html"), 15)
+    h.check("a second click closes the sample's panel", closed,
+            [h.panel("sidepanel.html"), h.view_closed("sidepanel.html")])
     h.send({"click": ext_id})
     h.check("a third click opens it again", wait(lambda: h.alive("sidepanel.html"), 20))
     clicks = re.findall(r"TEST HOOK: command \d+: click on \S+ for .*", h.log_text())
@@ -758,7 +795,8 @@ def sample_checks(h, source):
         h.check("on the tab that is not on the site a click is an ordinary action click",
                 len(line) == 1 and "sent to the bridge" in line[0], line)
         time.sleep(4)
-        h.check("and no panel opens", not h.alive("sidepanel.html"), h.panel("sidepanel.html"))
+        made = re.findall(r"side panel TabId\(\d+\): chrome-extension://\S+/sidepanel\.html", h.log_text())
+        h.check("and no panel opens", not h.alive("sidepanel.html") and not made, [h.panel("sidepanel.html"), made])
         h.shot("2-elsewhere")
     h.finish()
 

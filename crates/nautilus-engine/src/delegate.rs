@@ -1428,6 +1428,9 @@ wrap_life_span_handler! {
 
         fn on_before_close(&self, browser: Option<&mut Browser>) {
             let delegate = &self.view.delegate;
+            // The scripted runs read this line: a page that stopped
+            // reporting has closed only if its browser has.
+            log::debug!("tab {}: browser closed", self.view.label());
             delegate
                 .live_browsers
                 .set(delegate.live_browsers.get().saturating_sub(1));

@@ -69,6 +69,10 @@ chrome.runtime.onMessage.addListener((message) => {
   const page = location.pathname.slice(1);
   describe(page);
   chrome.runtime.sendMessage({ whoami: page }).catch(() => {});
+  // Again, once the engine has had this page's report and told the worker
+  // that this page's Chromium tab id is a panel's: the message the harness
+  // judges (the first one races the report, and is only noted).
+  setTimeout(() => chrome.runtime.sendMessage({ whoami: page, late: true }).catch(() => {}), 2500);
   try {
     const current = await chrome.tabs.query({ active: true, currentWindow: true });
     const self_ = await chrome.tabs.getCurrent();
