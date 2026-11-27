@@ -370,6 +370,10 @@ def judge_main(code, log, samples):
         check("AC3.5 tabs.discard answers without reaching Chromium", closed["discard"] == "undefined", closed["discard"])
         check("an unknown tab rejects in Chromium's words, both styles",
               closed["unknown"] == "No tab with id: 999999." and closed["callback"] == "No tab with id: 999999.", str(closed))
+        twin = closed.get("browser")
+        check("the worker's browser.tabs, windows and tabGroups are chrome's, and browser.tabs.query is the bridge's",
+              isinstance(twin, dict) and twin.get("tabs") is True and twin.get("windows") is True
+              and twin.get("tabGroups") is True and twin.get("query") == closed["countAfterRemove"], str(twin))
         check("AC3.3 duplicate opens a tab and remove closes it",
               closed["duplicate"]["id"] != new and closed["countAfterDuplicate"] == closed["countAfterRemove"] + 1
               and closed["getRemoved"] == f"No tab with id: {closed['duplicate']['id']}.", str(closed))
@@ -392,6 +396,10 @@ def judge_main(code, log, samples):
               result.get("current", {}).get("id") == page_tab["id"] and result["current"]["windowId"] == page_tab["windowId"]
               and result["activeCurrent"] == [page_tab["id"]] and result["window"] == page_tab["windowId"], str(result))
         check("AC3.5 a page's tabGroups.move rejects too", result.get("group") == "tabGroups.move is not supported.", str(result.get("group")))
+        twin = result.get("browser")
+        check("a page's browser.tabs, windows and tabGroups are chrome's, and browser.tabs.getCurrent is the bridge's",
+              isinstance(twin, dict) and twin.get("tabs") is True and twin.get("windows") is True
+              and twin.get("tabGroups") is True and twin.get("current") == page_tab["id"], str(twin))
         check("sender.tab carries the strip's fields",
               sender and sender["id"] == page_tab["id"] and sender["windowId"] == page_tab["windowId"] and sender["index"] >= 0, str(sender))
     made = value(s, "windows-create")

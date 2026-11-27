@@ -263,6 +263,37 @@ mod tests {
         assert!(CORE_JS.contains("target[key] = unsupported(namespace, key);"));
         assert!(CORE_JS.contains("target[key] = new BridgeEvent(null);"));
         assert!(CORE_JS.contains("configurable: false, writable: false"));
+        // One place puts a replacement in, for `chrome` and for the
+        // `browser` global beside it: the core's `pin`, which `define`
+        // and the hand-written sidePanel both go through. No namespace
+        // script sets a property of `chrome` itself, so none can cover
+        // one global and miss the other.
+        assert!(CORE_JS.contains("var other = root.browser;"));
+        assert!(CORE_JS.contains("[chrome, twin].forEach(function (holder) {"));
+        assert!(CORE_JS.contains("pin(namespace, build(namespace, spec, source));"));
+        assert!(SIDE_PANEL_JS.contains("bridge.pin('sidePanel', Object.freeze(api));"));
+        for script in [
+            TABS_JS,
+            WINDOWS_JS,
+            TAB_GROUPS_JS,
+            COMMANDS_JS,
+            SIDE_PANEL_JS,
+        ] {
+            assert!(!script.contains("Object.defineProperty(chrome,"));
+            assert!(!script.contains("root.browser"));
+        }
+        for (namespace, script) in [
+            ("tabs", TABS_JS),
+            ("windows", WINDOWS_JS),
+            ("tabGroups", TAB_GROUPS_JS),
+            ("commands", COMMANDS_JS),
+        ] {
+            assert!(script.contains(&format!("bridge.define('{namespace}', {{")));
+        }
+        // What the bridge wraps on Chromium's own runtime and debugger
+        // objects holds for `browser` because the object is one.
+        assert!(CORE_JS.contains("same('runtime');"));
+        assert!(CORE_JS.contains("same('debugger');"));
         for script in [
             CORE_JS,
             TABS_JS,
@@ -302,8 +333,13 @@ mod tests {
         // Each is replaced only where Chromium defines it.
         assert!(TAB_GROUPS_JS.contains("!root.chrome.tabGroups"));
         assert!(COMMANDS_JS.contains("!root.chrome.commands"));
-        // A page whose bridge cannot be put in keeps none of the four.
-        assert!(PAGE_TRANSPORT_JS.contains("['tabs', 'windows', 'tabGroups', 'commands']"));
+        // A page whose bridge cannot be put in keeps none of them, the
+        // side panel included, on `chrome` or on `browser`.
+        assert!(
+            PAGE_TRANSPORT_JS
+                .contains("['tabs', 'windows', 'tabGroups', 'commands', 'sidePanel'].forEach")
+        );
+        assert!(PAGE_TRANSPORT_JS.contains("[root.chrome, root.browser].filter"));
         // Both come before the side panel's script, which is last.
         let script = namespaces_script();
         let at = |part: &str| script.find(part).expect("the script is there");
@@ -340,7 +376,7 @@ mod tests {
         // `route` rejects it as unsupported.
         assert!(!side_panel::is_method("frobnicate"));
         assert!(SIDE_PANEL_JS.contains("Object.freeze(api)"));
-        assert!(SIDE_PANEL_JS.contains("Object.defineProperty(chrome, 'sidePanel'"));
+        assert!(SIDE_PANEL_JS.contains("bridge.pin('sidePanel', Object.freeze(api));"));
         // Its events are the core's, announced and dispatched there: the
         // script registers no event handler of its own.
         for event in list(SIDE_PANEL_JS, "events") {

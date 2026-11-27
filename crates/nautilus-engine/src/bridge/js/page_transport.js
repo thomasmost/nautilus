@@ -6,20 +6,25 @@
   'use strict';
   // Fail closed, for the scripts that put the namespaces in (core.js and
   // page_defer.js) when they cannot: the page's Chromium tabs, windows,
-  // tabGroups and commands are replaced by namespaces whose every call is
-  // refused, so no native function of theirs stays callable (a native
-  // tabs.group traps the browser). tabGroups and commands only where the
-  // page has them: an extension without the permission gains no namespace.
-  // Defined before the transport's own check, which returns when there is
-  // no send.
+  // tabGroups, commands and sidePanel are replaced by namespaces whose every
+  // call is refused, so no native function of theirs stays callable (a
+  // native tabs.group traps the browser). On `chrome` and on `browser`, the
+  // second global Chromium 156 reaches the same APIs through, with one
+  // refusing object for both; pinned, as a replaced namespace is, so that
+  // Chromium does not put its own back when the set of extensions changes.
+  // tabGroups, commands and sidePanel only where the page has them: an
+  // extension without the permission gains no namespace. Defined before the
+  // transport's own check, which returns when there is no send.
   if (!Object.prototype.hasOwnProperty.call(root, '__nautilusRefuseNative')) {
     Object.defineProperty(root, '__nautilusRefuseNative', {
       configurable: true,
       value: function () {
-        var chrome = root.chrome;
-        if (!chrome) { return; }
-        ['tabs', 'windows', 'tabGroups', 'commands'].forEach(function (name) {
-          if (name !== 'tabs' && name !== 'windows' && !chrome[name]) { return; }
+        var holders = [root.chrome, root.browser].filter(function (holder, at, all) {
+          return !!holder && (typeof holder === 'object' || typeof holder === 'function') && all.indexOf(holder) === at;
+        });
+        ['tabs', 'windows', 'tabGroups', 'commands', 'sidePanel'].forEach(function (name) {
+          var has = holders.some(function (holder) { return !!holder[name]; });
+          if (name !== 'tabs' && name !== 'windows' && !has) { return; }
           var refused = new Proxy({}, {
             get: function (target, key) {
               if (typeof key !== 'string' || key === 'then') { return undefined; }
@@ -28,11 +33,13 @@
               };
             }
           });
-          try {
-            Object.defineProperty(chrome, name, { value: refused, writable: true, configurable: true });
-          } catch (e) {
-            console.error('nautilus-bridge: cannot refuse ' + name + ': ' + e);
-          }
+          holders.forEach(function (holder) {
+            try {
+              Object.defineProperty(holder, name, { value: refused, enumerable: true, writable: false, configurable: false });
+            } catch (e) {
+              console.error('nautilus-bridge: cannot refuse ' + name + ': ' + e);
+            }
+          });
         });
       }
     });

@@ -3,7 +3,7 @@
   "name": "Nautilus Panel Test",
   "version": "1.0",
   "description": "The side panel's test extension of ci/side-panel (panel_checks.py). Reports to 127.0.0.1:47616.",
-  "permissions": ["sidePanel", "tabs", "tabGroups"],
+  "permissions": ["sidePanel", "tabs", "tabGroups", "debugger"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background/sw.js" },
   "action": { "default_title": "Panel test" },
@@ -15,6 +15,6 @@
     }
   },
   "content_scripts": [
-    { "matches": ["<all_urls>"], "js": ["probe-page.js"], "run_at": "document_idle" }
+    { "matches": ["<all_urls>"], "js": ["browser-facts.js", "probe-page.js"], "run_at": "document_idle" }
   ]
 }

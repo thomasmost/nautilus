@@ -25,7 +25,14 @@ function nativeEvent() {
 
 const RELAY_CONTEXT = { contextType: 'TAB', documentUrl: 'chrome-extension://x/nautilus-bridge/relay.html', tabId: 5, incognito: false };
 
-function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null, panels = null }) {
+// `browser`: the second global Chromium 156 gives an extension context
+// beside `chrome` (NativeExtensionBindingsSystem::UpdateBindingsForContext
+// sets each API on both). 'alias': its namespaces are the objects `chrome`
+// has before the bridge runs, as Chromium's are (one cached object per API
+// and context). 'separate': objects of its own, whose functions record
+// themselves as `browser.<name>.<function>`. `pinnedBrowser`: its
+// properties cannot be redefined.
+function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null, panels = null, browser = null, pinnedBrowser = false, runtimeApart = false }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
@@ -113,6 +120,36 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
     // A namespace property Chromium does not let go of.
     Object.defineProperty(chrome, 'sidePanel', { value: chrome.sidePanel, configurable: false, writable: false, enumerable: true });
   }
+  let twin = null;
+  if (browser) {
+    twin = {};
+    for (const name of Object.keys(chrome)) {
+      if (name === 'runtime' && runtimeApart) { twin.runtime = { onMessage: nativeEvent(), id: 'x', getContexts: () => { reached.push('browser.runtime.getContexts'); return Promise.resolve([]); } }; continue; }
+      if (browser === 'alias' || name === 'runtime') { twin[name] = chrome[name]; continue; }
+      const own = {};
+      for (const key of Object.keys(chrome[name])) {
+        const value = chrome[name][key];
+        if (typeof value === 'function') {
+          own[key] = (...args) => {
+            reached.push(`browser.${name}.${key}`);
+            const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+            if (callback) { callback(); return undefined; }
+            return Promise.resolve();
+          };
+        } else if (value && typeof value.addListener === 'function') {
+          own[key] = nativeEvent();
+        } else {
+          own[key] = value;
+        }
+      }
+      twin[name] = own;
+    }
+    if (pinnedBrowser) {
+      for (const name of Object.keys(twin)) {
+        if (name !== 'runtime') Object.defineProperty(twin, name, { value: twin[name], configurable: false, writable: false, enumerable: true });
+      }
+    }
+  }
   const engine = (ns, method, args) => {
     // Through JSON, as on the wire (and so the arrays are this realm's).
     calls.push(JSON.parse(JSON.stringify([ns, method, args])));
@@ -121,6 +158,7 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
   };
   const sandbox = { chrome, console: { error: (...a) => sandbox.errors.push(a.join(' ')), log() {} }, errors: [], Promise, Map, JSON, Object, Array, Error, String, setTimeout, clearTimeout };
   sandbox.self = sandbox;
+  if (twin) { sandbox.browser = twin; }
   vm.createContext(sandbox);
   if (prime) { answers.set('tabs.query', () => prime); }
   // The Chromium tab ids of the extension's open side panels, as the engine
@@ -574,12 +612,124 @@ for (const viaPage of [false, true]) {
   await tick();
   assert.equal(responses.at(-1), 'promised');
 }
+// `browser`, the second global of an extension context in Chromium 156:
+// every namespace the bridge replaces on `chrome` is the same object on
+// `browser`, pinned the same way, so no call through `browser` reaches
+// Chromium's own tabs, windows, tabGroups, commands or sidePanel.
+const REPLACED = ['tabs', 'windows', 'tabGroups', 'commands', 'sidePanel'];
+for (const viaPage of [false, true]) {
+  for (const kind of ['alias', 'separate']) {
+    const w = world({ viaPage, browser: kind });
+    const { chrome } = w;
+    const browser = w.sandbox.browser;
+    const where = `${viaPage ? 'page' : 'worker'}, ${kind}`;
+    for (const name of REPLACED) {
+      assert.equal(browser[name], chrome[name], `browser.${name} is not chrome.${name} (${where})`);
+      const d = Object.getOwnPropertyDescriptor(browser, name);
+      assert.deepEqual([d.configurable, d.writable, d.enumerable], [false, false, true], `browser.${name} is not pinned (${where})`);
+      // Chromium cannot put its own back on `browser` either.
+      assert.throws(
+        () => Object.defineProperty(browser, name, { value: { chromium: true }, writable: true, enumerable: true, configurable: true }),
+        TypeError,
+        `Chromium could put its own browser.${name} back (${where})`
+      );
+      assert.equal(browser[name], chrome[name]);
+    }
+    // What the bridge wraps of runtime is wrapped for both.
+    assert.equal(browser.runtime, chrome.runtime);
+    assert.equal(browser.runtime.getContexts, chrome.runtime.getContexts);
+    assert.equal(browser.runtime.onMessage, chrome.runtime.onMessage);
+    // A call through `browser` is the engine's to answer.
+    await tick();
+    w.calls.length = 0;
+    w.reached.length = 0;
+    w.answers.set('tabs.query', () => [{ id: 7, index: 0 }]);
+    assert.deepEqual(await browser.tabs.query({}), [{ id: 7, index: 0 }]);
+    assert.deepEqual(w.calls, [['tabs', 'query', [{}]]]);
+    w.answers.set('tabs.group', () => 3);
+    assert.equal(await browser.tabs.group({ tabIds: [7] }), 3);
+    await browser.tabs.create({ url: 'https://x.example/' });
+    await browser.tabs.discard(7);
+    await browser.windows.create({});
+    await browser.windows.getAll();
+    await browser.tabGroups.query({});
+    await browser.tabGroups.update(1, { title: 'x' });
+    await browser.commands.getAll();
+    await browser.sidePanel.open({ windowId: 1 });
+    await browser.sidePanel.getOptions({});
+    await assert.rejects(browser.tabs.createSplit([1, 2]), /tabs\.createSplit is not supported\./);
+    await assert.rejects(browser.tabGroups.frobnicate(), /tabGroups\.frobnicate is not supported\./);
+    await assert.rejects(browser.commands.frobnicate(), /commands\.frobnicate is not supported\./);
+    assert.equal(browser.sidePanel.frobnicate, undefined);
+    assert.deepEqual(w.reached, [], `a call through browser reached Chromium (${where})`);
+    // An event's listener added through `browser` is the engine's to call.
+    const created = [];
+    browser.tabs.onCreated.addListener((tab) => created.push(tab.id));
+    w.emit('tabs.onCreated', [{ id: 12 }]);
+    assert.deepEqual(created, [12]);
+  }
+
+  // A `browser` whose properties cannot be redefined keeps its own objects,
+  // with every member replaced: nothing of Chromium's stays callable.
+  for (const kind of ['alias', 'separate']) {
+    const w = world({ viaPage, browser: kind, pinnedBrowser: true });
+    const browser = w.sandbox.browser;
+    await tick();
+    w.calls.length = 0;
+    w.reached.length = 0;
+    w.answers.set('tabs.query', () => [{ id: 7, index: 0 }]);
+    assert.deepEqual(await browser.tabs.query({}), [{ id: 7, index: 0 }]);
+    assert.deepEqual(w.calls, [['tabs', 'query', [{}]]]);
+    await browser.tabs.group({ tabIds: [7] });
+    await browser.tabs.create({});
+    await browser.windows.create({});
+    await browser.tabGroups.update(1, { title: 'x' });
+    await browser.commands.getAll();
+    await browser.sidePanel.open({ windowId: 1 });
+    await assert.rejects(Promise.resolve().then(() => browser.tabs.createSplit([1, 2])), /tabs\.createSplit is not supported\./);
+    await assert.rejects(Promise.resolve().then(() => browser.sidePanel.frobnicate()), /sidePanel\.frobnicate is not supported\./);
+    await assert.rejects(Promise.resolve().then(() => browser.tabGroups.frobnicate()), /tabGroups\.frobnicate is not supported\./);
+    assert.deepEqual(w.reached, [], `a pinned browser's call reached Chromium (${viaPage ? 'page' : 'worker'}, ${kind})`);
+    for (const name of REPLACED) {
+      for (const key of Object.keys(browser[name])) {
+        const d = Object.getOwnPropertyDescriptor(browser[name], key);
+        if (typeof d.value === 'function') assert.equal(d.configurable, false, `browser.${name}.${key} could be put back`);
+      }
+    }
+  }
+
+  // An extension without a namespace gains none on `browser` either.
+  {
+    const bare = world({ viaPage, browser: 'alias', tabGroups: false, commands: false, sidePanel: false });
+    for (const name of ['tabGroups', 'commands', 'sidePanel']) {
+      assert.equal(bare.sandbox.browser[name], undefined, name);
+      assert.equal(bare.chrome[name], undefined, name);
+    }
+    assert.equal(bare.sandbox.browser.tabs, bare.chrome.tabs);
+  }
+
+  // A context with no `browser` gains none.
+  {
+    const plain = world({ viaPage });
+    assert.equal('browser' in plain.sandbox, false);
+    assert.equal(plain.sandbox.browser, undefined);
+  }
+
+  // A `browser.runtime` that is another object than `chrome.runtime` (not
+  // what Chromium 156 gives) is made the same one, so the bridge's
+  // getContexts and onMessage are the only ones.
+  {
+    const w = world({ viaPage, browser: 'alias', runtimeApart: true });
+    assert.equal(w.sandbox.browser.runtime, w.chrome.runtime);
+    assert.ok(w.errors.some((e) => e.includes('browser.runtime is not chrome.runtime')));
+  }
+}
 // An extension page's context, as pages.rs composes it: the transport when
 // the context is created, the namespaces (page_defer.js around them) at the
 // first change of the document. Chromium's `chrome` appears between the two,
 // as the render process measures it, so it is set at the change. The
 // observer is a stand-in that delivers only while it is connected.
-function pageContext({ bindingsAtChange = true, hasDocument = true, answers = true }) {
+function pageContext({ bindingsAtChange = true, hasDocument = true, answers = true, browser = false }) {
   const observers = [];
   const errors = [];
   const sent = [];
@@ -637,6 +787,8 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
   );
   const mutate = () => {
     if (bindingsAtChange) sandbox.chrome = chrome;
+    // Chromium defines `browser` with `chrome`, over the same objects.
+    if (bindingsAtChange && browser) sandbox.browser = Object.assign({}, chrome);
     for (const observer of observers) {
       if (observer.connected) observer.callback([{ type: 'childList' }]);
     }
@@ -667,6 +819,18 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
   p.mutate();
   assert.deepEqual(p.errors, []);
   assert.equal(p.sent.length, 1);
+}
+{
+  // A page with `browser`: after the first change its namespaces are the
+  // bridge's, the same objects as chrome's, and its calls the engine's.
+  const p = pageContext({ browser: true });
+  p.mutate();
+  assert.deepEqual(p.errors, []);
+  assert.equal(p.sandbox.browser.tabs, p.sandbox.chrome.tabs);
+  assert.equal(p.sandbox.browser.windows, p.sandbox.chrome.windows);
+  p.sandbox.browser.tabs.query({});
+  assert.deepEqual(p.reached, []);
+  assert.deepEqual(p.sent.map((m) => [m.ns, m.method]), [['tabs', 'query']]);
 }
 {
   // No chrome at the first change: the existing message, once, and no
@@ -1006,6 +1170,59 @@ function loadWorker(runtime) {
     await assert.rejects(Promise.resolve().then(call), /is not supported in this page\./);
   }
   assert.deepEqual(reached, [], 'the refusal left a native group or command call callable');
+}
+{
+  // The refusal covers `browser` too, whether its namespaces are chrome's
+  // objects or its own, and sidePanel with the rest; what is refused cannot
+  // be put back.
+  for (const separate of [false, true]) {
+    for (const how of ['core', 'defer', 'transport']) {
+      const reached = [];
+      const nativeFn = (name) => () => { reached.push(name); };
+      const make = (prefix) => ({
+        tabs: { group: nativeFn(prefix + 'tabs.group'), create: nativeFn(prefix + 'tabs.create') },
+        windows: { create: nativeFn(prefix + 'windows.create') },
+        tabGroups: { update: nativeFn(prefix + 'tabGroups.update') },
+        commands: { getAll: nativeFn(prefix + 'commands.getAll') },
+        sidePanel: { open: nativeFn(prefix + 'sidePanel.open') },
+      });
+      const chrome = make('');
+      const browser = separate ? make('browser.') : Object.assign({}, chrome);
+      const sandbox = { chrome, browser, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Proxy };
+      sandbox.self = sandbox;
+      vm.createContext(sandbox);
+      vm.runInContext(read('page_transport.js'), sandbox);
+      if (how === 'core') vm.runInContext(read('core.js'), sandbox);
+      if (how === 'defer') vm.runInContext(`(function (root, install) {\n${read('page_defer.js')}\n})(self, function () { throw new Error('install ran'); });`, sandbox);
+      if (how === 'transport') vm.runInContext('self.__nautilusRefuseNative();', sandbox);
+      for (const api of [chrome, browser]) {
+        for (const call of [
+          () => api.tabs.group({ tabIds: [1] }),
+          () => api.tabs.create({}),
+          () => api.windows.create({}),
+          () => api.tabGroups.update(1, {}),
+          () => api.commands.getAll(),
+          () => api.sidePanel.open({ windowId: 1 }),
+        ]) {
+          await assert.rejects(Promise.resolve().then(call), /is not supported in this page\./);
+        }
+      }
+      assert.deepEqual(reached, [], `the refusal left a native call callable (${how}, ${separate ? 'separate' : 'alias'})`);
+      for (const name of ['tabs', 'windows', 'tabGroups', 'commands', 'sidePanel']) {
+        assert.equal(browser[name], chrome[name], name);
+        for (const api of [chrome, browser]) {
+          assert.throws(() => Object.defineProperty(api, name, { value: {}, writable: true, enumerable: true, configurable: true }), TypeError);
+        }
+      }
+    }
+  }
+  // A page with only `browser` refused, and one with neither: no throw.
+  const only = { browser: { tabs: { group() { throw new Error('native'); } } }, console: { error() {}, log() {} }, Promise, Object, Error, String, Proxy };
+  only.self = only;
+  vm.createContext(only);
+  vm.runInContext(read('page_transport.js'), only);
+  vm.runInContext('self.__nautilusRefuseNative();', only);
+  await assert.rejects(Promise.resolve().then(() => only.browser.tabs.group({})), /is not supported in this page\./);
 }
 // window.close() in an extension page. An extension with the "sidePanel"
 // permission asks the engine first, for at most half a second: a side

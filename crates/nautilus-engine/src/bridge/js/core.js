@@ -1,5 +1,6 @@
 // The bridge's core: replaces whole chrome.* namespaces in an extension
-// context and routes their calls to the engine. It needs two functions in
+// context, on `chrome` and on the `browser` global beside it, and routes
+// their calls to the engine. It needs two functions in
 // scope, which the transport for this kind of context defines first:
 //   __bridgeCall(namespace, method, args) -> Promise (rejects with an Error
 //     whose message is the engine's)
@@ -205,9 +206,78 @@
     return target;
   }
 
-  // Replace chrome[namespace]. The property is redefined so that Chromium
-  // cannot put its own back; where the property cannot be redefined, the
-  // namespace object's own members are replaced one by one instead.
+  // The second global of an extension context. Chromium 156 sets every API
+  // on `chrome` and again on `browser`, each a lazy property that answers
+  // the context's one cached object for that API
+  // (NativeExtensionBindingsSystem::UpdateBindingsForContext, GetAPIHelper):
+  // so before the bridge runs `browser.tabs` is `chrome.tabs`, and after a
+  // replacement of `chrome.tabs` alone it would still be Chromium's. Null
+  // where the context has none.
+  var twin = (function () {
+    var other = root.browser;
+    return other && (typeof other === 'object' || typeof other === 'function') && other !== chrome ? other : null;
+  })();
+
+  // Chromium's own object under `name` is one object on both globals, and
+  // what the bridge wraps of it (runtime's getContexts, onMessage and
+  // onConnect, the debugger's attach and detach) it wraps on that object. A
+  // context where `browser` has another object would keep an unwrapped one:
+  // it is given chrome's.
+  function same(name) {
+    if (!twin || !chrome[name] || twin[name] === chrome[name]) { return; }
+    console.error('nautilus-bridge: browser.' + name + ' is not chrome.' + name + ' in this context; made the same');
+    try {
+      Object.defineProperty(twin, name, { value: chrome[name], enumerable: true, configurable: true, writable: true });
+    } catch (e) {
+      console.error('nautilus-bridge: cannot make browser.' + name + ' chrome.' + name + ': ' + e);
+    }
+  }
+  same('runtime');
+  same('debugger');
+
+  // Every member of `own`, an object of Chromium's that its global does not
+  // let go of, replaced in place: the replacement's members, a rejection for
+  // any other function and an inert event for any other event.
+  function replaceMembers(namespace, own, replacement) {
+    var members = {};
+    Object.keys(own).forEach(function (key) {
+      if (typeof own[key] === 'function') { members[key] = unsupported(namespace, key); }
+      else if (isEvent(own[key])) { members[key] = new BridgeEvent(null); }
+    });
+    Object.keys(replacement).forEach(function (key) { members[key] = replacement[key]; });
+    Object.keys(members).forEach(function (key) {
+      Object.defineProperty(own, key, {
+        value: members[key], enumerable: true, configurable: false, writable: false
+      });
+    });
+  }
+
+  // Put `replacement` in place of Chromium's `namespace`, on `chrome` and on
+  // `browser`: the one place a namespace is replaced, for `define` and for
+  // the hand-written sidePanel. Each property is redefined so that Chromium
+  // cannot put its own back (it defines every API again on both globals when
+  // the set of extensions changes); where a property cannot be redefined,
+  // the object it holds has its members replaced one by one instead.
+  // `browser` gets the very object `chrome` ends up with.
+  function pin(namespace, replacement) {
+    [chrome, twin].forEach(function (holder) {
+      if (!holder) { return; }
+      var held = holder === chrome ? replacement : chrome[namespace];
+      try {
+        Object.defineProperty(holder, namespace, {
+          value: held, enumerable: true, configurable: false, writable: false
+        });
+      } catch (e) {
+        var own = holder[namespace];
+        if (own === held) { return; }
+        if (!own || (typeof own !== 'object' && typeof own !== 'function')) { throw e; }
+        replaceMembers(namespace, own, replacement);
+      }
+    });
+  }
+
+  // Replace the namespace on `chrome` and on `browser` (`pin`), keeping
+  // Chromium's own functions, bound, for the calls the engine forwards.
   function define(namespace, spec) {
     var original = chrome[namespace];
     var source = {};
@@ -218,19 +288,7 @@
       });
     }
     native[namespace] = source;
-    var replacement = build(namespace, spec, source);
-    try {
-      Object.defineProperty(chrome, namespace, {
-        value: replacement, enumerable: true, configurable: false, writable: false
-      });
-    } catch (e) {
-      if (!original) { throw e; }
-      Object.keys(replacement).forEach(function (key) {
-        Object.defineProperty(original, key, {
-          value: replacement[key], enumerable: true, configurable: false, writable: false
-        });
-      });
-    }
+    pin(namespace, build(namespace, spec, source));
     bridge.installed.push(namespace);
   }
 
@@ -253,6 +311,7 @@
     run: run,
     bridged: bridged,
     define: define,
+    pin: pin,
     BridgeEvent: BridgeEvent,
     installed: []
   };

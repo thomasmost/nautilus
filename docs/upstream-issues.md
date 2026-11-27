@@ -444,8 +444,9 @@ or the two `blink` lists. Re-check on a CEF bump by running with
 
 The bridge replaces `chrome.tabs`, `chrome.windows`, `chrome.tabGroups`,
 `chrome.commands` and `chrome.sidePanel` in every context of a bridged
-extension and makes each property non-configurable (`define` in
-`bridge/js/core.js`, `js/side_panel.js`), because Chromium defines every
+extension, and the same names on `browser` (below), and makes each
+property non-configurable (`pin` in `bridge/js/core.js`, for `define`
+and `js/side_panel.js`), because Chromium defines every
 API on `chrome` again in each live context whenever the set of
 extensions or an extension's permissions change, and a configurable
 property would be Chromium's own once more.
@@ -475,7 +476,8 @@ names sort before the first pinned one and stops there: with the
 `alarms`, `bookmarks`, ...), else `sidePanel`, `tabGroups` or `tabs`.
 The loop over the developer-mode-restricted features and the
 `browser.devtools` accessor, both after it in the function, are not
-reached either. What a context already had is untouched: the lazy
+reached either, nor is `browser`'s own property of the pinned name
+(each API is set on `chrome` first, and the function returns there). What a context already had is untouched: the lazy
 properties set when the context was created stay.
 
 **Inferred, not seen:** an API that becomes available to a live context
@@ -488,39 +490,76 @@ reloads). No run here granted a permission to a live context. The log
 line itself is in the scripted runs' browser logs
 (`native_extension_bindings_system.cc:769`).
 
-**`browser` is not bridged (read, then seen).** The same function
-defines every API a second time on a global `browser` object in an
-extension context (`set_accessor_on_browser`, with the same
-`BindingAccessor`), so `browser.tabs` is Chromium's own namespace
-object, the one `chrome.tabs` was before the bridge replaced the
-property. The bridge replaces only `chrome.<name>`. Seen on 2026-11-27
-in the bundle of this tree (CEF 156, `panel.sh groups`, a note of the
-test extension's worker): `browser` is an object, `browser.tabs`,
-`browser.tabGroups` and `browser.sidePanel` are not `chrome`'s, and
-`browser.tabs.group` is a function. Nothing called it. An extension
-that calls `browser.tabs.group(...)` or `browser.tabs.create(...)`
-therefore reaches Chromium's own implementation (C11 ends the browser
-process; C12 opens a Chromium window), and its `browser.sidePanel` is
-Chromium's, which has nowhere to open (C13). Not fixed here.
+**`browser` is bridged with `chrome` (read, seen, fixed 2026-11-27).**
+The same function defines every API a second time on a global `browser`
+object in an extension context, ungated (`if (extension &&
+extension->is_extension()) { set_accessor_on_browser = true; }`; the
+feature `kExtensionBrowserNamespaceOnWebPages` gates it only for web
+pages), with the same `BindingAccessor`:
+
+```
+v8::Maybe<bool> browser_success = (*browser)->SetLazyDataProperty(
+    v8_context, api_name, &BindingAccessor, api_name);
+```
+
+`BindingAccessor` answers `GetAPIHelper(context, api_name)`, the
+context's one cached object for that API (`data->api_object`). So
+`browser` is another object than `chrome`, and `browser.<name>` is the
+object `chrome.<name>` is: until the bridge replaces the property on
+`chrome`, after which `browser.<name>` was still Chromium's own. Seen
+on 2026-11-27 in the bundle (CEF 156, `panel.sh panel` and `groups`
+before the fix, the test extension's worker, both panel pages, and
+again after a second extension was installed mid-run): `browser` is an
+object and not `chrome`; `browser.tabs`, `windows`, `tabGroups`,
+`commands` and `sidePanel` were not `chrome`'s, each a configurable,
+writable data property; `browser.tabs.query({})` answered Chromium's one
+tab (the hidden management browser, in a Chromium window id) where
+`chrome.tabs.query({})` answered the strip's two. `browser.runtime` is
+`chrome.runtime` (the same object: `getContexts`, `onMessage`,
+`onConnect`, `sendMessage` and `connect` are the same), and
+`browser.debugger` is `chrome.debugger`. This held on `main` since the
+Chromium 156 bump, for `tabs` and `windows` too: an extension built on
+a layer that prefers `globalThis.browser` reached C11, C12 and C13
+through it.
+
+The fix is in the one place a namespace is replaced (`pin` in
+`bridge/js/core.js`, which `define` and the hand-written
+`js/side_panel.js` both call): the replacement is defined on `chrome`
+and the same object on `browser`, each property not configurable and
+not writable; where a property cannot be redefined, the object it holds
+has every member replaced in place. What the bridge wraps on Chromium's
+own `runtime` and `debugger` objects it wraps on the object itself, so
+it holds for `browser` because the object is one; a context where
+`browser.runtime` or `browser.debugger` were another object is given
+`chrome`'s, with a logged error (`same` in `core.js`; not seen). The
+fail-closed path (`__nautilusRefuseNative` in `js/page_transport.js`)
+refuses both globals with one object, pinned. On an update the function
+above sets `chrome` first and returns at the first pinned name, so it
+never reaches `browser`'s property of that name; the scripted runs
+assert `browser.<name> === chrome.<name>`, the pin, and a
+`browser.tabs.query` answered from the strip, in the worker and a panel
+page before and after a second extension is installed mid-run
+(`panel.sh panel`), and in `phase5.py`'s worker and page. A content
+script has `browser` and `chrome`, and neither has any of the five
+namespaces (seen in the same run), so nothing is replaced there.
 
 **Blocks:** optional permissions taking effect in a live bridged
-context without a restart of that context (inferred); and every bridged
-namespace for an extension that reaches it as `browser.<name>` (seen
-that it is Chromium's; no such extension was run). **Workaround:**
-none in place. A different pin was looked for in the source and there
-is none on `chrome` itself: only a non-configurable own property makes
-`SetLazyDataProperty` leave a property alone, and exactly that is the
-failure the function returns on. What the source does allow: leave
-`chrome.<name>` configurable and replace the members of Chromium's own
-namespace object in place (what `define` already does where the
-property cannot be redefined). `BindingAccessor` answers the context's
-cached object (`GetAPIHelper`, `data->api_object`) on every redefinition,
-so the replaced members would survive an update, no `SetLazyDataProperty`
-would fail, and `browser.<name>`, the same object, would be covered too.
-Not implemented and not tried: it rests on Chromium's namespace objects
-accepting `Object.defineProperty` on their members, which the fallback
-path has only ever met in `ci/side-panel/bridge_check.mjs`'s stand-in.
-Re-check on a CEF bump: the early `return` and the sort.
+context without a restart of that context (inferred). **Workaround:**
+none in place for that. A different pin was looked for in the source
+and there is none on `chrome` itself: only a non-configurable own
+property makes `SetLazyDataProperty` leave a property alone, and
+exactly that is the failure the function returns on. What the source
+does allow: leave `chrome.<name>` and `browser.<name>` configurable and
+replace the members of Chromium's own namespace object in place (what
+`pin` already does where a property cannot be redefined).
+`BindingAccessor` answers the context's cached object on every
+redefinition, so the replaced members would survive an update and no
+`SetLazyDataProperty` would fail. Not implemented and not tried: it
+rests on Chromium's namespace objects accepting `Object.defineProperty`
+on their members, which the fallback path has only ever met in
+`ci/side-panel/bridge_check.mjs`'s stand-in. Re-check on a CEF bump: the
+early `return`, the sort, that `chrome` is set before `browser`, and
+that the two share one object per API.
 
 ### C4: Chromium's extension dialogs crash a windowless browser
 

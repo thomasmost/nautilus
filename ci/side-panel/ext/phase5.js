@@ -168,6 +168,16 @@
       await chrome.tabs.remove(copy.id);
       out.countAfterRemove = (await chrome.tabs.query({})).length;
       out.getRemoved = await chrome.tabs.get(copy.id).then(function () { return 'resolved'; }, message);
+      // `browser`, the second global beside `chrome`: its bridged
+      // namespaces are chrome's own objects, so a call through it is the
+      // bridge's too (docs/upstream-issues.md, C19).
+      var b = self.browser;
+      out.browser = !b ? null : {
+        tabs: b.tabs === chrome.tabs,
+        windows: b.windows === chrome.windows,
+        tabGroups: b.tabGroups === chrome.tabGroups,
+        query: await b.tabs.query({}).then(function (tabs) { return tabs.length; }, message)
+      };
       return out;
     });
     await step('remove', async function () {

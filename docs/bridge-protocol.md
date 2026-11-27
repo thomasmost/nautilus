@@ -512,7 +512,8 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   and its `tabGroups` and `commands` where it has them, are replaced with
   namespaces that refuse every call (`page_transport.js`,
   `__nautilusRefuseNative`), so a native `tabs.group` or `tabGroups.update`
-  is never called.
+  is never called; its `sidePanel` too, and all of them on `browser` as on
+  `chrome`.
 - A message from a tab (`sender.tab`) is delivered synchronously, so Chromium gets
   the answer to its keep-open question at once: the wrapper returns true only when a
   listener of this context kept the channel open (returned true or a promise). A
@@ -1175,8 +1176,10 @@ for)`.
 **Fail closed.** No call of these namespaces reaches Chromium: the
 scripts leave no function of Chromium's in a replaced namespace
 (`define`), the router rejects what it does not name, and a page whose
-bridge cannot be put in has its `tabGroups` and `commands` refused with
-its `tabs` and `windows` (`__nautilusRefuseNative`). The tests are
+bridge cannot be put in has its `tabGroups`, `commands` and `sidePanel` refused with
+its `tabs` and `windows` (`__nautilusRefuseNative`), on `chrome` and on
+`browser`: every replacement goes through `pin` (below), which covers
+both globals. The tests are
 `every_function_of_a_replaced_namespace_is_ours` and
 `tab_groups_and_commands_are_replaced_whole_and_refused_when_they_cannot_be`
 (`bridge/mod.rs`), `group_calls_and_the_command_listing_are_routed`
@@ -1187,6 +1190,28 @@ still refuses.
 
 
 ## How a later phase adds a namespace
+
+**A namespace is replaced on both globals, in one place.** Chromium 156
+gives an extension context `browser` beside `chrome`, with every API
+set on both (`docs/upstream-issues.md`, C19). `__nautilusBridge.pin(name,
+replacement)` in `js/core.js` is the only code that puts a replacement
+in: it defines it on `chrome` and the same object on `browser` (where
+the context has one), not configurable and not writable, and where a
+property cannot be redefined it replaces every member of the object the
+property holds (the replacement's members, a rejection for any other
+function, an inert event for any other event). `define` calls it, and
+so does the hand-written `sidePanel`; no namespace script sets a
+property of `chrome` or `browser` itself (a test holds them to that).
+So `browser.tabs === chrome.tabs` in a bridged context, and likewise
+`windows`, `tabGroups`, `commands` and `sidePanel`; a context without
+`browser` gains none. What the bridge wraps without replacing
+(`runtime.getContexts`, `runtime.onMessage`, the worker's
+`runtime.onConnect`, `debugger.attach` and `detach`) it wraps on
+Chromium's own object, which is one object for both globals;
+`core.js`'s `same` gives `browser` `chrome`'s object should the two
+ever differ. The fail-closed refusal (`__nautilusRefuseNative`) covers
+both globals and `sidePanel`, with one refusing object per namespace,
+pinned.
 
 1. A file under `bridge/js/` calls `__nautilusBridge.define('<name>', { bridged, optional, direct, events, nativeEvents })` (the comment on `define` in `js/core.js` says what each list does; `js/tabs.js` and `js/windows.js` are the examples). `bridged` names the functions the engine answers, `optional` the same where Chromium defines them, `direct` Chromium's own functions, called bound, `events` the events the engine fires, `nativeEvents` Chromium's events, kept.
 2. Its name is added to `namespaces_script()` in `bridge/mod.rs`, so the file's text follows the others in a worker's and a page's script.

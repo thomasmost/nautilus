@@ -120,36 +120,14 @@
       onClosed: new bridge.BridgeEvent('sidePanel.onClosed'),
     };
 
-    // Not configurable, as `define` leaves a namespace (js/core.js):
-    // Chromium defines every API on `chrome` again in each live context
-    // when the set of extensions changes, and a configurable property is
-    // then its own once more, for good.
-    try {
-      Object.defineProperty(chrome, 'sidePanel', {
-        value: Object.freeze(api),
-        configurable: false,
-        enumerable: true,
-        writable: false,
-      });
-    } catch (e) {
-      // The property cannot be redefined: Chromium's own object stays,
-      // with every member of it replaced. A function of Chromium's that
-      // is not one of the engine's rejects, as in a `define`d namespace.
-      const members = Object.assign({}, api);
-      for (const key of Object.keys(native)) {
-        if (typeof native[key] === 'function' && !(key in members)) {
-          members[key] = () => Promise.reject(new Error(`sidePanel.${key} is not supported.`));
-        }
-      }
-      for (const key of Object.keys(members)) {
-        Object.defineProperty(native, key, {
-          value: members[key],
-          configurable: false,
-          enumerable: true,
-          writable: false,
-        });
-      }
-    }
+    // Put in place by the core's `pin`, as `define` puts a namespace: on
+    // `chrome` and on `browser`, not configurable (Chromium defines every
+    // API again in each live context when the set of extensions changes,
+    // and a configurable property is then its own once more, for good).
+    // Where a property cannot be redefined, Chromium's own object stays
+    // with every member of it replaced, and a function of Chromium's that
+    // is not one of the engine's rejects.
+    bridge.pin('sidePanel', Object.freeze(api));
   }
 
   // chrome.runtime.getContexts. The bridge's own relay page, which Chromium

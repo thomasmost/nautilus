@@ -171,6 +171,10 @@ def ps_children(parent):
     return found
 
 
+# The namespaces the bridge replaces on `chrome`, and so on `browser`.
+REPLACED = ("tabs", "windows", "tabGroups", "commands", "sidePanel")
+
+
 class Harness:
     def __init__(self, mode, args):
         self.mode = mode
@@ -193,6 +197,7 @@ class Harness:
         self.pid = None  # the launched browser's, for its window
         self.window = None  # the CGWindowID of the browser's window, for captures
         self.window_tool = None
+        self.facts_seen = set()  # the contexts whose `browser` facts were judged
 
     # --- results ---------------------------------------------------------
 
@@ -386,6 +391,8 @@ class Harness:
                     self.note(str(data))
                 elif kind == "contexts":
                     self.note("getContexts({}) as the worker got it: " + json.dumps(data))
+                elif kind == "browser-facts":
+                    self.browser_facts(data)
                 elif kind == "sidepanel-info":
                     self.note("chrome.sidePanel in %s: %s" % (data.get("context"), json.dumps(data.get("info"))))
                 elif kind == "checkpoint":
@@ -401,6 +408,47 @@ class Harness:
             time.sleep(0.2)
         self.check("the suite finished", False, "timed out")
         return False
+
+    def browser_facts(self, data):
+        """Judge what a context says of its `browser` global
+        (panel-ext/browser-facts.js), once per context name. In a worker and
+        in an extension page every namespace the bridge replaces on `chrome`
+        must be the same object on `browser`, pinned, and a call through it
+        answered by the bridge; a content script has none of them."""
+        context = str(data.get("context"))
+        if context in self.facts_seen:
+            return
+        self.facts_seen.add(context)
+        facts = data.get("facts") or {}
+        query = data.get("query")
+        self.note("`browser` in %s: %s; tabs.query through each: %s"
+                  % (context, json.dumps(facts, sort_keys=True), json.dumps(query)))
+        spaces = facts.get("namespaces") or {}
+        if context == "content script":
+            has = sorted(name for name in REPLACED
+                         if (spaces.get(name) or {}).get("chrome", "undefined") != "undefined"
+                         or (spaces.get(name) or {}).get("browser", "undefined") != "undefined")
+            self.check("a content script has none of the bridged namespaces, on chrome or on browser", not has, has)
+            return
+        self.check(f"`browser` exists in {context}", facts.get("browser") == "object", facts.get("browser"))
+        there = [name for name in REPLACED if (spaces.get(name) or {}).get("chrome") == "object"]
+        apart = [name for name in there if spaces[name].get("same") is not True]
+        self.check(f"in {context} browser.<name> is chrome.<name> for every bridged namespace", bool(there) and not apart,
+                   {"apart": apart, "present": there})
+        loose = [name for name in there
+                 if (spaces[name].get("onBrowser") or {}).get("kind") != "data"
+                 or (spaces[name].get("onBrowser") or {}).get("configurable") is not False]
+        self.check(f"in {context} each of them is pinned on browser as on chrome", bool(there) and not loose,
+                   {name: spaces[name].get("onBrowser") for name in loose})
+        runtime = facts.get("runtime") or {}
+        members = ("getContexts", "onConnect", "onMessage", "sendMessage", "connect")
+        unlike = [m for m in members if (runtime.get(m) or {}).get("same") is not True]
+        self.check(f"in {context} browser.runtime's getContexts, onMessage and onConnect are chrome.runtime's",
+                   not unlike and runtime.get("onConnectAddListener") is True, {"unlike": unlike, "runtime": runtime})
+        ours = isinstance(query, dict) and isinstance(query.get("browser"), list) and len(query["browser"]) >= 2 \
+            and query["browser"] == query.get("chrome") \
+            and all(isinstance(t[1], int) and t[1] >= 0 and isinstance(t[2], int) and t[2] >= 1 for t in query["browser"])
+        self.check(f"in {context} browser.tabs.query is answered by the bridge, with the strip's tabs", ours, query)
 
     def finish(self):
         """Wait for the browser to end by itself and judge the launch."""

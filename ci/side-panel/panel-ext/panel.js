@@ -41,6 +41,7 @@ function record(kind, data) {
 // What this page's chrome.sidePanel is: the engine's object (frozen, a
 // property of `chrome` that cannot be redefined) or Chromium's own.
 function describe(context) {
+  self.browserQuery().then((query) => record('browser-facts', { context, facts: self.browserFacts(), query }));
   const sp = chrome.sidePanel;
   const descriptor = Object.getOwnPropertyDescriptor(chrome, 'sidePanel') || {};
   record('sidepanel-info', {

@@ -8,6 +8,7 @@
 // the file does nothing when no harness is listening.
 (function () {
   'use strict';
+  importScripts('/browser-facts.js');
   const HARNESS = 'http://127.0.0.1:47616';
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const post = (kind, data) =>
@@ -64,6 +65,11 @@
       installed: self.__nautilusBridge ? self.__nautilusBridge.installed : null,
     };
   }
+
+  // This context's `browser` beside `chrome` (browser-facts.js), for the
+  // harness to judge.
+  const reportBrowser = async (context) =>
+    post('browser-facts', { context, facts: self.browserFacts(), query: await self.browserQuery() });
 
   const opened = [];
   const closed = [];
@@ -123,6 +129,7 @@
     });
     step('two tabs', tabs.length === 2, tabs.map((t) => t.url));
     post('sidepanel-info', { context: 'worker', info: describeSidePanel() });
+    await reportBrowser('worker');
     step('the bridge owns chrome.sidePanel', Object.isFrozen(sp) && typeof sp.getLayout === 'function');
     sp.onOpened.addListener((info) => opened.push(info));
     sp.onClosed.addListener((info) => closed.push(info));
@@ -271,6 +278,7 @@
     await checkpoint('bystander');
     const still = await rejection(chrome.sidePanel.open({}));
     post('sidepanel-info', { context: 'worker, after another extension was installed', info: describeSidePanel() });
+    await reportBrowser('worker, after another extension was installed');
     step(
       "after another extension is installed chrome.sidePanel is still the engine's in the worker",
       Object.isFrozen(chrome.sidePanel) && still === 'At least one of `tabId` and `windowId` must be provided',
@@ -432,22 +440,9 @@
     const shape = (title) => ({ id: null, collapsed: false, color: 'grey', title, windowId: window, shared: false });
     const is = (group, id, title) => same(group, { ...shape(title), id });
 
-    // Recorded, not judged (docs/upstream-issues.md, C19): whether this
-    // build gives an extension a `browser` object beside `chrome`, and
-    // whether its namespaces are the bridge's. Nothing of it is called.
-    const b = self.browser;
-    post(
-      'note',
-      'the worker\'s `browser`: ' +
-        (b && typeof b === 'object'
-          ? JSON.stringify({
-              tabsIsChromeTabs: b.tabs === chrome.tabs,
-              tabsGroup: b.tabs ? typeof b.tabs.group : 'no tabs',
-              tabGroupsIsChromes: b.tabGroups === chrome.tabGroups,
-              sidePanelIsChromes: b.sidePanel === chrome.sidePanel,
-            })
-          : typeof b)
-    );
+    // `browser` beside `chrome` (docs/upstream-issues.md, C19): the
+    // harness judges that its namespaces are the bridge's too.
+    await reportBrowser('worker');
     step('the tab starts in no group', active.groupId === tg.TAB_GROUP_ID_NONE, active.groupId);
     // What a panel opening does first.
     const id = await chrome.tabs.group({ tabIds: [active.id], createProperties: { windowId: window } }).catch((error) => error.message);

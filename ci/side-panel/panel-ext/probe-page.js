@@ -6,6 +6,11 @@
 (function () {
   'use strict';
   if (window !== window.top) return;
+  // Once: what this isolated world has of `browser` and of the namespaces
+  // the bridge replaces in the extension's own contexts (none is expected).
+  chrome.runtime
+    .sendMessage({ report: { kind: 'browser-facts', data: { context: 'content script', facts: self.browserFacts(), query: null } } })
+    .catch(() => {});
   setInterval(() => {
     chrome.runtime
       .sendMessage({
