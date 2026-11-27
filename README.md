@@ -32,9 +32,11 @@ this repository holds only what is Chromium's.
   renderer processes. A renderer that crashes shows an error panel in that
   tab with the reason; every other tab keeps working.
 - **Multi-select tabs.** Cmd/Ctrl-click and Shift-click select several
-  tabs, then drag them together onto another window or onto the desktop
-  for a new one, or right-click to close them all, move them to a window,
-  or open them in another profile.
+  tabs, then drag them together along the strip, onto another window's
+  strip, or off the strip for a window of their own, or right-click to
+  close them all, move them to a window, or open them in another
+  profile. A folder is dragged by its chip the same way (osmena's README
+  has the rules and the limits).
 - **Profiles.** Each profile has its own settings, cookies, and local
   storage, and a name, a colour and an avatar. The avatar at the
   toolbar's end opens the Profiles menu (also in the macOS menu bar),
@@ -321,10 +323,13 @@ engine glue. Each item must pass.
    profile directory). Right-click an unselected tab: it becomes the active
    and only selected tab and the menu says "Close tab". Open a second window
    with Cmd+N, select two tabs in the first, and drag one of them onto the
-   second window: both appear at the end of its strip (reloaded, with the
-   previously active one active) and leave the first. Drag a tab onto the
-   desktop: it opens in a new window. Dropping within the same window does
-   nothing. "Open tab in profile" opens that profile's window (or a tab
+   second window's strip between two tabs: both land there (reloaded, with
+   the previously active one active) and leave the first; dropped on its
+   page they go to the end. Drag a tab from its middle along the strip: it
+   reorders and the window does not move (on macOS the window moves by the
+   grip right of the "+"). Drag a tab down off the strip and let go: it
+   opens in a new window under the pointer. Drag a folder's chip: the
+   folder moves whole. Escape mid-drag puts everything back. "Open tab in profile" opens that profile's window (or a tab
    in it, if it is open) with the tab's URL and closes the tab here. Both this menu and the "☰"
    menu are the system's own popup menus.
 5. **Crashed tab.** Open `chrome://crash` in a tab: the tab's error panel
