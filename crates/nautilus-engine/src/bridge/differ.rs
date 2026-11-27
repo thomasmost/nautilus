@@ -5,13 +5,16 @@
 //!
 //! The order is fixed and documented in the bridge protocol: replaced
 //! ids, new windows, removed tabs, detached, created, attached, moved,
-//! activated (with highlighted), updated, removed windows, focus.
+//! activated (with highlighted), updated, removed windows, focus; with
+//! the tab groups that now exist ahead of all of it, and the groups that
+//! changed or went after it.
 
 use std::collections::{HashMap, HashSet};
 
 use osmena_core::{TabId, WindowId};
 use serde_json::{Map, Value, json};
 
+use super::groups;
 use super::ids::{self, IdSpace, WINDOW_ID_NONE, group_id, window_id};
 use super::shape::{View, status};
 use super::snapshot::{SnapTab, Snapshot};
@@ -77,6 +80,9 @@ pub(crate) enum StripEvent {
     },
     WindowRemoved(WindowId),
     FocusChanged(Option<WindowId>),
+    /// A folder came, changed or went (`groups::group_events`): the
+    /// `chrome.tabGroups` event, with the group's object.
+    Group(groups::GroupEvent),
 }
 
 /// Where each tab is: its window and index.
@@ -105,7 +111,18 @@ pub(crate) fn diff(
 ) -> Vec<StripEvent> {
     let before = places(prev);
     let after = places(next);
-    let mut events = Vec::new();
+    // The group events go around the tab events: a group exists before a
+    // tab is said to be in it, and is gone after the tab event that
+    // emptied it.
+    let group_events = groups::group_events(
+        &groups::GroupView::of(prev, ids),
+        &groups::GroupView::of(next, ids),
+    );
+    let mut events: Vec<StripEvent> = group_events
+        .before
+        .into_iter()
+        .map(StripEvent::Group)
+        .collect();
 
     // A tab extensions already knew has another id now.
     for change in replaced {
@@ -253,6 +270,7 @@ pub(crate) fn diff(
     if focused(prev) != focused(next) {
         events.push(StripEvent::FocusChanged(focused(next)));
     }
+    events.extend(group_events.after.into_iter().map(StripEvent::Group));
     events
 }
 
@@ -409,6 +427,11 @@ pub(crate) fn render(event: &StripEvent, view: &View) -> Option<(&'static str, V
             "windows.onFocusChanged",
             vec![json!(window.map_or(WINDOW_ID_NONE, window_id))],
         ),
+        StripEvent::Group(group) => match group {
+            groups::GroupEvent::Created(object)
+            | groups::GroupEvent::Updated(object)
+            | groups::GroupEvent::Removed(object) => (group.name(), vec![object.clone()]),
+        },
     })
 }
 
@@ -419,6 +442,7 @@ mod tests {
 
     use super::StripEvent::*;
     use super::*;
+    use crate::bridge::groups;
     use crate::bridge::ids::{IdSpace, SYNTHETIC_BASE};
     use crate::bridge::pattern::Grants;
     use crate::bridge::shape::View;
@@ -871,5 +895,124 @@ mod tests {
         assert_eq!(render(&only_url, &blind), None);
         // An event about a tab that is gone again renders nothing.
         assert_eq!(render(&TabCreated(TabId(99)), &view), None);
+    }
+
+    /// One focused window, id 1, with `tabs` as (tab id, folder id) in
+    /// strip order and `folders` as (id, name, expanded).
+    fn strip(tabs: &[(u64, Option<u64>)], folders: &[(u64, &str, bool)]) -> Snapshot {
+        let mut one = window(1, true, vec![]);
+        one.tabs = tabs
+            .iter()
+            .map(|&(id, folder)| {
+                let mut t = tab(id, "t");
+                t.folder = folder.map(FolderId);
+                t
+            })
+            .collect();
+        one.folders = folders
+            .iter()
+            .map(|&(id, name, expanded)| osmena_core::Folder {
+                id: FolderId(id),
+                name: name.to_string(),
+                expanded,
+            })
+            .collect();
+        snapshot(vec![one])
+    }
+
+    /// The rendered names of the events from `prev` to `next`, for an
+    /// extension with `grants`.
+    fn names(prev: &Snapshot, next: &Snapshot, grants: &Grants) -> Vec<&'static str> {
+        let (events, ids) = run(prev, next);
+        let view = View {
+            snapshot: next,
+            ids: &ids,
+            grants,
+            last_focused: None,
+            panels: &std::collections::HashMap::new(),
+            facts: &crate::bridge::NO_FACTS,
+        };
+        events
+            .iter()
+            .filter_map(|event| render(event, &view))
+            .map(|(name, _)| name)
+            .collect()
+    }
+
+    #[test]
+    fn group_events_surround_the_tab_events_of_the_same_change() {
+        let grants = Grants::default();
+        let session = [(7, "Probe Session", true)];
+        assert_eq!(
+            names(
+                &strip(&[(1, None), (2, None)], &[]),
+                &strip(&[(1, Some(7)), (2, Some(7))], &session),
+                &grants
+            ),
+            ["tabGroups.onCreated", "tabs.onUpdated", "tabs.onUpdated"]
+        );
+        // The last tab of the folder closes: the tab's removal, then the
+        // group's.
+        assert_eq!(
+            names(
+                &strip(&[(1, None), (2, Some(7))], &session),
+                &strip(&[(1, None)], &[]),
+                &grants
+            ),
+            ["tabs.onRemoved", "tabGroups.onRemoved"]
+        );
+        // The last tab is ungrouped: its groupId goes first.
+        assert_eq!(
+            names(
+                &strip(&[(1, None), (2, Some(7))], &session),
+                &strip(&[(1, None), (2, None)], &[]),
+                &grants
+            ),
+            ["tabs.onUpdated", "tabGroups.onRemoved"]
+        );
+        // Renamed and collapsed by the user: one update, and no tab event.
+        assert_eq!(
+            names(
+                &strip(&[(1, None), (2, Some(7))], &session),
+                &strip(&[(1, None), (2, Some(7))], &[(7, "Trip", false)]),
+                &grants
+            ),
+            ["tabGroups.onUpdated"]
+        );
+        // A group's object is the event's one argument.
+        let prev = strip(&[(1, None)], &[]);
+        let next = strip(&[(1, Some(7))], &session);
+        let (events, _) = run(&prev, &next);
+        assert_eq!(
+            events[0],
+            Group(groups::GroupEvent::Created(json!({
+                "id": 7, "collapsed": false, "color": "grey",
+                "title": "Probe Session", "windowId": 1, "shared": false
+            })))
+        );
+    }
+
+    #[test]
+    fn a_regrouped_tab_has_no_url_or_title_without_the_tabs_permission() {
+        let prev = strip(&[(1, None)], &[]);
+        let next = strip(&[(1, Some(7))], &[(7, "Probe Session", true)]);
+        let (events, ids) = run(&prev, &next);
+        let none = Grants::default();
+        let blind = View {
+            snapshot: &next,
+            ids: &ids,
+            grants: &none,
+            last_focused: None,
+            panels: &std::collections::HashMap::new(),
+            facts: &crate::bridge::NO_FACTS,
+        };
+        let regrouped = events
+            .iter()
+            .find(|e| matches!(e, TabUpdated { changed, .. } if changed.group))
+            .unwrap();
+        let (name, args) = render(regrouped, &blind).unwrap();
+        assert_eq!(name, "tabs.onUpdated");
+        assert_eq!(args[1], json!({ "groupId": 7 }));
+        assert!(args[2].get("url").is_none() && args[2].get("title").is_none());
     }
 }

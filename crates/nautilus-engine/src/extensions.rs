@@ -1542,6 +1542,7 @@ mod native {
                     facts.push((
                         id.clone(),
                         bridge::ExtensionFacts {
+                            name: name.clone(),
                             commands: manifest.commands.clone(),
                         },
                     ));

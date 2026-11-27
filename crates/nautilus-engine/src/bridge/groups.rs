@@ -8,9 +8,6 @@
 //! Nothing here knows the transport or CEF. The router hands in a
 //! [`GroupView`] cut from the published strip and the id space.
 
-// Until the router and the differ call it.
-#![allow(dead_code)]
-
 use osmena_core::{ExtensionRequest, Folder, FolderId, TabId};
 use serde_json::{Value, json};
 

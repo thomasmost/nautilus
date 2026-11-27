@@ -36,22 +36,61 @@ pub(crate) mod relay;
 
 pub(crate) use relay::Bridge;
 
-/// What the router reads about the extension a call comes from: its
-/// commands as the manifest declares them.
+/// What the router reads about the extension a call comes from: the name
+/// the model lists it under, and its commands as the manifest declares
+/// them.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ExtensionFacts {
+    pub name: String,
     pub commands: Vec<osmena_core::ExtensionCommand>,
 }
 
-/// The facts of an extension the engine does not list: no commands.
+impl ExtensionFacts {
+    /// The name the model builds "<name> Session" from: the extension's,
+    /// or its id when it is not listed.
+    pub(crate) fn name_or<'a>(&'a self, id: &'a str) -> &'a str {
+        if self.name.is_empty() { id } else { &self.name }
+    }
+}
+
+/// The facts of an extension the engine does not list: no name, no
+/// commands.
 pub(crate) static NO_FACTS: ExtensionFacts = ExtensionFacts {
+    name: String::new(),
     commands: Vec::new(),
 };
+
+impl groups::GroupView {
+    /// The strip as the group calls and the group events read it, with
+    /// window and tab ids as extensions know them.
+    pub(crate) fn of(snapshot: &snapshot::Snapshot, ids: &ids::IdSpace) -> groups::GroupView {
+        groups::GroupView {
+            windows: snapshot
+                .windows
+                .iter()
+                .map(|window| groups::GroupWindow {
+                    id: ids::window_id(window.id),
+                    folders: window.folders.clone(),
+                    tabs: window
+                        .tabs
+                        .iter()
+                        .map(|tab| groups::GroupTab {
+                            tab: tab.id,
+                            id: ids.ext(tab.id),
+                            folder: tab.folder,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
 
 const CORE_JS: &str = include_str!("js/core.js");
 const TABS_JS: &str = include_str!("js/tabs.js");
 const WINDOWS_JS: &str = include_str!("js/windows.js");
 const RUNTIME_JS: &str = include_str!("js/runtime.js");
+const TAB_GROUPS_JS: &str = include_str!("js/tab_groups.js");
 const COMMANDS_JS: &str = include_str!("js/commands.js");
 const SIDE_PANEL_JS: &str = include_str!("js/side_panel.js");
 // The page lane's transport script, which `pages::page_script` puts first in an
@@ -66,6 +105,7 @@ pub(crate) fn namespaces_script() -> String {
         TABS_JS,
         WINDOWS_JS,
         RUNTIME_JS,
+        TAB_GROUPS_JS,
         COMMANDS_JS,
         SIDE_PANEL_JS,
     ]
@@ -155,8 +195,8 @@ mod tests {
     use super::snapshot::Snapshot;
     use super::transport::{Asker, BridgeCall};
     use super::{
-        COMMANDS_JS, CORE_JS, NO_FACTS, PAGE_TRANSPORT_JS, RUNTIME_JS, SIDE_PANEL_JS, TABS_JS,
-        WINDOWS_JS, namespaces_script, worker_script,
+        COMMANDS_JS, CORE_JS, NO_FACTS, PAGE_TRANSPORT_JS, RUNTIME_JS, SIDE_PANEL_JS,
+        TAB_GROUPS_JS, TABS_JS, WINDOWS_JS, namespaces_script, worker_script,
     };
 
     /// The names in `key: ['a', 'b']` of a namespace script.
@@ -184,12 +224,10 @@ mod tests {
             panels: &std::collections::HashMap::new(),
             facts: &NO_FACTS,
         };
-        // Names the script sends to the engine that the router does not
-        // serve yet: the tab-groups change empties this list.
-        let later = ["group", "ungroup"];
         for (namespace, script) in [
             ("tabs", TABS_JS),
             ("windows", WINDOWS_JS),
+            ("tabGroups", TAB_GROUPS_JS),
             ("commands", COMMANDS_JS),
         ] {
             for method in list(script, "bridged")
@@ -207,9 +245,11 @@ mod tests {
                 };
                 let unrouted = router::route(&call, &view)
                     == Outcome::Reject(router::unsupported(namespace, &method));
+                // The one name the script sends that the router refuses
+                // on purpose: the model has no request that moves a folder.
                 assert_eq!(
                     unrouted,
-                    namespace == "tabs" && later.contains(&method.as_str()),
+                    (namespace, method.as_str()) == ("tabGroups", "move"),
                     "{namespace}.{method}"
                 );
             }
@@ -228,12 +268,48 @@ mod tests {
             TABS_JS,
             WINDOWS_JS,
             RUNTIME_JS,
+            TAB_GROUPS_JS,
             COMMANDS_JS,
             SIDE_PANEL_JS,
             PAGE_TRANSPORT_JS,
         ] {
             assert!(script.contains("'use strict';"));
         }
+    }
+
+    #[test]
+    fn tab_groups_and_commands_are_replaced_whole_and_refused_when_they_cannot_be() {
+        assert_eq!(
+            list(TAB_GROUPS_JS, "bridged"),
+            ["get", "query", "update", "move"]
+        );
+        assert_eq!(
+            list(TAB_GROUPS_JS, "events"),
+            ["onCreated", "onUpdated", "onMoved", "onRemoved"]
+        );
+        assert_eq!(list(COMMANDS_JS, "bridged"), ["getAll"]);
+        assert_eq!(list(COMMANDS_JS, "events"), ["onCommand"]);
+        // Nothing of either is Chromium's own function.
+        for script in [TAB_GROUPS_JS, COMMANDS_JS] {
+            assert!(list(script, "direct").is_empty());
+            assert!(list(script, "optional").is_empty());
+            assert!(list(script, "nativeEvents").is_empty());
+        }
+        // tabs.group and tabs.ungroup are the engine's too.
+        for method in ["group", "ungroup"] {
+            assert!(list(TABS_JS, "bridged").contains(&method.to_string()));
+        }
+        // Each is replaced only where Chromium defines it.
+        assert!(TAB_GROUPS_JS.contains("!root.chrome.tabGroups"));
+        assert!(COMMANDS_JS.contains("!root.chrome.commands"));
+        // A page whose bridge cannot be put in keeps none of the four.
+        assert!(PAGE_TRANSPORT_JS.contains("['tabs', 'windows', 'tabGroups', 'commands']"));
+        // Both come before the side panel's script, which is last.
+        let script = namespaces_script();
+        let at = |part: &str| script.find(part).expect("the script is there");
+        assert!(at(TABS_JS) < at(TAB_GROUPS_JS));
+        assert!(at(TAB_GROUPS_JS) < at(COMMANDS_JS));
+        assert!(at(COMMANDS_JS) < at(SIDE_PANEL_JS));
     }
 
     #[test]

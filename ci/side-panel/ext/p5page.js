@@ -11,7 +11,7 @@
     out.current = me && { id: me.id, index: me.index, windowId: me.windowId, active: me.active };
     out.activeCurrent = (await chrome.tabs.query({ active: true, currentWindow: true })).map(function (t) { return t.id; });
     out.window = (await chrome.windows.getCurrent()).id;
-    out.group = await chrome.tabs.group({ tabIds: [me.id] }).then(function () { return 'resolved'; }, function (e) { return e.message; });
+    out.group = await chrome.tabGroups.move(1, { index: 0 }).then(function () { return 'resolved'; }, function (e) { return e.message; });
   } catch (e) {
     out.error = String((e && e.message) || e);
   }

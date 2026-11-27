@@ -13,6 +13,7 @@ use osmena_core::{ExtensionReply, ExtensionRequest, TabId, WindowId};
 use serde_json::{Map, Value, json};
 use url::Url;
 
+use super::groups;
 use super::ids::{IdSpace, TAB_ID_NONE, WINDOW_ID_CURRENT, group_id, window_from, window_id};
 use super::pattern::{glob, matches_url};
 use super::shape::{View, status};
@@ -160,6 +161,10 @@ pub(crate) enum Then {
     /// `undefined` once the model is done: the answer of a call whose
     /// only effect is a request (`sidePanel.open`, `close`).
     Undefined,
+    /// A tab-group call's answer (`groups.rs`): the id of the folder the
+    /// reply names, once the published strip shows that folder, or a
+    /// value worked out beforehand, once a strip follows the reply.
+    Group(groups::GroupThen),
 }
 
 /// Where a continuation stands.
@@ -186,6 +191,7 @@ pub(crate) fn route(call: &BridgeCall, view: &View) -> Outcome {
     let result = match call.namespace.as_str() {
         "tabs" => tabs(call, view),
         "windows" => windows(call, view),
+        "tabGroups" => group_call(call, view),
         "commands" => match call.method.as_str() {
             "getAll" => Ok(Outcome::Answer(crate::commands::get_all(
                 &view.facts.commands,
@@ -196,6 +202,36 @@ pub(crate) fn route(call: &BridgeCall, view: &View) -> Outcome {
         other => Err(unsupported(other, &call.method)),
     };
     result.unwrap_or_else(Outcome::Reject)
+}
+
+/// `tabGroups.*`, `tabs.group` and `tabs.ungroup`: tab groups are the
+/// model's folders (`groups.rs`), read from the published strip and
+/// changed by a request. Chromium's own functions are never called for
+/// them: on these tabs `tabs.group` ends the browser process.
+fn group_call(call: &BridgeCall, view: &View) -> Result<Outcome, String> {
+    let session_name = format!("{} Session", view.facts.name_or(&call.extension));
+    let routed = groups::route(
+        &groups::GroupView::of(view.snapshot, view.ids),
+        &groups::GroupCall {
+            namespace: &call.namespace,
+            method: &call.method,
+            args: &call.args,
+            current_window: view
+                .current_window(&call.asker)
+                .map(|window| window_id(window.id)),
+            session_name: &session_name,
+            tab_of: &|id| view.ids.tab(id),
+        },
+    );
+    match routed {
+        Some(groups::GroupRoute::Answer(value)) => Ok(Outcome::Answer(value)),
+        Some(groups::GroupRoute::Reject(message)) => Err(message),
+        Some(groups::GroupRoute::Request { request, then }) => Ok(Outcome::Request {
+            requests: vec![request],
+            then: Then::Group(then),
+        }),
+        None => Err(unsupported(&call.namespace, &call.method)),
+    }
 }
 
 /// A tab the model has, as a call named it.
@@ -437,8 +473,7 @@ fn tabs(call: &BridgeCall, view: &View) -> Result<Outcome, String> {
             };
             forward(view, &target(view, &call.asker, id)?, method, rest)
         }
-        // `group` and `ungroup` (which crash in Chromium on these tabs)
-        // land here until the tab-groups change gives them rows above.
+        "group" | "ungroup" => group_call(call, view),
         method => Err(unsupported("tabs", method)),
     }
 }
@@ -911,6 +946,33 @@ pub(crate) fn settle(
             _ => Settled::Now(Err(UNEXPECTED_REPLY.to_string())),
         },
         Then::Window { window, populate } => window_now(*window, *populate, ready),
+        Then::Group(group) => match (group, reply) {
+            // The group's id, once the published strip shows the folder:
+            // a `tabGroups.get` straight after the promise must find it,
+            // and "a strip was published since" is also true of a
+            // republish of the old strip (`BridgeState::table_changed`).
+            (groups::GroupThen::GroupId, ExtensionReply::Folder(folder)) => {
+                let shown = view
+                    .snapshot
+                    .windows
+                    .iter()
+                    .flat_map(|window| &window.tabs)
+                    .any(|tab| tab.folder == Some(*folder));
+                if shown || last_chance {
+                    Settled::Now(Ok(json!(group_id(Some(*folder)))))
+                } else {
+                    Settled::Wait
+                }
+            }
+            (groups::GroupThen::Fixed(value), ExtensionReply::Done) => {
+                if ready {
+                    Settled::Now(Ok(value.clone()))
+                } else {
+                    Settled::Wait
+                }
+            }
+            _ => Settled::Now(Err(UNEXPECTED_REPLY.to_string())),
+        },
     }
 }
 
@@ -924,6 +986,7 @@ mod tests {
     use url::Url;
 
     use super::*;
+    use crate::bridge::groups;
     use crate::bridge::ids::{IdSpace, SYNTHETIC_BASE};
     use crate::bridge::pattern::Grants;
     use crate::bridge::shape::View;
@@ -1857,14 +1920,6 @@ mod tests {
     fn unknown_methods_and_namespaces_reject() {
         let world = World::two_windows();
         assert_eq!(
-            rejected(world.tabs("group", json!([{ "tabIds": [101] }]))),
-            "tabs.group is not supported."
-        );
-        assert_eq!(
-            rejected(world.tabs("ungroup", json!([101]))),
-            "tabs.ungroup is not supported."
-        );
-        assert_eq!(
             rejected(world.tabs("createSplit", json!([[101, 102]]))),
             "tabs.createSplit is not supported."
         );
@@ -1873,8 +1928,187 @@ mod tests {
             "windows.teleport is not supported."
         );
         assert_eq!(
-            rejected(world.ask(Asker::Worker, "tabGroups", "query", json!([{}]))),
-            "tabGroups.query is not supported."
+            rejected(world.ask(Asker::Worker, "tabGroups", "frobnicate", json!([{}]))),
+            "tabGroups.frobnicate is not supported."
+        );
+    }
+
+    /// `two_windows` with tabs 1 and 2 in the folder "Research" (7).
+    fn grouped() -> World {
+        let mut first = window(1, true, vec![tab(1, "a*"), tab(2, "b"), tab(3, "c~")]);
+        first.tabs[0].folder = Some(FolderId(7));
+        first.tabs[1].folder = Some(FolderId(7));
+        first.folders = vec![osmena_core::Folder {
+            id: FolderId(7),
+            name: "Research".to_string(),
+            expanded: true,
+        }];
+        World::new(snapshot(vec![
+            first,
+            window(2, false, vec![tab(4, "d"), tab(5, "e*")]),
+        ]))
+    }
+
+    #[test]
+    fn group_calls_and_the_command_listing_are_routed() {
+        let world = World::two_windows();
+        // tabs.group no longer rejects: it asks the model. The shapes are
+        // the ones an extension sends when it opens its side panel.
+        assert_eq!(
+            world.tabs(
+                "group",
+                json!([{"tabIds": [101], "createProperties": {"windowId": 1}}])
+            ),
+            Outcome::Request {
+                requests: vec![ExtensionRequest::GroupTabs {
+                    tabs: vec![TabId(1)],
+                    folder: None,
+                }],
+                then: Then::Group(groups::GroupThen::GroupId),
+            }
+        );
+        assert_eq!(
+            world.tabs("ungroup", json!([[101, 102]])),
+            Outcome::Request {
+                requests: vec![ExtensionRequest::UngroupTabs(vec![TabId(1), TabId(2)])],
+                then: Then::Group(groups::GroupThen::Fixed(Value::Null)),
+            }
+        );
+        // A deferred tab is named by its synthetic id, and a window by -2.
+        assert!(matches!(
+            world.tabs(
+                "group",
+                json!([{"tabIds": [SYNTHETIC_BASE], "createProperties": {"windowId": -2}}])
+            ),
+            Outcome::Request { .. }
+        ));
+        assert_eq!(
+            world.ask(Asker::Worker, "tabGroups", "query", json!([{}])),
+            Outcome::Answer(json!([]))
+        );
+        assert_eq!(
+            world.ask(Asker::Worker, "commands", "getAll", json!([])),
+            Outcome::Answer(json!([]))
+        );
+        let world = grouped();
+        let research = json!({"id": 7, "collapsed": false, "color": "grey",
+            "title": "Research", "windowId": 1, "shared": false});
+        assert_eq!(
+            world.ask(Asker::Worker, "tabGroups", "get", json!([7])),
+            Outcome::Answer(research.clone())
+        );
+        // "The current window" is the asker's: a page in window 2 has no
+        // group there.
+        assert_eq!(
+            world.ask(
+                Asker::View(TabId(4)),
+                "tabGroups",
+                "query",
+                json!([{"windowId": -2}])
+            ),
+            Outcome::Answer(json!([]))
+        );
+        assert_eq!(
+            world.ask(
+                Asker::Worker,
+                "tabGroups",
+                "query",
+                json!([{"windowId": -2}])
+            ),
+            Outcome::Answer(json!([research]))
+        );
+        // The colour is taken and the group stays grey; a blank title is
+        // the session name the model will give, from the extension's own.
+        assert_eq!(
+            world.ask(
+                Asker::Worker,
+                "tabGroups",
+                "update",
+                json!([7, {"title": "", "color": "orange", "collapsed": false}])
+            ),
+            Outcome::Request {
+                requests: vec![ExtensionRequest::UpdateFolder {
+                    folder: FolderId(7),
+                    name: Some(String::new()),
+                    expanded: Some(true),
+                }],
+                then: Then::Group(groups::GroupThen::Fixed(json!({
+                    "id": 7, "collapsed": false, "color": "grey",
+                    "title": format!("{EXT} Session"), "windowId": 1, "shared": false
+                }))),
+            }
+        );
+        // Fail closed: what none of them knows is rejected, not forwarded.
+        for (namespace, method) in [
+            ("tabGroups", "frobnicate"),
+            ("tabGroups", "move"),
+            ("commands", "reset"),
+        ] {
+            assert_eq!(
+                world.ask(Asker::Worker, namespace, method, json!([7, {"index": 0}])),
+                Outcome::Reject(unsupported(namespace, method)),
+                "{namespace}.{method}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_call_settles_on_the_strip_that_shows_it() {
+        let loose = World::two_windows();
+        let grouped = grouped();
+        let made = ExtensionReply::Folder(FolderId(7));
+        let id = Then::Group(groups::GroupThen::GroupId);
+        // A strip was published since the reply, and it is not the one
+        // with the folder (a republish of the old one): wait.
+        assert_eq!(
+            settle(&id, &made, &loose.view(), true, Duration::ZERO),
+            Settled::Wait
+        );
+        assert_eq!(
+            settle(&id, &made, &loose.view(), true, SETTLE_QUIET),
+            Settled::Wait
+        );
+        // The strip shows the folder: the group's id, a number.
+        assert_eq!(
+            settle(&id, &made, &grouped.view(), false, Duration::ZERO),
+            Settled::Now(Ok(json!(7)))
+        );
+        // It never does (the user ungrouped at once): the id all the same.
+        assert_eq!(
+            settle(&id, &made, &loose.view(), true, SETTLE_LIMIT),
+            Settled::Now(Ok(json!(7)))
+        );
+        // A fixed answer (update's group, ungroup's undefined) waits for
+        // the next strip, or a moment when the request changed nothing.
+        let group = json!({"id": 7, "title": "Trip"});
+        let fixed = Then::Group(groups::GroupThen::Fixed(group.clone()));
+        let done = ExtensionReply::Done;
+        assert_eq!(
+            settle(&fixed, &done, &grouped.view(), false, Duration::ZERO),
+            Settled::Wait
+        );
+        assert_eq!(
+            settle(&fixed, &done, &grouped.view(), true, Duration::ZERO),
+            Settled::Now(Ok(group.clone()))
+        );
+        assert_eq!(
+            settle(&fixed, &done, &grouped.view(), false, SETTLE_QUIET),
+            Settled::Now(Ok(group))
+        );
+        // A reply of another kind, and the model's refusal in the
+        // extension's ids.
+        assert_eq!(
+            settle(&id, &done, &grouped.view(), true, Duration::ZERO),
+            Settled::Now(Err(UNEXPECTED_REPLY.to_string()))
+        );
+        assert_eq!(
+            settle(&fixed, &made, &grouped.view(), true, Duration::ZERO),
+            Settled::Now(Err(UNEXPECTED_REPLY.to_string()))
+        );
+        let refused = ExtensionReply::Refused("No tab with id: 2.".to_string());
+        assert_eq!(
+            settle(&id, &refused, &grouped.view(), true, Duration::ZERO),
+            Settled::Now(Err("No tab with id: 102.".to_string()))
         );
     }
 

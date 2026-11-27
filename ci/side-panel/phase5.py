@@ -366,7 +366,7 @@ def judge_main(code, log, samples):
         check("captureVisibleTab answers a JPEG data URL", by_id["capture"] == "data:image/jpeg;base64,", str(by_id["capture"]))
     closed = value(s, "fail-closed")
     if closed:
-        check("AC3.5 tabs.group rejects without reaching Chromium", closed["group"] == "tabs.group is not supported.", closed["group"])
+        check("AC3.5 tabGroups.move rejects without reaching Chromium", closed["group"] == "tabGroups.move is not supported.", closed["group"])
         check("AC3.5 tabs.discard answers without reaching Chromium", closed["discard"] == "undefined", closed["discard"])
         check("an unknown tab rejects in Chromium's words, both styles",
               closed["unknown"] == "No tab with id: 999999." and closed["callback"] == "No tab with id: 999999.", str(closed))
@@ -391,7 +391,7 @@ def judge_main(code, log, samples):
         check("AC3.1 a page's current window is the one showing it",
               result.get("current", {}).get("id") == page_tab["id"] and result["current"]["windowId"] == page_tab["windowId"]
               and result["activeCurrent"] == [page_tab["id"]] and result["window"] == page_tab["windowId"], str(result))
-        check("AC3.5 a page's tabs.group rejects too", result.get("group") == "tabs.group is not supported.", str(result.get("group")))
+        check("AC3.5 a page's tabGroups.move rejects too", result.get("group") == "tabGroups.move is not supported.", str(result.get("group")))
         check("sender.tab carries the strip's fields",
               sender and sender["id"] == page_tab["id"] and sender["windowId"] == page_tab["windowId"] and sender["index"] >= 0, str(sender))
     made = value(s, "windows-create")

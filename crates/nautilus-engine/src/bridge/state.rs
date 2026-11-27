@@ -962,13 +962,6 @@ mod tests {
             }]
         );
         assert_eq!(
-            state.call(call(4, EXT, "tabs", "group", json!([{ "tabIds": [101] }]))),
-            vec![Effect::Reply(
-                4,
-                Err("tabs.group is not supported.".to_string())
-            )]
-        );
-        assert_eq!(
             state.call(call(5, EXT, "bridge", "selfDestruct", json!([]))),
             vec![Effect::Reply(
                 5,
@@ -1600,6 +1593,7 @@ mod tests {
         state.set_facts(vec![(
             EXT.to_string(),
             ExtensionFacts {
+                name: "Probe".to_string(),
                 commands: commands.clone(),
             },
         )]);
@@ -1623,5 +1617,184 @@ mod tests {
                 Err("commands.reset is not supported.".to_string())
             )]
         );
+    }
+
+    /// What the Claude extension does each time it opens its side panel,
+    /// and what it does after, each call made straight after the one
+    /// before resolved.
+    #[test]
+    fn a_panel_openings_group_calls_resolve_with_chromes_shapes_and_in_order() {
+        use osmena_core::{Folder, FolderId};
+
+        use crate::bridge::ExtensionFacts;
+
+        let (mut state, now) = started(vec![tab(1, "a*"), tab(2, "b")]);
+        state.set_facts(vec![(
+            EXT.to_string(),
+            ExtensionFacts {
+                name: "Claude".to_string(),
+                commands: Vec::new(),
+            },
+        )]);
+        for event in [
+            "tabGroups.onCreated",
+            "tabGroups.onUpdated",
+            "tabGroups.onRemoved",
+            "tabs.onUpdated",
+        ] {
+            listen(&mut state, EXT, event);
+        }
+        let strip = |folder: Option<(&str, bool)>| {
+            let mut first = tab(1, "a*");
+            let mut one = window(1, true, vec![]);
+            if let Some((name, expanded)) = folder {
+                first.folder = Some(FolderId(7));
+                one.folders = vec![Folder {
+                    id: FolderId(7),
+                    name: name.to_string(),
+                    expanded,
+                }];
+            }
+            one.tabs = vec![first, tab(2, "b")];
+            snapshot(vec![one])
+        };
+        let group = |title: &str| {
+            json!({"id": 7, "collapsed": false, "color": "grey", "title": title,
+                   "windowId": 1, "shared": false})
+        };
+        let emitted = |effects: &[Effect]| -> Vec<String> {
+            effects
+                .iter()
+                .map(|effect| match effect {
+                    Effect::Emit { event, .. } => event.to_string(),
+                    Effect::Reply(call, _) => format!("reply {call}"),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+
+        // tabs.group({tabIds: [tab], createProperties: {windowId}}).
+        let effects = state.call(call(
+            1,
+            EXT,
+            "tabs",
+            "group",
+            json!([{"tabIds": [101], "createProperties": {"windowId": 1}}]),
+        ));
+        assert_eq!(
+            effects,
+            vec![Effect::Request {
+                token: 1,
+                extension: EXT.to_string(),
+                request: ExtensionRequest::GroupTabs {
+                    tabs: vec![TabId(1)],
+                    folder: None,
+                },
+            }]
+        );
+        // The model answers before the strip shows the folder, and a
+        // republish of the old strip does not show it either.
+        assert_eq!(
+            state.extension_reply(1, ExtensionReply::Folder(FolderId(7)), now),
+            vec![]
+        );
+        assert_eq!(state.table_changed(&live, now), vec![]);
+        // The strip with the folder: the group exists, then the tab is in
+        // it, then the promise resolves with the group's id.
+        let effects = state.strip_changed(strip(Some(("Claude Session", true))), &live, now);
+        assert_eq!(
+            emitted(&effects),
+            ["tabGroups.onCreated", "tabs.onUpdated", "reply 1"]
+        );
+        assert_eq!(effects[2], Effect::Reply(1, Ok(json!(7))));
+        let Effect::Emit { args, .. } = &effects[0] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(args, &[group("Claude Session")]);
+        let Effect::Emit { args, .. } = &effects[1] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!((&args[0], &args[1]), (&json!(101), &json!({"groupId": 7})));
+        assert_eq!(args[2]["groupId"], 7);
+        // tabGroups.get(id) straight after sees it.
+        assert_eq!(
+            state.call(call(2, EXT, "tabGroups", "get", json!([7]))),
+            vec![Effect::Reply(2, Ok(group("Claude Session")))]
+        );
+        // tabGroups.update(id, {title, color, collapsed: false}): the
+        // colour is taken without a rejection and the group stays grey.
+        let effects = state.call(call(
+            3,
+            EXT,
+            "tabGroups",
+            "update",
+            json!([7, {"title": "Claude", "color": "orange", "collapsed": false}]),
+        ));
+        assert_eq!(
+            effects,
+            vec![Effect::Request {
+                token: 2,
+                extension: EXT.to_string(),
+                request: ExtensionRequest::UpdateFolder {
+                    folder: FolderId(7),
+                    name: Some("Claude".to_string()),
+                    expanded: Some(true),
+                },
+            }]
+        );
+        assert_eq!(state.extension_reply(2, ExtensionReply::Done, now), vec![]);
+        let effects = state.strip_changed(strip(Some(("Claude", true))), &live, now);
+        assert_eq!(emitted(&effects), ["tabGroups.onUpdated", "reply 3"]);
+        assert_eq!(effects[1], Effect::Reply(3, Ok(group("Claude"))));
+        // tabGroups.query({}) and tabs.query({groupId}).
+        assert_eq!(
+            state.call(call(4, EXT, "tabGroups", "query", json!([{}]))),
+            vec![Effect::Reply(4, Ok(json!([group("Claude")])))]
+        );
+        let effects = state.call(call(5, EXT, "tabs", "query", json!([{"groupId": 7}])));
+        let [Effect::Reply(5, Ok(Value::Array(tabs)))] = &effects[..] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(tabs[0]["id"], 101);
+        // A blank title is the session name, from the extension's own.
+        let effects = state.call(call(
+            6,
+            EXT,
+            "tabGroups",
+            "update",
+            json!([7, {"title": ""}]),
+        ));
+        assert!(matches!(effects[..], [Effect::Request { token: 3, .. }]));
+        assert_eq!(state.extension_reply(3, ExtensionReply::Done, now), vec![]);
+        let effects = state.strip_changed(strip(Some(("Claude Session", true))), &live, now);
+        assert_eq!(effects[1], Effect::Reply(6, Ok(group("Claude Session"))));
+        // tabs.ungroup([tab]): the tab leaves, the emptied group goes, and
+        // the promise resolves with nothing.
+        let effects = state.call(call(7, EXT, "tabs", "ungroup", json!([[101]])));
+        assert_eq!(
+            effects,
+            vec![Effect::Request {
+                token: 4,
+                extension: EXT.to_string(),
+                request: ExtensionRequest::UngroupTabs(vec![TabId(1)]),
+            }]
+        );
+        assert_eq!(state.extension_reply(4, ExtensionReply::Done, now), vec![]);
+        let effects = state.strip_changed(strip(None), &live, now);
+        assert_eq!(
+            emitted(&effects),
+            ["tabs.onUpdated", "tabGroups.onRemoved", "reply 7"]
+        );
+        assert_eq!(effects[2], Effect::Reply(7, Ok(Value::Null)));
+        let Effect::Emit { args, .. } = &effects[0] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(args[1], json!({"groupId": -1}));
+        assert_eq!(
+            state.call(call(8, EXT, "tabGroups", "get", json!([7]))),
+            vec![Effect::Reply(8, Err("No group with id: 7.".to_string()))]
+        );
+        assert!(!state.needs_tick());
     }
 }

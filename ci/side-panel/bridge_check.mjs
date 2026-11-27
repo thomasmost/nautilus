@@ -23,7 +23,7 @@ function nativeEvent() {
   };
 }
 
-function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true }) {
+function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
@@ -72,6 +72,25 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
     },
   };
   if (!sidePanel) { delete chrome.sidePanel; }
+  if (tabGroups) {
+    // Chromium's own tabGroups, none of which may be reached, with its
+    // constants and one function the bridge does not name.
+    chrome.tabGroups = {
+      TAB_GROUP_ID_NONE: -1,
+      Color: { GREY: 'grey', BLUE: 'blue', ORANGE: 'orange' },
+      get: chromium('tabGroups.get', () => ({})),
+      query: chromium('tabGroups.query', () => []),
+      update: chromium('tabGroups.update', () => ({})),
+      move: chromium('tabGroups.move', () => ({})),
+      frobnicate: chromium('tabGroups.frobnicate', () => undefined),
+      onCreated: nativeEvent(),
+      onUpdated: nativeEvent(),
+      onMoved: nativeEvent(),
+      onRemoved: nativeEvent(),
+      onFrobnicated: nativeEvent(),
+    };
+    chrome.tabs.ungroup = chromium('tabs.ungroup', () => undefined);
+  }
   if (commands) {
     // Chromium's own commands, none of which may be reached, with one
     // function the bridge does not name.
@@ -112,7 +131,7 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
     // The worker's marker (bridge.js): the worker primes its tab cache.
     sandbox.__nautilusTransport = { protocol: 1, portHidden: true };
   }
-  for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'commands.js', 'side_panel.js']) {
+  for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'tab_groups.js', 'commands.js', 'side_panel.js']) {
     vm.runInContext(read(file), sandbox);
   }
   return { chrome, reached, calls, answers, messages, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
@@ -129,8 +148,9 @@ for (const viaPage of [false, true]) {
   w.answers.set('tabs.query', () => [{ id: 7, index: 0 }]);
   assert.deepEqual(await chrome.tabs.query({}), [{ id: 7, index: 0 }]);
   await assert.rejects(chrome.tabs.createSplit([1, 2]), /tabs\.createSplit is not supported\./);
-  w.answers.set('tabs.group', () => { throw new Error('tabs.group is not supported.'); });
-  await assert.rejects(chrome.tabs.group({ tabIds: [7] }), /tabs\.group is not supported\./);
+  // The engine's rejection of a group call is the promise's.
+  w.answers.set('tabs.group', () => { throw new Error('No tab with id: 7.'); });
+  await assert.rejects(chrome.tabs.group({ tabIds: [7] }), /No tab with id: 7\./);
   assert.equal(await chrome.tabs.discard(7), undefined);
   await chrome.tabs.create({ url: 'https://x.example/' });
   await chrome.windows.create({});
@@ -289,6 +309,73 @@ for (const viaPage of [false, true]) {
   assert.throws(() => chrome.runtime.getContexts('all'), /runtime\.getContexts: No matching signature\./);
   w.reached.length = 0;
 
+  // Tab groups: what an extension calls when it opens its side panel, with
+  // its argument shapes. Every call asks the engine and none reaches
+  // Chromium, whose tabs.group ends the browser process on these tabs.
+  w.calls.length = 0;
+  w.reached.length = 0;
+  const grey = { id: 7, collapsed: false, color: 'grey', title: 'Claude', windowId: 1, shared: false };
+  w.answers.set('tabs.group', () => 7);
+  w.answers.set('tabs.ungroup', () => null);
+  w.answers.set('tabGroups.update', () => grey);
+  w.answers.set('tabGroups.get', () => grey);
+  w.answers.set('tabGroups.query', () => [grey]);
+  w.answers.set('tabGroups.move', () => { throw new Error('tabGroups.move is not supported.'); });
+  assert.equal(await chrome.tabs.group({ tabIds: [7], createProperties: { windowId: 1 } }), 7);
+  assert.deepEqual(await chrome.tabGroups.update(7, { title: 'Claude', color: chrome.tabGroups.Color.ORANGE, collapsed: false }), grey);
+  assert.deepEqual(await chrome.tabGroups.get(7), grey);
+  assert.deepEqual(await chrome.tabGroups.query({}), [grey]);
+  assert.equal(await chrome.tabs.group({ tabIds: 7, groupId: 7 }), 7);
+  assert.equal(await chrome.tabs.ungroup([7]), undefined);
+  assert.deepEqual(await new Promise((resolve) => chrome.tabGroups.get(7, resolve)), grey);
+  await assert.rejects(chrome.tabGroups.move(7, { index: 0 }), /tabGroups\.move is not supported\./);
+  await assert.rejects(chrome.tabGroups.frobnicate(), /tabGroups\.frobnicate is not supported\./);
+  assert.deepEqual(w.calls, [
+    ['tabs', 'group', [{ tabIds: [7], createProperties: { windowId: 1 } }]],
+    ['tabGroups', 'update', [7, { title: 'Claude', color: 'orange', collapsed: false }]],
+    ['tabGroups', 'get', [7]],
+    ['tabGroups', 'query', [{}]],
+    ['tabs', 'group', [{ tabIds: 7, groupId: 7 }]],
+    ['tabs', 'ungroup', [[7]]],
+    ['tabGroups', 'get', [7]],
+    ['tabGroups', 'move', [7, { index: 0 }]],
+  ]);
+  assert.deepEqual(w.reached, [], 'a tab group call reached Chromium');
+  // The constants an extension reads are Chromium's, copied.
+  assert.equal(chrome.tabGroups.TAB_GROUP_ID_NONE, -1);
+  assert.equal(chrome.tabGroups.Color.ORANGE, 'orange');
+  assert.equal(chrome.tabGroups.Color.GREY, 'grey');
+  // The group events are the engine's; one Chromium has and the engine
+  // does not fire exists and stays quiet.
+  w.calls.length = 0;
+  const groups = [];
+  chrome.tabGroups.onCreated.addListener((group) => groups.push('created ' + group.id));
+  chrome.tabGroups.onUpdated.addListener((group) => groups.push('updated ' + group.title));
+  chrome.tabGroups.onRemoved.addListener((group) => groups.push('removed ' + group.id));
+  chrome.tabGroups.onMoved.addListener(() => assert.fail('never fires'));
+  chrome.tabGroups.onFrobnicated.addListener(() => assert.fail('never fires'));
+  await tick();
+  assert.deepEqual(w.calls, [
+    ['bridge', 'listen', ['tabGroups.onCreated']],
+    ['bridge', 'listen', ['tabGroups.onUpdated']],
+    ['bridge', 'listen', ['tabGroups.onRemoved']],
+    ['bridge', 'listen', ['tabGroups.onMoved']],
+  ]);
+  w.emit('tabGroups.onCreated', [grey]);
+  w.emit('tabGroups.onUpdated', [grey]);
+  w.emit('tabGroups.onRemoved', [grey]);
+  assert.deepEqual(groups, ['created 7', 'updated Claude', 'removed 7']);
+  assert.throws(() => Object.defineProperty(chrome, 'tabGroups', { value: { chromium: true }, writable: true, enumerable: true, configurable: true }), TypeError);
+  // An extension without the "tabGroups" permission has no chrome.tabGroups,
+  // and its tabs.group is the engine's all the same.
+  {
+    const bare = world({ viaPage, tabGroups: false });
+    assert.equal(bare.chrome.tabGroups, undefined);
+    bare.answers.set('tabs.group', () => 9);
+    assert.equal(await bare.chrome.tabs.group({ tabIds: [7] }), 9);
+    assert.deepEqual(bare.reached, []);
+  }
+
   // chrome.commands is replaced whole: getAll is the engine's, and
   // onCommand is announced once and fired by the engine with the command
   // and the tab.
@@ -441,7 +528,7 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
   };
   vm.createContext(sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
-  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'commands.js', 'side_panel.js', 'page_report.js'].map(read).join('\n');
+  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'tab_groups.js', 'commands.js', 'side_panel.js', 'page_report.js'].map(read).join('\n');
   vm.runInContext(
     `(function (root, install) {\n${read('page_defer.js')}\n})(self, function () {\ntry {\n${namespaces}\n} catch (e) { console.error('nautilus-bridge: ' + e); }\n});`,
     sandbox,
@@ -785,6 +872,38 @@ function loadWorker(runtime) {
   await assert.rejects(Promise.resolve().then(() => chrome.windows.create({})));
   assert.deepEqual(reached, [], 'the refusal left a native tabs or windows call callable');
   assert.equal(sandbox.__bridgeCall, undefined, 'the transport answered without a send');
+  // An extension without tabGroups or commands gains neither by the refusal.
+  assert.equal(chrome.tabGroups, undefined);
+  assert.equal(chrome.commands, undefined);
+}
+{
+  // The same page with tabGroups and commands: the refusal covers them, so
+  // no native group or command function stays callable either.
+  const reached = [];
+  const nativeFn = (name) => () => { reached.push(name); };
+  const chrome = {
+    tabs: { group: nativeFn('tabs.group'), ungroup: nativeFn('tabs.ungroup') },
+    windows: { create: nativeFn('windows.create') },
+    tabGroups: { update: nativeFn('tabGroups.update'), get: nativeFn('tabGroups.get'), move: nativeFn('tabGroups.move') },
+    commands: { getAll: nativeFn('commands.getAll') },
+  };
+  const sandbox = { chrome, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Proxy };
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read('page_transport.js'), sandbox);
+  // core.js finds no transport and calls the refusal itself.
+  vm.runInContext(read('core.js'), sandbox);
+  for (const call of [
+    () => chrome.tabs.group({ tabIds: [1] }),
+    () => chrome.tabs.ungroup([1]),
+    () => chrome.tabGroups.update(1, { title: 'x' }),
+    () => chrome.tabGroups.get(1),
+    () => chrome.tabGroups.move(1, { index: 0 }),
+    () => chrome.commands.getAll(),
+  ]) {
+    await assert.rejects(Promise.resolve().then(call), /is not supported in this page\./);
+  }
+  assert.deepEqual(reached, [], 'the refusal left a native group or command call callable');
 }
 // window.close() in an extension page asks the engine first: a side panel's
 // page is closed by the model (the engine answers nothing), any other page

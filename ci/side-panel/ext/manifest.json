@@ -3,7 +3,7 @@
   "name": "Nautilus Side Panel Test",
   "version": "1.0",
   "description": "The test extension of ci/side-panel. Reports to the driver on 127.0.0.1:47613.",
-  "permissions": ["tabs", "debugger", "scripting", "webNavigation"],
+  "permissions": ["tabs", "tabGroups", "debugger", "scripting", "webNavigation"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background/sw.js" },
   "action": { "default_title": "Side panel test" }

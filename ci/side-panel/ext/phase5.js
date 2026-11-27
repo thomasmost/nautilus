@@ -156,7 +156,7 @@
     });
     await step('fail-closed', async function () {
       var out = {};
-      out.group = await chrome.tabs.group({ tabIds: [id] }).then(function () { return 'resolved'; }, message);
+      out.group = await chrome.tabGroups.move(1, { index: 0 }).then(function () { return 'resolved'; }, message);
       out.discard = await chrome.tabs.discard(id).then(function (v) { return v === undefined ? 'undefined' : 'a tab'; }, message);
       out.unknown = await chrome.tabs.remove(999999).then(function () { return 'resolved'; }, message);
       out.callback = await new Promise(function (resolve) {

@@ -508,9 +508,11 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
 - An extension page's `iframe`s (`srcdoc`, `about:blank`) have a `chrome`
   object with no `tabs` or `windows`: measured on the bundle, with a probe page
   in a worker-less test extension, `typeof` is `undefined` for both. If an
-  extension page's bridge cannot be put in, its native `tabs` and `windows`
-  are replaced with namespaces that refuse every call (`page_transport.js`,
-  `__nautilusRefuseNative`), so a native `tabs.group` is never called.
+  extension page's bridge cannot be put in, its native `tabs` and `windows`,
+  and its `tabGroups` and `commands` where it has them, are replaced with
+  namespaces that refuse every call (`page_transport.js`,
+  `__nautilusRefuseNative`), so a native `tabs.group` or `tabGroups.update`
+  is never called.
 - A message from a tab (`sender.tab`) is delivered synchronously, so Chromium gets
   the answer to its keep-open question at once: the wrapper returns true only when a
   listener of this context kept the channel open (returned true or a promise). A
@@ -779,7 +781,7 @@ browser to ask).
 | `move(id \| ids, {index, windowId?})` | R | one `MoveTab { tab, index }` per tab, `index` being the tab's final index in the strip (osmena's rule), so the tabs land at `index`, `index + 1`, … (`-1`: the end; past the end: the end); resolves with the tab object or objects after the next publish. Another window's id rejects `Moving a tab to another window is not supported.` |
 | `highlight({tabs, windowId?})` | R / S | activates the tab at the first index (`ActivateTab`); resolves with the populated window. `No tab at index: N.` |
 | `discard(id?)` | S | resolves `undefined` ("not discarded"), after checking the id. Never forwarded. |
-| `group`, `ungroup` | X | `tabs.group is not supported.` until tab groups arrive |
+| `group(options)`, `ungroup(id \| ids)` | R | `GroupTabs`, `UngroupTabs`: see "Messages Phase 7 adds". Never forwarded: Chromium's `tabs.group` ends the browser process on these tabs. |
 | `captureVisibleTab(windowId?, options?)` | engine | needs `<all_urls>` in the manifest; the window's active tab must be an `http`, `https`, `ftp` or `data` page, or one of the extension's own pages (any other, a file page included, is refused with a message that names its URL); `Page.captureScreenshot` on the window's active tab's browser; resolves `data:image/<format>;base64,…` |
 | `stripOf(id)` | S | internal, and not a `chrome.tabs` member: the seven strip fields of tab `id`, or `null`. `runtime.js` asks for it to lay the strip over `sender.tab`. Any bridged caller can reach it through the transport, and it gives nothing `get` does not (no URL, no title). |
 | `reload`, `goBack`, `goForward`, `getZoom`, `setZoom`, `getZoomSettings`, `setZoomSettings`, `detectLanguage` (tab id optional) | F | the id translated, or filled in with the current window's active tab (Chromium has no current window to fall back on) |
@@ -818,6 +820,8 @@ listeners):
 9. `tabs.onUpdated(id, changeInfo, tab)` for each tab present before and after whose `url`, `title`, `status`, `groupId` or `discarded` changed, with exactly those keys (`url` and `title` only for an extension that may see them; an event whose `changeInfo` would be empty is not sent).
 10. `windows.onRemoved(id)`.
 11. `windows.onFocusChanged(id)` when the focused window changed (`-1`: none).
+
+The tab-group events of the same publish go around these: `tabGroups.onCreated` ahead of step 1, `tabGroups.onUpdated` and `tabGroups.onRemoved` after step 11 ("Messages Phase 7 adds").
 
 The model moves a tab between windows by closing it and making a new one,
 so steps 4 and 6 do not occur today; the differ still handles a `TabId`
@@ -883,7 +887,7 @@ row is skipped, and new reports for it are refused).
 - **When a tab's id changes** (a deferred tab is shown; a late table entry arrives) the bridge fires `chrome.tabs.onReplaced(addedTabId, removedTabId)`. The old id **keeps resolving** in every bridged and forwarded `chrome.tabs` call for as long as the tab lives (the router translates it), so an extension that ignores `onReplaced` still works through `chrome.tabs`; only APIs the bridge does not see (`scripting`, `debugger`) need the new id, which `tabs.get(oldId)` returns.
 - **A new live tab is held back until its id is known.** The engine keeps the snapshot it was given and publishes it (answers queries from it, diffs it for events) only once the table has an id for every tab that is not deferred, or two seconds have passed (`state::PUBLISH_WAIT`). So `onCreated` carries the real id in the ordinary case, and `tabs.create` resolves after that publish with the tab object extensions will go on seeing.
 - **Window ids** are osmena's: `windowId = WindowId.0`. The model counts from 1, so an id is never 0, `WINDOW_ID_NONE` (-1) or `WINDOW_ID_CURRENT` (-2). Chromium's own window ids never reach an extension (the whole `windows` namespace is replaced, and forwarded tab objects have `windowId` overwritten) and no window id is ever forwarded to Chromium, so the two spaces cannot meet.
-- **Group ids** are osmena's: `groupId = FolderId.0` (from 1), `-1` (`TAB_GROUP_ID_NONE`) for a tab in no folder. `ids::group_id` maps a folder to its id; the tab groups namespace is not bridged yet, so nothing else maps the other way.
+- **Group ids** are osmena's: `groupId = FolderId.0` (from 1), `-1` (`TAB_GROUP_ID_NONE`) for a tab in no folder. `ids::group_id` maps a folder to its id and `groups::folder_of` an id back to its folder ("Messages Phase 7 adds").
 
 `tabs.js` also keeps Chromium's `onZoomChange` as a native event, which the
 engine does not fire.
@@ -993,13 +997,122 @@ take it; the control's log line says `sent to the bridge`, `not sent`,
 control does not open`.
 
 
+## Messages Phase 7 adds
+
+Phase 7 adds tab groups (`chrome.tabGroups`, `tabs.group`,
+`tabs.ungroup`) and keyboard commands (`chrome.commands`) to the same
+channel, on both lanes, and no new kind of message. They are ordinary
+namespaces by the recipe below: `js/tab_groups.js` and `js/commands.js`
+each call `define`, their calls are rows of `router::route`, and their
+events are a `StripEvent` (groups) and `BridgeState::emit` (a command,
+which is no difference of the strip). Each script replaces its namespace
+only where Chromium defines it, so an extension without the `tabGroups`
+permission, or with no `commands` in its manifest, gains none.
+
+**A tab group is a folder** (`bridge/groups.rs`, pure). `groupId` is the
+folder's number (`FolderId.0`, from 1; unique across windows), `-1` for
+none; `groups::folder_of` maps an id back. The object is
+`{id, collapsed, color, title, windowId, shared}`: `collapsed` is "not
+expanded", `title` the folder's name, `color` always `"grey"` (folders
+have no colour), `shared` always `false`. A folder with no tab is no
+group.
+
+| Call | | How |
+| --- | --- | --- |
+| `tabGroups.get(id)` | S | the group's object; `No group with id: N.` |
+| `tabGroups.query(info?)` | S | every group, in strip order, filtered by `windowId` (`-2`: the asker's current window), `collapsed`, `title` (Chromium's pattern: `*` any run, `?` any one character, case matters), `color` (only `"grey"` matches) and `shared` (only `false` matches) |
+| `tabGroups.update(id, {title?, collapsed?, color?})` | R / S | `UpdateFolder { folder, name, expanded }`; resolves with the group as it will be, once a strip follows the model's reply. A blank `title` resolves as `"<extension name> Session"`, the name the model gives. `color` is accepted and ignored; with `color` alone nothing is asked and the group is answered as it is. |
+| `tabGroups.move(id, props)` | X | `tabGroups.move is not supported.`: the model has no request that moves a folder. The script sends it to the engine, which refuses it. |
+| `tabs.group({tabIds, groupId?, createProperties?})` | R | `GroupTabs { tabs, folder }`; resolves with the group's id (a number). `tabIds` is one id or a list (each tab once; a former id of a tab still names it). Without `groupId` the model makes a folder named `"<extension name> Session"`, expanded, where the first tab is. `createProperties.windowId` naming the tabs' own window (or `-2`) is accepted. Rejections, in Chromium's order and words where it has them: `Cannot specify 'createProperties' along with a 'groupId'.`, `No group with id: N.`, `No window with id: N.`, `No tab with id: N.`; and `Tabs can only be grouped within their own window.` for tabs of two windows, or a group or window that is not the tabs' own (Chromium would move the tabs; the model has no such request). |
+| `tabs.ungroup(id \| ids)` | R | `UngroupTabs(tabs)`; resolves `undefined` once a strip follows the reply. A folder emptied by it goes. |
+| `commands.getAll()` | S | `[{name, description, shortcut}]`, by name: the commands the manifest declares, each with the shortcut it suggests for this platform as Chrome writes it (`⌘E`, `⇧⌘U` on macOS; `Ctrl+Shift+Y` elsewhere), `""` when it suggests none or one Chrome would not accept. `_execute_action` is listed. |
+| anything else Chromium defines in either | X | `<namespace>.<name> is not supported.` |
+
+`tabGroups.TAB_GROUP_ID_NONE` and `tabGroups.Color` are Chromium's own
+values, copied by `define`.
+
+**When a group call resolves** (`router::settle`, `Then::Group`).
+`tabs.group` resolves once some tab of the published strip is in the
+folder the model's reply names, so `tabGroups.get(id)` straight after
+finds the group; a strip published since the reply is not enough, since
+the engine republishes the strip it has when the tab-id table changes. It
+resolves at `SETTLE_LIMIT` all the same if the folder never shows.
+`tabGroups.update` and `tabs.ungroup` resolve once a strip was published
+after the reply, or `SETTLE_QUIET` after it (a request that changed
+nothing brings no strip). A refusal of the model's rejects at once, in
+the extension's ids.
+
+**The group events** (`groups::group_events`, as `StripEvent::Group`),
+each with the group's object as its one argument, whoever made the
+change (an extension or the user):
+
+- `tabGroups.onCreated` for a folder that holds a tab now and held none
+  before: ahead of every tab event of the same publish, so the group
+  exists before a tab's `tabs.onUpdated` names it.
+- `tabGroups.onUpdated` for a group whose title or collapsed state
+  changed, and `tabGroups.onRemoved` (the group as it last was) for a
+  folder that holds no tab any more: after the tab events, so the tab's
+  `tabs.onUpdated` with `groupId: -1`, or its `tabs.onRemoved`, comes
+  first.
+- A group whose tabs are now in another window is removed there and
+  created here (both ahead of the tab events).
+- `tabGroups.onMoved` exists and never fires.
+
+A tab's own change of group is still step 9 above, `tabs.onUpdated(id,
+{groupId}, tab)`: a tab whose address and group change in one publish
+gets one event with both keys.
+
+**A command** (`chrome.commands.onCommand`). The shell resolves a key to
+an extension's command after its own keymap and calls
+`TabHost::extension_command(tab, extension, name)` with the window's
+active tab. `_execute_action`, `_execute_browser_action` and
+`_execute_page_action` are the toolbar's click (`ExtensionManager::click`,
+"The action click" above; a popup hangs from the top right corner of the
+page area) and fire no event. Any other name is `BridgeState::command`:
+the event `commands.onCommand` with `[name, tab]`, the tab as that
+extension may see it (`View::tab_json`; no tab when the strip does not
+hold it), sent by `BridgeState::emit` to the contexts of the extension
+that announced a listener: the worker (started if it was stopped) and
+each listening page. `Hub::command` logs `extension <id>: command "<name>"
+for TabId(n)`, with `: no context listens for it` when nothing was sent.
+Like every event sent through `emit`, one queued for a worker instance
+that is replaced before it is sent is dropped.
+
+`commands.getAll` reports the declared shortcut whether or not the
+shell's keymap leaves the chord to the extension: the engine is not
+given the keymap. A chord the user's own keymap binds is the keymap's,
+and is still listed here.
+
+**The test control** (a build with `test-hooks`):
+`{"extension_command": {"extension": "<id>", "name": "<command>"}}`
+does what `TabHost::extension_command` does, for the tab focused last,
+short of opening a popup. Its log line is `TEST HOOK: command N:
+extension_command "<name>" of <id> for Some(TabId(n)): ` and then
+`handed to the bridge`, or for an action command the click's own words
+(`sent to the bridge`, `not sent`, ...), or `not sent (no tab to command
+for)`.
+
+**Fail closed.** No call of these namespaces reaches Chromium: the
+scripts leave no function of Chromium's in a replaced namespace
+(`define`), the router rejects what it does not name, and a page whose
+bridge cannot be put in has its `tabGroups` and `commands` refused with
+its `tabs` and `windows` (`__nautilusRefuseNative`). The tests are
+`every_function_of_a_replaced_namespace_is_ours` and
+`tab_groups_and_commands_are_replaced_whole_and_refused_when_they_cannot_be`
+(`bridge/mod.rs`), `group_calls_and_the_command_listing_are_routed`
+(`bridge/router.rs`) and the group and command parts of
+`ci/side-panel/bridge_check.mjs`. `phase5.py`'s two fail-closed checks
+call `tabGroups.move`, the one function of these namespaces the engine
+still refuses.
+
+
 ## How a later phase adds a namespace
 
 1. A file under `bridge/js/` calls `__nautilusBridge.define('<name>', { bridged, optional, direct, events, nativeEvents })` (the comment on `define` in `js/core.js` says what each list does; `js/tabs.js` and `js/windows.js` are the examples). `bridged` names the functions the engine answers, `optional` the same where Chromium defines them, `direct` Chromium's own functions, called bound, `events` the events the engine fires, `nativeEvents` Chromium's events, kept.
 2. Its name is added to `namespaces_script()` in `bridge/mod.rs`, so the file's text follows the others in a worker's and a page's script.
 3. Its rows go in `router::route` (`bridge/router.rs`): one arm per namespace, one per method, each answered as S, R, F, D or X in the method tables above.
 4. Its events are `StripEvent` variants (`bridge/differ.rs`) produced by `diff`, with a `render` arm giving the event name and its argument list.
-5. Its names are covered by the test `every_function_of_a_replaced_namespace_is_ours` (`bridge/mod.rs`), which checks that every bridged or optional method of the `tabs` and `windows` scripts reaches the router (the names in its `later` list excepted).
+5. Its names are covered by the test `every_function_of_a_replaced_namespace_is_ours` (`bridge/mod.rs`), which checks that every bridged or optional method of the `tabs`, `windows`, `tabGroups` and `commands` scripts reaches the router (`tabGroups.move` excepted, which the router refuses on purpose). A new script's constant joins that test's loop, its `'use strict'` list, and the file lists of `ci/side-panel/bridge_check.mjs`, in the order of `namespaces_script()`; it goes before `js/side_panel.js`, which a test keeps last.
 
 **`sidePanel` is written by hand, and is the exception.** `js/side_panel.js` does not use `define`, its calls are not rows of `router::route`, and its events are not `StripEvent`s. The reasons, one per step above: its functions check their arguments as Chromium's do and fail with a `TypeError` naming the function before anything is sent, and its object is frozen whole, neither of which `define` does (what `define` would have given, the callback style with `runtime.lastError` set, it does not have: a callback gets no argument on failure and the error is logged as unchecked); its answers come from stores in `DelegateState` that a call changes (`SidePanelStore`, `PanelRegistry`), which the router, a pure function of the call and the published strip, cannot hold, so the hub answers them (`Effect::SidePanel`, "Messages Phase 6 adds"); and a panel opening or closing is no difference between two strips, so the events come from the panel registry's notices through `BridgeState::emit`. What it keeps of the recipe: its events are `__nautilusBridge.BridgeEvent`s, so they are announced and dispatched like every other; it is fail-closed (a member Chromium defines and the script does not name is not in the frozen object, or rejects where Chromium does not let go of the property; a method the engine does not know rejects); and it has its own test, `every_side_panel_function_is_ours`, with its part of `ci/side-panel/bridge_check.mjs`. A namespace whose answers are a function of the strip follows the five steps, not this.
 

@@ -5,17 +5,21 @@
 (function (root) {
   'use strict';
   // Fail closed, for the scripts that put the namespaces in (core.js and
-  // page_defer.js) when they cannot: the page's Chromium tabs and windows are
-  // replaced by namespaces whose every call is refused, so no native tabs
-  // function stays callable (a native tabs.group traps the browser). Defined
-  // before the transport's own check, which returns when there is no send.
+  // page_defer.js) when they cannot: the page's Chromium tabs, windows,
+  // tabGroups and commands are replaced by namespaces whose every call is
+  // refused, so no native function of theirs stays callable (a native
+  // tabs.group traps the browser). tabGroups and commands only where the
+  // page has them: an extension without the permission gains no namespace.
+  // Defined before the transport's own check, which returns when there is
+  // no send.
   if (!Object.prototype.hasOwnProperty.call(root, '__nautilusRefuseNative')) {
     Object.defineProperty(root, '__nautilusRefuseNative', {
       configurable: true,
       value: function () {
         var chrome = root.chrome;
         if (!chrome) { return; }
-        ['tabs', 'windows'].forEach(function (name) {
+        ['tabs', 'windows', 'tabGroups', 'commands'].forEach(function (name) {
+          if (name !== 'tabs' && name !== 'windows' && !chrome[name]) { return; }
           var refused = new Proxy({}, {
             get: function (target, key) {
               if (typeof key !== 'string' || key === 'then') { return undefined; }
