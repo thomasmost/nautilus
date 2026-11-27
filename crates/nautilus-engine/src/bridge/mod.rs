@@ -11,6 +11,7 @@
 //! the CEF side.
 
 pub(crate) mod debugger;
+pub(crate) mod groups;
 pub(crate) mod install;
 pub(crate) mod migrate;
 pub(crate) mod policy;
