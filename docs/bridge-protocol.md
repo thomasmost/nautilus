@@ -1093,25 +1093,33 @@ group.
 | --- | --- | --- |
 | `tabGroups.get(id)` | S | the group's object; `No group with id: N.` |
 | `tabGroups.query(info?)` | S | every group, in strip order, filtered by `windowId` (`-2`: the asker's current window), `collapsed`, `title` (Chromium's pattern: `*` any run, `?` any one character, case matters), `color` (only `"grey"` matches) and `shared` (only `false` matches) |
-| `tabGroups.update(id, {title?, collapsed?, color?})` | R / S | `UpdateFolder { folder, name, expanded }`; resolves with the group as it will be, once a strip follows the model's reply. A blank `title` resolves as `"<extension name> Session"`, the name the model gives. `color` is accepted and ignored; with `color` alone nothing is asked and the group is answered as it is. |
+| `tabGroups.update(id, {title?, collapsed?, color?})` | R / S | `UpdateFolder { folder, name, expanded }`; resolves with the group as it will be, once the strip shows the change. A blank `title` resolves as `"<extension name> Session"`, the name the model gives. `color` is accepted and ignored; with `color` alone nothing is asked and the group is answered as it is. |
 | `tabGroups.move(id, props)` | X | `tabGroups.move is not supported.`: the model has no request that moves a folder. The script sends it to the engine, which refuses it. |
 | `tabs.group({tabIds, groupId?, createProperties?})` | R | `GroupTabs { tabs, folder }`; resolves with the group's id (a number). `tabIds` is one id or a list (each tab once; a former id of a tab still names it). Without `groupId` the model makes a folder named `"<extension name> Session"`, expanded, where the first tab is. `createProperties.windowId` naming the tabs' own window (or `-2`) is accepted. Rejections, in Chromium's order and words where it has them: `Cannot specify 'createProperties' along with a 'groupId'.`, `No group with id: N.`, `No window with id: N.`, `No tab with id: N.`; and `Tabs can only be grouped within their own window.` for tabs of two windows, or a group or window that is not the tabs' own (Chromium would move the tabs; the model has no such request). |
-| `tabs.ungroup(id \| ids)` | R | `UngroupTabs(tabs)`; resolves `undefined` once a strip follows the reply. A folder emptied by it goes. |
+| `tabs.ungroup(id \| ids)` | R | `UngroupTabs(tabs)`; resolves `undefined` once the strip shows the tabs in no folder. A folder emptied by it goes. |
 | `commands.getAll()` | S | `[{name, description, shortcut}]`, by name: the commands the manifest declares, each with the shortcut it suggests for this platform as Chrome writes it (`⌘E`, `⇧⌘U` on macOS; `Ctrl+Shift+Y` elsewhere), `""` when it suggests none or one Chrome would not accept. `_execute_action` is listed. |
 | anything else Chromium defines in either | X | `<namespace>.<name> is not supported.` |
 
 `tabGroups.TAB_GROUP_ID_NONE` and `tabGroups.Color` are Chromium's own
 values, copied by `define`.
 
-**When a group call resolves** (`router::settle`, `Then::Group`).
-`tabs.group` resolves once some tab of the published strip is in the
-folder the model's reply names, so `tabGroups.get(id)` straight after
-finds the group; a strip published since the reply is not enough, since
-the engine republishes the strip it has when the tab-id table changes. It
-resolves at `SETTLE_LIMIT` all the same if the folder never shows.
-`tabGroups.update` and `tabs.ungroup` resolve once a strip was published
-after the reply, or `SETTLE_QUIET` after it (a request that changed
-nothing brings no strip). A refusal of the model's rejects at once, in
+**When a group call resolves** (`router::settle`, `Then::Group`). Each
+resolves on the published strip that shows its own change, so a read
+made straight after the promise sees it; a strip published since the
+reply is not enough, since the engine republishes the strip it has when
+the tab-id table changes. `tabs.group` resolves once every tab the call
+named (that the strip still holds) is in the folder the model's reply
+names, in a new group and in one that existed
+(`GroupThen::GroupId { tabs }`), so `tabGroups.get(id)` and
+`tabs.query({groupId})` straight after find the group and all its tabs.
+`tabGroups.update` resolves once the strip's folder has the title and
+the collapsed state that were asked for (`GroupThen::Updated`; a request
+for what the folder already has resolves with the reply); a blank title
+is the model's to word, so with nothing else asked it resolves on a
+strip published after the reply, or `SETTLE_QUIET` after it.
+`tabs.ungroup` resolves once every named tab is in no folder
+(`GroupThen::Ungrouped`). Each resolves at `SETTLE_LIMIT` all the same if
+the strip never shows it. A refusal of the model's rejects at once, in
 the extension's ids.
 
 **The group events** (`groups::group_events`, as `StripEvent::Group`),

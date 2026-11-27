@@ -1951,4 +1951,113 @@ mod tests {
         );
         assert!(!state.needs_tick());
     }
+
+    /// A read made straight after a group call resolves sees what the call
+    /// changed: the promise waits for the strip that shows the change, not
+    /// for any strip (the engine republishes the one it has whenever the
+    /// tab-id table changes).
+    #[test]
+    fn a_group_call_resolves_on_the_strip_that_shows_its_own_change() {
+        use osmena_core::{Folder, FolderId};
+
+        let strip = |second_in: bool, name: &str| {
+            let mut first = tab(1, "a*");
+            first.folder = Some(FolderId(7));
+            let mut second = tab(2, "b");
+            if second_in {
+                second.folder = Some(FolderId(7));
+            }
+            let mut one = window(1, true, vec![first, second]);
+            one.folders = vec![Folder {
+                id: FolderId(7),
+                name: name.to_string(),
+                expanded: true,
+            }];
+            snapshot(vec![one])
+        };
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
+        let now = Instant::now();
+        state.strip_changed(strip(false, "Work"), &live, now);
+        let replies = |effects: &[Effect]| -> Vec<Effect> {
+            effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::Reply(..)))
+                .cloned()
+                .collect()
+        };
+        let grouped = |state: &mut BridgeState| {
+            let effects = state.call(call(9, EXT, "tabs", "query", json!([{"groupId": 7}])));
+            let [Effect::Reply(9, Ok(Value::Array(tabs)))] = &effects[..] else {
+                panic!("{effects:?}");
+            };
+            tabs.iter()
+                .map(|t| t["id"].as_i64().unwrap())
+                .collect::<Vec<_>>()
+        };
+
+        // tabs.group({tabIds, groupId}) into a group that exists: the
+        // folder is on the strip already, the added tab is not in it yet.
+        let effects = state.call(call(
+            1,
+            EXT,
+            "tabs",
+            "group",
+            json!([{"tabIds": [102], "groupId": 7}]),
+        ));
+        assert!(matches!(effects[..], [Effect::Request { token: 1, .. }]));
+        assert_eq!(
+            state.extension_reply(1, ExtensionReply::Folder(FolderId(7)), now),
+            vec![]
+        );
+        assert_eq!(replies(&state.table_changed(&live, now)), vec![]);
+        let effects = state.strip_changed(strip(true, "Work"), &live, now);
+        assert_eq!(replies(&effects), vec![Effect::Reply(1, Ok(json!(7)))]);
+        assert_eq!(grouped(&mut state), [101, 102]);
+
+        // tabGroups.update: a republish of the old strip is not the title.
+        let effects = state.call(call(
+            2,
+            EXT,
+            "tabGroups",
+            "update",
+            json!([7, {"title": "Play"}]),
+        ));
+        assert!(matches!(effects[..], [Effect::Request { token: 2, .. }]));
+        assert_eq!(state.extension_reply(2, ExtensionReply::Done, now), vec![]);
+        assert_eq!(replies(&state.table_changed(&live, now)), vec![]);
+        let effects = state.strip_changed(strip(true, "Play"), &live, now);
+        let [Effect::Reply(2, Ok(group))] = &replies(&effects)[..] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(group["title"], "Play");
+        assert_eq!(
+            state.call(call(3, EXT, "tabGroups", "get", json!([7]))),
+            vec![Effect::Reply(3, Ok(group.clone()))]
+        );
+
+        // tabs.ungroup: nor is it the tab out of its folder.
+        let effects = state.call(call(4, EXT, "tabs", "ungroup", json!([102])));
+        assert!(matches!(effects[..], [Effect::Request { token: 3, .. }]));
+        assert_eq!(state.extension_reply(3, ExtensionReply::Done, now), vec![]);
+        assert_eq!(replies(&state.table_changed(&live, now)), vec![]);
+        assert_eq!(grouped(&mut state), [101, 102]);
+        let effects = state.strip_changed(strip(false, "Play"), &live, now);
+        assert_eq!(replies(&effects), vec![Effect::Reply(4, Ok(Value::Null))]);
+        assert_eq!(grouped(&mut state), [101]);
+
+        // A request that changes nothing the strip can show is not held
+        // for the limit: an update to the title it has resolves at once.
+        let effects = state.call(call(
+            5,
+            EXT,
+            "tabGroups",
+            "update",
+            json!([7, {"title": "Play", "collapsed": false}]),
+        ));
+        assert!(matches!(effects[..], [Effect::Request { token: 4, .. }]));
+        let effects = state.extension_reply(4, ExtensionReply::Done, now);
+        assert!(matches!(&replies(&effects)[..], [Effect::Reply(5, Ok(_))]));
+        assert!(!state.needs_tick());
+    }
 }

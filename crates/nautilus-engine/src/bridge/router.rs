@@ -946,33 +946,71 @@ pub(crate) fn settle(
             _ => Settled::Now(Err(UNEXPECTED_REPLY.to_string())),
         },
         Then::Window { window, populate } => window_now(*window, *populate, ready),
-        Then::Group(group) => match (group, reply) {
-            // The group's id, once the published strip shows the folder:
-            // a `tabGroups.get` straight after the promise must find it,
-            // and "a strip was published since" is also true of a
-            // republish of the old strip (`BridgeState::table_changed`).
-            (groups::GroupThen::GroupId, ExtensionReply::Folder(folder)) => {
-                let shown = view
-                    .snapshot
-                    .windows
-                    .iter()
-                    .flat_map(|window| &window.tabs)
-                    .any(|tab| tab.folder == Some(*folder));
-                if shown || last_chance {
-                    Settled::Now(Ok(json!(group_id(Some(*folder)))))
-                } else {
-                    Settled::Wait
+        // A group call resolves on the strip that shows its own change,
+        // so a read made straight after sees it. "A strip was published
+        // since the reply" is not that: it is also true of a republish of
+        // the old strip (`BridgeState::table_changed`).
+        Then::Group(group) => {
+            let tabs = || view.snapshot.windows.iter().flat_map(|window| &window.tabs);
+            match (group, reply) {
+                // The group's id, once every tab the call named is in the
+                // folder (a tab the strip no longer holds is not waited
+                // for): `tabs.query({groupId})` straight after finds them
+                // all, in a new group and in one that existed.
+                (groups::GroupThen::GroupId { tabs: named }, ExtensionReply::Folder(folder)) => {
+                    let shown = tabs()
+                        .filter(|tab| named.contains(&tab.id))
+                        .all(|tab| tab.folder == Some(*folder));
+                    if shown || last_chance {
+                        Settled::Now(Ok(json!(group_id(Some(*folder)))))
+                    } else {
+                        Settled::Wait
+                    }
                 }
-            }
-            (groups::GroupThen::Fixed(value), ExtensionReply::Done) => {
-                if ready {
-                    Settled::Now(Ok(value.clone()))
-                } else {
-                    Settled::Wait
+                // The group as asked for, once the strip's folder has the
+                // title and the collapsed state. With neither to look for
+                // (a blank title, which the model words), a strip after
+                // the reply, or a moment.
+                (
+                    groups::GroupThen::Updated {
+                        folder,
+                        title,
+                        collapsed,
+                        group,
+                    },
+                    ExtensionReply::Done,
+                ) => {
+                    let shown = view
+                        .snapshot
+                        .windows
+                        .iter()
+                        .flat_map(|window| &window.folders)
+                        .find(|candidate| candidate.id == *folder)
+                        .is_some_and(|found| {
+                            title.as_ref().is_none_or(|title| found.name == *title)
+                                && collapsed.is_none_or(|collapsed| found.expanded != collapsed)
+                        });
+                    let looked_for = title.is_some() || collapsed.is_some();
+                    if (shown && (looked_for || ready)) || last_chance {
+                        Settled::Now(Ok(group.clone()))
+                    } else {
+                        Settled::Wait
+                    }
                 }
+                // Nothing, once every tab the call named is in no folder.
+                (groups::GroupThen::Ungrouped { tabs: named }, ExtensionReply::Done) => {
+                    let shown = tabs()
+                        .filter(|tab| named.contains(&tab.id))
+                        .all(|tab| tab.folder.is_none());
+                    if shown || last_chance {
+                        Settled::Now(Ok(Value::Null))
+                    } else {
+                        Settled::Wait
+                    }
+                }
+                _ => Settled::Now(Err(UNEXPECTED_REPLY.to_string())),
             }
-            _ => Settled::Now(Err(UNEXPECTED_REPLY.to_string())),
-        },
+        }
     }
 }
 
@@ -1964,14 +2002,18 @@ mod tests {
                     tabs: vec![TabId(1)],
                     folder: None,
                 }],
-                then: Then::Group(groups::GroupThen::GroupId),
+                then: Then::Group(groups::GroupThen::GroupId {
+                    tabs: vec![TabId(1)],
+                }),
             }
         );
         assert_eq!(
             world.tabs("ungroup", json!([[101, 102]])),
             Outcome::Request {
                 requests: vec![ExtensionRequest::UngroupTabs(vec![TabId(1), TabId(2)])],
-                then: Then::Group(groups::GroupThen::Fixed(Value::Null)),
+                then: Then::Group(groups::GroupThen::Ungrouped {
+                    tabs: vec![TabId(1), TabId(2)],
+                }),
             }
         );
         // A deferred tab is named by its synthetic id, and a window by -2.
@@ -2032,10 +2074,15 @@ mod tests {
                     name: Some(String::new()),
                     expanded: Some(true),
                 }],
-                then: Then::Group(groups::GroupThen::Fixed(json!({
-                    "id": 7, "collapsed": false, "color": "grey",
-                    "title": format!("{EXT} Session"), "windowId": 1, "shared": false
-                }))),
+                then: Then::Group(groups::GroupThen::Updated {
+                    folder: FolderId(7),
+                    title: None,
+                    collapsed: Some(false),
+                    group: json!({
+                        "id": 7, "collapsed": false, "color": "grey",
+                        "title": format!("{EXT} Session"), "windowId": 1, "shared": false
+                    }),
+                }),
             }
         );
         // Fail closed: what none of them knows is rejected, not forwarded.
@@ -2057,57 +2104,149 @@ mod tests {
         let loose = World::two_windows();
         let grouped = grouped();
         let made = ExtensionReply::Folder(FolderId(7));
-        let id = Then::Group(groups::GroupThen::GroupId);
+        let done = ExtensionReply::Done;
+        let id = |tabs: &[u64]| {
+            Then::Group(groups::GroupThen::GroupId {
+                tabs: tabs.iter().map(|tab| TabId(*tab)).collect(),
+            })
+        };
         // A strip was published since the reply, and it is not the one
         // with the folder (a republish of the old one): wait.
+        let new = id(&[1, 2]);
         assert_eq!(
-            settle(&id, &made, &loose.view(), true, Duration::ZERO),
+            settle(&new, &made, &loose.view(), true, Duration::ZERO),
             Settled::Wait
         );
         assert_eq!(
-            settle(&id, &made, &loose.view(), true, SETTLE_QUIET),
+            settle(&new, &made, &loose.view(), true, SETTLE_QUIET),
             Settled::Wait
         );
-        // The strip shows the folder: the group's id, a number.
+        // The strip shows the tabs in the folder: the group's id, a number.
         assert_eq!(
-            settle(&id, &made, &grouped.view(), false, Duration::ZERO),
+            settle(&new, &made, &grouped.view(), false, Duration::ZERO),
             Settled::Now(Ok(json!(7)))
         );
         // It never does (the user ungrouped at once): the id all the same.
         assert_eq!(
-            settle(&id, &made, &loose.view(), true, SETTLE_LIMIT),
+            settle(&new, &made, &loose.view(), true, SETTLE_LIMIT),
             Settled::Now(Ok(json!(7)))
         );
-        // A fixed answer (update's group, ungroup's undefined) waits for
-        // the next strip, or a moment when the request changed nothing.
-        let group = json!({"id": 7, "title": "Trip"});
-        let fixed = Then::Group(groups::GroupThen::Fixed(group.clone()));
-        let done = ExtensionReply::Done;
+        // A tab grouped into a folder that exists: the folder is on the
+        // strip from the start, and the promise waits for the tab to be
+        // in it, so `tabs.query({groupId})` straight after finds it.
+        let added = id(&[3]);
         assert_eq!(
-            settle(&fixed, &done, &grouped.view(), false, Duration::ZERO),
+            settle(&added, &made, &grouped.view(), true, SETTLE_QUIET),
             Settled::Wait
         );
+        let mut all = grouped.snapshot.clone();
+        all.windows[0].tabs[2].folder = Some(FolderId(7));
+        let all = World::new(all);
         assert_eq!(
-            settle(&fixed, &done, &grouped.view(), true, Duration::ZERO),
+            settle(&added, &made, &all.view(), false, Duration::ZERO),
+            Settled::Now(Ok(json!(7)))
+        );
+        // A named tab that closed meanwhile is not waited for.
+        assert_eq!(
+            settle(&id(&[3, 99]), &made, &all.view(), false, Duration::ZERO),
+            Settled::Now(Ok(json!(7)))
+        );
+
+        // An update waits for the strip's folder to be as it asked: the
+        // old strip published again is not that, and the strip that has
+        // it needs no publish after the reply.
+        let group = json!({"id": 7, "title": "Trip"});
+        let update = |title: Option<&str>, collapsed: Option<bool>| {
+            Then::Group(groups::GroupThen::Updated {
+                folder: FolderId(7),
+                title: title.map(str::to_string),
+                collapsed,
+                group: group.clone(),
+            })
+        };
+        let titled = update(Some("Trip"), None);
+        assert_eq!(
+            settle(&titled, &done, &grouped.view(), true, SETTLE_QUIET),
+            Settled::Wait
+        );
+        let mut renamed = grouped.snapshot.clone();
+        renamed.windows[0].folders[0].name = "Trip".to_string();
+        let renamed = World::new(renamed);
+        assert_eq!(
+            settle(&titled, &done, &renamed.view(), false, Duration::ZERO),
+            Settled::Now(Ok(group.clone()))
+        );
+        let collapse = update(Some("Trip"), Some(true));
+        assert_eq!(
+            settle(&collapse, &done, &renamed.view(), true, Duration::ZERO),
+            Settled::Wait
+        );
+        let mut folded = renamed.snapshot.clone();
+        folded.windows[0].folders[0].expanded = false;
+        assert_eq!(
+            settle(
+                &collapse,
+                &done,
+                &World::new(folded).view(),
+                false,
+                Duration::ZERO
+            ),
             Settled::Now(Ok(group.clone()))
         );
         assert_eq!(
-            settle(&fixed, &done, &grouped.view(), false, SETTLE_QUIET),
+            settle(&titled, &done, &grouped.view(), true, SETTLE_LIMIT),
+            Settled::Now(Ok(group.clone()))
+        );
+        // A blank title is the model's to word: with nothing to look for,
+        // a strip after the reply, or a moment.
+        let blank = update(None, None);
+        assert_eq!(
+            settle(&blank, &done, &grouped.view(), false, Duration::ZERO),
+            Settled::Wait
+        );
+        assert_eq!(
+            settle(&blank, &done, &grouped.view(), true, Duration::ZERO),
+            Settled::Now(Ok(group.clone()))
+        );
+        assert_eq!(
+            settle(&blank, &done, &grouped.view(), false, SETTLE_QUIET),
             Settled::Now(Ok(group))
         );
+
+        // An ungroup waits for the named tabs to be in no folder.
+        let out = Then::Group(groups::GroupThen::Ungrouped {
+            tabs: vec![TabId(1), TabId(2)],
+        });
+        assert_eq!(
+            settle(&out, &done, &grouped.view(), true, SETTLE_QUIET),
+            Settled::Wait
+        );
+        assert_eq!(
+            settle(&out, &done, &loose.view(), false, Duration::ZERO),
+            Settled::Now(Ok(Value::Null))
+        );
+        assert_eq!(
+            settle(&out, &done, &grouped.view(), true, SETTLE_LIMIT),
+            Settled::Now(Ok(Value::Null))
+        );
+
         // A reply of another kind, and the model's refusal in the
         // extension's ids.
         assert_eq!(
-            settle(&id, &done, &grouped.view(), true, Duration::ZERO),
+            settle(&new, &done, &grouped.view(), true, Duration::ZERO),
             Settled::Now(Err(UNEXPECTED_REPLY.to_string()))
         );
         assert_eq!(
-            settle(&fixed, &made, &grouped.view(), true, Duration::ZERO),
+            settle(&titled, &made, &grouped.view(), true, Duration::ZERO),
+            Settled::Now(Err(UNEXPECTED_REPLY.to_string()))
+        );
+        assert_eq!(
+            settle(&out, &made, &grouped.view(), true, Duration::ZERO),
             Settled::Now(Err(UNEXPECTED_REPLY.to_string()))
         );
         let refused = ExtensionReply::Refused("No tab with id: 2.".to_string());
         assert_eq!(
-            settle(&id, &refused, &grouped.view(), true, Duration::ZERO),
+            settle(&new, &refused, &grouped.view(), true, Duration::ZERO),
             Settled::Now(Err("No tab with id: 102.".to_string()))
         );
     }

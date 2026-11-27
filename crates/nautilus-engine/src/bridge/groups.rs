@@ -120,13 +120,27 @@ pub(crate) struct GroupCall<'a> {
     pub tab_of: &'a dyn Fn(i64) -> Option<TabId>,
 }
 
-/// How a request's reply becomes the promise's value.
+/// How a request's reply becomes the promise's value, and what the
+/// published strip must show before it does (`router::settle`): a read
+/// made straight after the promise resolves sees the call's own change.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum GroupThen {
-    /// `ExtensionReply::Folder` as its group id.
-    GroupId,
-    /// This value, once the model is done.
-    Fixed(Value),
+    /// `tabs.group`: `ExtensionReply::Folder` as its group id, once every
+    /// one of `tabs` (the tabs the call named) that the strip still holds
+    /// is in that folder.
+    GroupId { tabs: Vec<TabId> },
+    /// `tabGroups.update`: `group`, once the strip's folder has the
+    /// `title` and the `collapsed` state that were asked for. A blank
+    /// title is the model's to word and is not waited for by name.
+    Updated {
+        folder: FolderId,
+        title: Option<String>,
+        collapsed: Option<bool>,
+        group: Value,
+    },
+    /// `tabs.ungroup`: nothing, once every one of `tabs` that the strip
+    /// still holds is in no folder.
+    Ungrouped { tabs: Vec<TabId> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -270,7 +284,14 @@ fn update(view: &GroupView, call: &GroupCall<'_>) -> Result<GroupRoute, String> 
             name: title.map(str::to_string),
             expanded: collapsed.map(|c| !c),
         },
-        then: GroupThen::Fixed(tab_group(window, &after)),
+        then: GroupThen::Updated {
+            folder: folder.id,
+            title: title
+                .filter(|title| !title.trim().is_empty())
+                .map(str::to_string),
+            collapsed,
+            group: tab_group(window, &after),
+        },
     })
 }
 
@@ -342,10 +363,10 @@ fn group(view: &GroupView, call: &GroupCall<'_>) -> Result<GroupRoute, String> {
     }
     Ok(GroupRoute::Request {
         request: ExtensionRequest::GroupTabs {
-            tabs,
+            tabs: tabs.clone(),
             folder: target.and_then(|(_, folder)| folder),
         },
-        then: GroupThen::GroupId,
+        then: GroupThen::GroupId { tabs },
     })
 }
 
@@ -353,8 +374,8 @@ fn ungroup(view: &GroupView, call: &GroupCall<'_>) -> Result<GroupRoute, String>
     let ids = tab_ids(call.args.first()).ok_or_else(|| invalid(call))?;
     let (tabs, _) = tabs_named(view, call, &ids)?;
     Ok(GroupRoute::Request {
-        request: ExtensionRequest::UngroupTabs(tabs),
-        then: GroupThen::Fixed(Value::Null),
+        request: ExtensionRequest::UngroupTabs(tabs.clone()),
+        then: GroupThen::Ungrouped { tabs },
     })
 }
 
@@ -608,8 +629,13 @@ mod tests {
                     name: Some("Trip".to_string()),
                     expanded: None,
                 },
-                then: GroupThen::Fixed(json!({"id": 7, "collapsed": false, "color": "grey",
-                    "title": "Trip", "windowId": 1, "shared": false})),
+                then: GroupThen::Updated {
+                    folder: FolderId(7),
+                    title: Some("Trip".to_string()),
+                    collapsed: None,
+                    group: json!({"id": 7, "collapsed": false, "color": "grey",
+                        "title": "Trip", "windowId": 1, "shared": false}),
+                },
             })
         );
         assert_eq!(
@@ -625,8 +651,13 @@ mod tests {
                     name: None,
                     expanded: Some(false),
                 },
-                then: GroupThen::Fixed(json!({"id": 7, "collapsed": true, "color": "grey",
-                    "title": "Research", "windowId": 1, "shared": false})),
+                then: GroupThen::Updated {
+                    folder: FolderId(7),
+                    title: None,
+                    collapsed: Some(true),
+                    group: json!({"id": 7, "collapsed": true, "color": "grey",
+                        "title": "Research", "windowId": 1, "shared": false}),
+                },
             })
         );
     }
@@ -649,8 +680,15 @@ mod tests {
         );
         assert_eq!(
             then,
-            GroupThen::Fixed(json!({"id": 8, "collapsed": true, "color": "grey",
-                "title": "Probe Session", "windowId": 2, "shared": false}))
+            // The name is the model's to give: the strip is not waited
+            // for by a title.
+            GroupThen::Updated {
+                folder: FolderId(8),
+                title: None,
+                collapsed: None,
+                group: json!({"id": 8, "collapsed": true, "color": "grey",
+                    "title": "Probe Session", "windowId": 2, "shared": false}),
+            }
         );
     }
 
@@ -691,7 +729,9 @@ mod tests {
                     tabs: vec![TabId(1), TabId(2)],
                     folder: None,
                 },
-                then: GroupThen::GroupId,
+                then: GroupThen::GroupId {
+                    tabs: vec![TabId(1), TabId(2)],
+                },
             })
         );
         // One id, not in a list, into an existing group.
@@ -707,7 +747,9 @@ mod tests {
                     tabs: vec![TabId(1)],
                     folder: Some(FolderId(7)),
                 },
-                then: GroupThen::GroupId,
+                then: GroupThen::GroupId {
+                    tabs: vec![TabId(1)],
+                },
             })
         );
         // The tabs' own window, named.
@@ -774,7 +816,9 @@ mod tests {
             ask(&view, "tabs", "ungroup", json!([[102, 103]])),
             Some(GroupRoute::Request {
                 request: ExtensionRequest::UngroupTabs(vec![TabId(2), TabId(3)]),
-                then: GroupThen::Fixed(Value::Null),
+                then: GroupThen::Ungrouped {
+                    tabs: vec![TabId(2), TabId(3)],
+                },
             })
         );
         assert_eq!(
@@ -821,7 +865,9 @@ mod tests {
                     tabs: vec![TabId(1)],
                     folder: None,
                 },
-                then: GroupThen::GroupId,
+                then: GroupThen::GroupId {
+                    tabs: vec![TabId(1)],
+                },
             })
         );
         let gone = [json!([901])];
@@ -860,7 +906,9 @@ mod tests {
                     tabs: vec![TabId(1)],
                     folder: None,
                 },
-                then: GroupThen::GroupId,
+                then: GroupThen::GroupId {
+                    tabs: vec![TabId(1)],
+                },
             })
         );
         // tabGroups.update(id, {title, color, collapsed: false}): the
@@ -878,8 +926,13 @@ mod tests {
                     name: Some("Claude".to_string()),
                     expanded: Some(true),
                 },
-                then: GroupThen::Fixed(json!({"id": 8, "collapsed": false, "color": "grey",
-                    "title": "Claude", "windowId": 2, "shared": false})),
+                then: GroupThen::Updated {
+                    folder: FolderId(8),
+                    title: Some("Claude".to_string()),
+                    collapsed: Some(false),
+                    group: json!({"id": 8, "collapsed": false, "color": "grey",
+                        "title": "Claude", "windowId": 2, "shared": false}),
+                },
             })
         );
         // A tab the assistant opens joins the group: one id, not a list.
@@ -895,7 +948,9 @@ mod tests {
                     tabs: vec![TabId(1)],
                     folder: Some(FolderId(7)),
                 },
-                then: GroupThen::GroupId,
+                then: GroupThen::GroupId {
+                    tabs: vec![TabId(1)],
+                },
             })
         );
         // tabs.ungroup([tab]) for a tab in someone else's group.
@@ -903,7 +958,9 @@ mod tests {
             ask(&view, "tabs", "ungroup", json!([[102]])),
             Some(GroupRoute::Request {
                 request: ExtensionRequest::UngroupTabs(vec![TabId(2)]),
-                then: GroupThen::Fixed(Value::Null),
+                then: GroupThen::Ungrouped {
+                    tabs: vec![TabId(2)],
+                },
             })
         );
         // tabGroups.get(id) and tabGroups.query({}).
