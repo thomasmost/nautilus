@@ -922,8 +922,25 @@ channel, on both lanes, and no new kind of message. The script is
 | `sidePanel.open` | `[{tabId?, windowId?}]` | `ExtensionRequest::OpenSidePanel`; `null` once the model is done, or Chromium's rejection for the case |
 | `sidePanel.close` | `[{tabId?, windowId?}]` | `ExtensionRequest::CloseSidePanel` when this extension's panel is open there, else `null` at once |
 | `sidePanel.getLayout` | `[]` | `{side: "right"}` |
-| `sidePanel.closeSelf` | `[]` | internal, and not a `chrome.sidePanel` member: what the script's `window.close` asks. From a side panel's own page it is `CloseSidePanel` for that panel (answered `null` when the model is done); from any other page it is `false`, and the script then calls Chromium's `window.close` (as it does when the call fails). |
+| `sidePanel.closeSelf` | `[]` | internal, and not a `chrome.sidePanel` member: what the script's `window.close` asks. From a side panel's own page it is `CloseSidePanel` for that panel (answered `null` when the model is done); from any other page it is `false`, and the script then calls Chromium's `window.close` (as it does when the call fails, or is not answered within 500 ms). |
 | `runtime.getContexts` | `[filter, originals]` | the contexts: `originals` is Chromium's own answer for `{}`, which the script asks first; the engine leaves out the bridge's own relay page (Chromium lists it as a `TAB` of the extension's), retypes or adds each open panel's entry as `SIDE_PANEL` in its window and applies `filter` |
+
+**Only an extension with a side panel pays for this** (review of Phase
+6, I1). The script takes Chromium's `chrome.sidePanel` in the context as
+the `sidePanel` permission. Without it, nothing named `sidePanel` is
+installed, `window.close` stays Chromium's own function (the same
+object), and `runtime.getContexts` is Chromium's own answer to the
+caller's own filter with the relay page filtered out in the script: the
+engine is never asked. With it, neither call waits on the engine for
+long: `getContexts` falls back to Chromium's `originals`, less the relay
+page and with the `ContextFilter` applied by the script (the rule of
+`side_panel::passes`), when the engine rejects or has not answered
+within 1 s (`GET_CONTEXTS_WAIT`), and `window.close` closes the page
+natively on a rejection at once and after 500 ms without an answer
+(`CLOSE_WAIT`). In the fallback an open panel's entry keeps the type
+Chromium gave it. Known: a panel's own page that calls `getContexts`
+while its first calls are still held (`Hold::Tab`, up to 2 s) gets the
+fallback.
 
 Any other `sidePanel` method rejects
 `chrome.sidePanel.<name> is not supported in this browser.`; any other

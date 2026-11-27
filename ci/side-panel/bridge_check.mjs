@@ -23,16 +23,25 @@ function nativeEvent() {
   };
 }
 
-function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true }) {
+const RELAY_CONTEXT = { contextType: 'TAB', documentUrl: 'chrome-extension://x/nautilus-bridge/relay.html', tabId: 5, incognito: false };
+
+function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
   let handler = null;
+  const filters = []; // the filters Chromium's own getContexts was given
   const messages = nativeEvent(); // Chromium's runtime.onMessage
   const runtime = {
     onMessage: messages,
     id: 'x',
-    getContexts: () => { reached.push('runtime.getContexts'); return Promise.resolve([{ contextType: 'BACKGROUND', tabId: -1 }]); },
+    // Chromium's own answer: `contexts` when a test gives them (Chromium
+    // applies the filter itself; this stand-in records it and does not).
+    getContexts: (filter) => {
+      reached.push('runtime.getContexts');
+      filters.push(JSON.parse(JSON.stringify(filter)));
+      return Promise.resolve(JSON.parse(JSON.stringify(contexts || [{ contextType: 'BACKGROUND', tabId: -1 }])));
+    },
   };
   const chromium = (name, result) => (...args) => {
     reached.push(name);
@@ -134,7 +143,7 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
   for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'tab_groups.js', 'commands.js', 'side_panel.js']) {
     vm.runInContext(read(file), sandbox);
   }
-  return { chrome, reached, calls, answers, messages, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
+  return { chrome, reached, calls, answers, messages, filters, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -399,6 +408,41 @@ for (const viaPage of [false, true]) {
 
   // An extension without the "sidePanel" permission has no chrome.sidePanel.
   assert.equal(world({ viaPage, sidePanel: false }).chrome.sidePanel, undefined);
+  // Nor anything else of the side panel's: nothing named sidePanel is
+  // installed, and runtime.getContexts is Chromium's own answer, asked with
+  // the caller's filter, less the bridge's relay page. The engine is never
+  // asked, so the call costs what it cost before the bridge.
+  {
+    const all = [{ contextType: 'BACKGROUND', tabId: -1, incognito: false }, RELAY_CONTEXT, { contextType: 'OFFSCREEN_DOCUMENT', documentUrl: 'chrome-extension://x/offscreen.html', tabId: -1, incognito: false }];
+    const bare = world({ viaPage, sidePanel: false, contexts: all });
+    assert.equal(bare.sandbox.__nautilusBridge.installed.indexOf('sidePanel'), -1, 'sidePanel is announced without the permission');
+    bare.answers.set('runtime.getContexts', () => assert.fail('the engine was asked'));
+    bare.calls.length = 0;
+    const got = await bare.chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+    assert.deepEqual(bare.filters, [{ contextTypes: ['OFFSCREEN_DOCUMENT'] }], 'Chromium was not given the caller\'s filter');
+    assert.deepEqual(got.map((c) => c.contextType), ['BACKGROUND', 'OFFSCREEN_DOCUMENT'], 'the relay page is left out, and nothing else');
+    assert.equal((await new Promise((resolve) => bare.chrome.runtime.getContexts({}, resolve))).length, 2);
+    assert.ok(!bare.calls.some(([ns, method]) => ns === 'runtime' || ns === 'sidePanel'), 'getContexts called the bridge without the permission');
+  }
+  // With the permission the engine is asked, and an engine that rejects, or
+  // does not answer within a short bound, is not waited for: the answer is
+  // then Chromium's own, less the relay page, with the filter applied here.
+  {
+    const all = [{ contextType: 'BACKGROUND', tabId: -1, incognito: false }, RELAY_CONTEXT, { contextType: 'OFFSCREEN_DOCUMENT', documentUrl: 'chrome-extension://x/offscreen.html', tabId: -1, incognito: false }, { contextType: 'TAB', documentUrl: 'chrome-extension://x/page.html', tabId: 8, incognito: false }];
+    const refused = world({ viaPage, contexts: all });
+    refused.answers.set('runtime.getContexts', () => { throw new Error('the extension is not bridged.'); });
+    assert.deepEqual((await refused.chrome.runtime.getContexts({})).map((c) => c.contextType), ['BACKGROUND', 'OFFSCREEN_DOCUMENT', 'TAB']);
+    assert.deepEqual((await refused.chrome.runtime.getContexts({ contextTypes: ['TAB'] })).map((c) => c.documentUrl), ['chrome-extension://x/page.html']);
+    assert.deepEqual(await refused.chrome.runtime.getContexts({ tabIds: [8], incognito: true }), []);
+    assert.deepEqual((await refused.chrome.runtime.getContexts({ documentUrls: ['chrome-extension://x/offscreen.html'], incognito: false })).length, 1);
+    const silent = world({ viaPage, contexts: all });
+    silent.answers.set('runtime.getContexts', () => new Promise(() => {}));
+    const started = Date.now();
+    const late = await silent.chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+    assert.ok(Date.now() - started < 2000, 'getContexts waited for an engine that does not answer');
+    assert.deepEqual(late.map((c) => c.documentUrl), ['chrome-extension://x/offscreen.html']);
+    assert.ok(silent.calls.some(([ns, method]) => ns === 'runtime' && method === 'getContexts'), 'the engine was not asked');
+  }
   // Where Chromium does not let go of the property, its own object is
   // filled with the engine's members, and what the bridge does not name rejects.
   {
@@ -905,28 +949,58 @@ function loadWorker(runtime) {
   }
   assert.deepEqual(reached, [], 'the refusal left a native group or command call callable');
 }
-// window.close() in an extension page asks the engine first: a side panel's
-// page is closed by the model (the engine answers nothing), any other page
-// closes itself (false, or no answer at all).
-for (const [answer, closes] of [[() => null, 0], [() => false, 1], [() => { throw new Error('the extension is not bridged.'); }, 1]]) {
-  let closed = 0;
-  const asked = [];
-  const sandbox = { chrome: { runtime: { id: 'x' } }, console: { error() {}, log() {} }, close: () => { closed += 1; } };
+// window.close() in an extension page. An extension with the "sidePanel"
+// permission asks the engine first, for at most half a second: a side
+// panel's page is closed by the model (the engine answers nothing), any
+// other page closes itself (false, a rejection, or no answer in the bound).
+// An extension without the permission keeps Chromium's own function.
+function closer({ permission, answer }) {
+  const state = { closed: 0, asked: [] };
+  const nativeClose = () => { state.closed += 1; };
+  const chrome = { runtime: { id: 'x' } };
+  if (permission) { chrome.sidePanel = { open() {} }; }
+  const sandbox = { chrome, console: { error() {}, log() {} }, close: nativeClose, setTimeout, clearTimeout, Promise, Object, Error };
   sandbox.self = sandbox;
   sandbox.window = sandbox;
   sandbox.top = sandbox;
   sandbox.__bridgeCall = (ns, method, args) => {
-    asked.push([ns, method]);
+    state.asked.push([ns, method]);
     try { return Promise.resolve(answer(args)); } catch (e) { return Promise.reject(e); }
   };
   sandbox.__bridgeOnEvent = () => {};
   vm.createContext(sandbox);
   vm.runInContext(read('core.js'), sandbox);
   vm.runInContext(read('side_panel.js'), sandbox);
-  vm.runInContext('window.close()', sandbox);
+  return { state, sandbox, nativeClose };
+}
+for (const [answer, closes] of [[() => null, 0], [() => false, 1], [() => { throw new Error('the extension is not bridged.'); }, 1]]) {
+  const c = closer({ permission: true, answer });
+  vm.runInContext('window.close()', c.sandbox);
   await tick(); await tick();
-  assert.deepEqual(asked, [['sidePanel', 'closeSelf']]);
-  assert.equal(closed, closes);
+  assert.deepEqual(c.state.asked, [['sidePanel', 'closeSelf']]);
+  assert.equal(c.state.closed, closes);
+  // The bound passing changes nothing once the engine has answered.
+  await wait(700);
+  assert.equal(c.state.closed, closes, 'the page was closed again, or after the model took the close');
+}
+{
+  // An engine that never answers: the page closes itself within the bound.
+  const c = closer({ permission: true, answer: () => new Promise(() => {}) });
+  vm.runInContext('window.close()', c.sandbox);
+  await wait(100);
+  assert.equal(c.state.closed, 0, 'the engine was not given its half second');
+  await wait(700);
+  assert.equal(c.state.closed, 1, 'a page whose close the engine never answers stayed open');
+}
+{
+  // No permission: window.close is Chromium's own function, identically,
+  // and nothing of the bridge is asked when it is called.
+  const c = closer({ permission: false, answer: () => assert.fail('the engine was asked') });
+  assert.equal(c.sandbox.close, c.nativeClose, 'window.close was replaced for an extension without a side panel');
+  vm.runInContext('window.close()', c.sandbox);
+  assert.equal(c.state.closed, 1);
+  assert.deepEqual(c.state.asked, []);
+  assert.equal(c.sandbox.__nautilusBridge.installed.indexOf('sidePanel'), -1);
 }
 
 console.log('bridge scripts: ok');

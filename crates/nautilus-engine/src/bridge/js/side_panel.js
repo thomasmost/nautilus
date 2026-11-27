@@ -16,16 +16,31 @@
   'use strict';
   var bridge = root.__nautilusBridge;
   var chrome = root.chrome;
-  if (!bridge || !chrome || bridge.installed.indexOf('sidePanel') !== -1) { return; }
-  bridge.installed.push('sidePanel');
+  if (!bridge || !chrome || bridge.installed.indexOf('runtime.getContexts') !== -1) { return; }
+  bridge.installed.push('runtime.getContexts');
 
   // The members the engine answers, read by a test in bridge/mod.rs
   // (keep each list on one line): bridged: ['open', 'close', 'getOptions', 'setOptions', 'getPanelBehavior', 'setPanelBehavior', 'getLayout'], events: ['onOpened', 'onClosed'].
 
+  // `promise`, or a rejection once `ms` have passed without it settling:
+  // nothing below waits on the engine for longer than it says.
+  function bounded(promise, ms) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('The engine did not answer in time.')), ms);
+      promise.then(
+        (value) => { clearTimeout(timer); resolve(value); },
+        (error) => { clearTimeout(timer); reject(error); }
+      );
+    });
+  }
+
   // An extension without the "sidePanel" permission has no
-  // chrome.sidePanel, here as in Chromium.
+  // chrome.sidePanel, here as in Chromium. It gets nothing of this file but the relay page
+  // left out of its getContexts: its `window.close` and everything else
+  // stay Chromium's own, and the engine is never asked.
   const native = chrome.sidePanel;
   if (native) {
+    bridge.installed.push('sidePanel');
     const call = (method, args) => bridge.call('sidePanel', method, args);
 
     const fail = (method, why) => {
@@ -137,20 +152,42 @@
     }
   }
 
-  // chrome.runtime.getContexts: Chromium's answer, with each open side
-  // panel reported as a SIDE_PANEL context in its window. Chromium is
-  // asked for everything and the engine applies the filter, since the
-  // panel's entry changes type on the way.
+  // chrome.runtime.getContexts. The bridge's own relay page, which Chromium
+  // lists as a tab of the extension's, is the browser's and is always left
+  // out. For an extension without a side panel that is all: Chromium is
+  // asked with the caller's filter and the engine not at all. For one with
+  // a side panel Chromium is asked for everything and the engine applies
+  // the filter, since an open panel's entry changes type on the way
+  // (SIDE_PANEL, in its window); an engine that rejects, or has not
+  // answered within GET_CONTEXTS_WAIT, is not waited for, and the answer is
+  // then Chromium's own with the filter applied here (`passes`, the same
+  // rule as `side_panel::passes`), which is what the call was before the
+  // bridge.
+  const GET_CONTEXTS_WAIT = 1000;
   const runtime = chrome.runtime;
   if (runtime && typeof runtime.getContexts === 'function') {
     const nativeGetContexts = runtime.getContexts.bind(runtime);
+    const relay = 'chrome-extension://' + runtime.id + '/nautilus-bridge/relay.html';
+    const notRelay = (context) => !context || context.documentUrl !== relay;
+    const LISTS = [['contextIds', 'contextId'], ['contextTypes', 'contextType'], ['documentIds', 'documentId'], ['documentOrigins', 'documentOrigin'], ['documentUrls', 'documentUrl'], ['frameIds', 'frameId'], ['tabIds', 'tabId'], ['windowIds', 'windowId']];
+    const passes = (context, filter) =>
+      LISTS.every(([list, field]) => !Array.isArray(filter[list]) || filter[list].indexOf(context[field]) !== -1) &&
+      (typeof filter.incognito !== 'boolean' || context.incognito === filter.incognito);
     const getContexts = function (filter, callback) {
-      if (filter === null || typeof filter !== 'object' || Array.isArray(filter)) {
-        throw new TypeError('Error in invocation of runtime.getContexts: No matching signature.');
+      let promise;
+      if (!native) {
+        // Chromium checks the filter itself, and throws as it always did.
+        promise = nativeGetContexts(filter).then((contexts) => contexts.filter(notRelay));
+      } else {
+        if (filter === null || typeof filter !== 'object' || Array.isArray(filter)) {
+          throw new TypeError('Error in invocation of runtime.getContexts: No matching signature.');
+        }
+        promise = nativeGetContexts({}).then((originals) =>
+          bounded(bridge.call('runtime', 'getContexts', [filter, originals]), GET_CONTEXTS_WAIT).catch(() =>
+            originals.filter(notRelay).filter((context) => passes(context, filter))
+          )
+        );
       }
-      const promise = nativeGetContexts({}).then((originals) =>
-        bridge.call('runtime', 'getContexts', [filter, originals])
-      );
       if (typeof callback !== 'function') return promise;
       promise.then(
         (contexts) => callback(contexts),
@@ -169,13 +206,17 @@
     });
   }
 
-  // window.close() in an extension page: a side panel's page closes
-  // its panel through the model, so the page area gets its width back;
-  // any other page (the engine answers false) closes as it always did.
-  if (typeof window !== 'undefined' && typeof window.close === 'function' && window === window.top) {
+  // window.close() in a page of an extension that has a side panel: a
+  // panel's page closes its panel through the model, so the page area gets
+  // its width back; any other page (the engine answers false) closes as it
+  // always did, and so does every page when the engine rejects or has not
+  // answered within CLOSE_WAIT. An extension without a side panel keeps
+  // Chromium's own function, untouched.
+  const CLOSE_WAIT = 500;
+  if (native && typeof window !== 'undefined' && typeof window.close === 'function' && window === window.top) {
     const nativeClose = window.close.bind(window);
     window.close = function () {
-      bridge.call('sidePanel', 'closeSelf', []).then(
+      bounded(bridge.call('sidePanel', 'closeSelf', []), CLOSE_WAIT).then(
         (closed) => {
           if (closed === false) nativeClose();
         },
