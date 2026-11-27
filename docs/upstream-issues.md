@@ -488,17 +488,25 @@ reloads). No run here granted a permission to a live context. The log
 line itself is in the scripted runs' browser logs
 (`native_extension_bindings_system.cc:769`).
 
-Also read there and not yet acted on: the same function defines every
-API a second time on a global `browser` object in an extension context
-(`set_accessor_on_browser`, the same `BindingAccessor`, so
-`browser.tabs` is Chromium's own namespace object, the one `chrome.tabs`
-was before the bridge replaced the property). The bridge replaces only
-`chrome.<name>`. Whether CEF 156's build exposes `browser` to
-extensions was not checked in a run when this was written; if it does,
-`browser.tabs.group(...)` reaches Chromium (C11).
+**`browser` is not bridged (read, then seen).** The same function
+defines every API a second time on a global `browser` object in an
+extension context (`set_accessor_on_browser`, with the same
+`BindingAccessor`), so `browser.tabs` is Chromium's own namespace
+object, the one `chrome.tabs` was before the bridge replaced the
+property. The bridge replaces only `chrome.<name>`. Seen on 2026-11-27
+in the bundle of this tree (CEF 156, `panel.sh groups`, a note of the
+test extension's worker): `browser` is an object, `browser.tabs`,
+`browser.tabGroups` and `browser.sidePanel` are not `chrome`'s, and
+`browser.tabs.group` is a function. Nothing called it. An extension
+that calls `browser.tabs.group(...)` or `browser.tabs.create(...)`
+therefore reaches Chromium's own implementation (C11 ends the browser
+process; C12 opens a Chromium window), and its `browser.sidePanel` is
+Chromium's, which has nowhere to open (C13). Not fixed here.
 
 **Blocks:** optional permissions taking effect in a live bridged
-context without a restart of that context (inferred). **Workaround:**
+context without a restart of that context (inferred); and every bridged
+namespace for an extension that reaches it as `browser.<name>` (seen
+that it is Chromium's; no such extension was run). **Workaround:**
 none in place. A different pin was looked for in the source and there
 is none on `chrome` itself: only a non-configurable own property makes
 `SetLazyDataProperty` leave a property alone, and exactly that is the

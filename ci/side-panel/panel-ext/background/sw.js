@@ -432,6 +432,22 @@
     const shape = (title) => ({ id: null, collapsed: false, color: 'grey', title, windowId: window, shared: false });
     const is = (group, id, title) => same(group, { ...shape(title), id });
 
+    // Recorded, not judged (docs/upstream-issues.md, C19): whether this
+    // build gives an extension a `browser` object beside `chrome`, and
+    // whether its namespaces are the bridge's. Nothing of it is called.
+    const b = self.browser;
+    post(
+      'note',
+      'the worker\'s `browser`: ' +
+        (b && typeof b === 'object'
+          ? JSON.stringify({
+              tabsIsChromeTabs: b.tabs === chrome.tabs,
+              tabsGroup: b.tabs ? typeof b.tabs.group : 'no tabs',
+              tabGroupsIsChromes: b.tabGroups === chrome.tabGroups,
+              sidePanelIsChromes: b.sidePanel === chrome.sidePanel,
+            })
+          : typeof b)
+    );
     step('the tab starts in no group', active.groupId === tg.TAB_GROUP_ID_NONE, active.groupId);
     // What a panel opening does first.
     const id = await chrome.tabs.group({ tabIds: [active.id], createProperties: { windowId: window } }).catch((error) => error.message);
@@ -548,7 +564,8 @@
       { out, left: Array.isArray(left) ? left.map((t) => [t.id, t.groupId]) : left, loose: loose && loose.groupId }
     );
     await chrome.tabs.ungroup([active.id]).catch(() => {});
-    step('no group is left', same(await tg.query({}), []));
+    // Awaited: the suite's `done` follows, and must not overtake it.
+    await step('no group is left', same(await tg.query({}), []));
   }
 
   const suites = { panel: panelSuite, behavior: behaviorSuite, groups: groupsSuite };
