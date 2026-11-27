@@ -9,6 +9,7 @@
 //! (`chrome/browser/extensions/api/side_panel/side_panel_service.cc`).
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use osmena_core::{ExtensionRequest, TabId, WindowId};
 use serde_json::{Value, json};
@@ -71,7 +72,8 @@ pub(crate) struct SidePanelStore {
 }
 
 impl SidePanelStore {
-    /// The manifest's default page of `extension`, from the listing.
+    /// The manifest's default page of `extension`, from the listing, for
+    /// an extension that holds the permission (`permitted`).
     pub(crate) fn set_manifest_path(&mut self, extension: &str, path: Option<String>) {
         self.extensions
             .entry(extension.to_string())
@@ -80,15 +82,24 @@ impl SidePanelStore {
     }
 
     /// The extension list as the manager last read it: an enabled
-    /// extension has its manifest's page; one that is disabled or gone
-    /// loses what it set, as when Chromium unloads it. The behaviours
-    /// are preferences and stay (see [`SidePanelStore::uninstalled`]).
+    /// extension that holds the `sidePanel` permission has its manifest's
+    /// page; one that is disabled or gone, or does not hold it, has
+    /// nothing here and loses what it set, as when Chromium unloads it.
+    /// The behaviours are preferences and stay (see
+    /// [`SidePanelStore::uninstalled`]).
     pub(crate) fn listed(&mut self, listing: &[Listed]) {
+        let serves = |l: &&Listed| l.enabled && l.permitted;
         self.extensions
-            .retain(|id, _| listing.iter().any(|l| l.enabled && l.id == *id));
-        for listed in listing.iter().filter(|l| l.enabled) {
+            .retain(|id, _| listing.iter().filter(serves).any(|l| l.id == *id));
+        for listed in listing.iter().filter(serves) {
             self.set_manifest_path(&listed.id, listed.side_panel_path.clone());
         }
+    }
+
+    /// Whether `extension` may use `chrome.sidePanel`: it is listed,
+    /// enabled, and its manifest holds the permission (`listed`).
+    pub(crate) fn permitted(&self, extension: &str) -> bool {
+        self.extensions.contains_key(extension)
     }
 
     /// The user removed the extension: its behaviour goes with it.
@@ -170,6 +181,14 @@ impl SidePanelStore {
         self.on_action_click.insert(extension.to_string(), open) != Some(open)
     }
 
+    /// Drop the options of tabs that are no more: `exists` says whether
+    /// the strip still holds the tab an extension calls by that id.
+    pub(crate) fn keep_tabs(&mut self, exists: impl Fn(i64) -> bool) {
+        for panels in self.extensions.values_mut() {
+            panels.tabs.retain(|tab, _| exists(*tab));
+        }
+    }
+
     /// The behaviours as the profile's file holds them.
     pub(crate) fn behaviors_json(&self) -> String {
         serde_json::to_string_pretty(&self.on_action_click).unwrap_or_else(|_| "{}".to_string())
@@ -186,8 +205,33 @@ impl SidePanelStore {
 pub(crate) struct Listed {
     pub id: String,
     pub enabled: bool,
+    /// Its manifest holds the `sidePanel` permission.
+    pub permitted: bool,
     /// The manifest's `side_panel.default_path`.
     pub side_panel_path: Option<String>,
+}
+
+/// What a `sidePanel` call of an extension without the permission is
+/// rejected with.
+pub(crate) const NOT_PERMITTED: &str = "chrome.sidePanel is not available: the extension's manifest does not hold the \"sidePanel\" permission.";
+
+/// The temporary file a write of `file` goes through, beside it.
+pub(crate) fn beside(file: &Path) -> PathBuf {
+    let mut name = file.as_os_str().to_os_string();
+    name.push(".tmp");
+    PathBuf::from(name)
+}
+
+/// Write `text` as `file`, whole or not at all: to a temporary file
+/// beside it, then renamed over it. A write cut short (a crash, a full
+/// disk) leaves the file of before, where a plain write would leave a
+/// truncated one, which reads as "no behaviours".
+pub(crate) fn write_replacing(file: &Path, text: &str) -> std::io::Result<()> {
+    let temporary = beside(file);
+    std::fs::write(&temporary, text)?;
+    std::fs::rename(&temporary, file).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temporary);
+    })
 }
 
 /// The requests that close the panels of extensions that are no longer
@@ -399,6 +443,12 @@ pub(crate) fn route(
     let extension = call.extension;
     let empty = json!({});
     let options = call.args.first().unwrap_or(&empty);
+    // The script installs `chrome.sidePanel` only where Chromium has it,
+    // but any context can call the bridge directly. `closeSelf` is not a
+    // `chrome.sidePanel` member and is answered for every page.
+    if call.method != "closeSelf" && !store.permitted(extension) {
+        return Routed::reject(NOT_PERMITTED);
+    }
     match call.method {
         "getOptions" => {
             let tab = int(options, "tabId");
@@ -618,9 +668,12 @@ pub(crate) fn action_click(
 }
 
 /// What a click on an extension's toolbar action does, in the order
-/// Chromium decides it: the popup under the button if the action has one,
-/// else the side panel when the extension asked for that and the tab has
-/// an active panel, else `action.onClicked`, else nothing.
+/// Chromium decides it (`ExtensionActionRunner::RunAction`,
+/// `chrome/browser/extensions/extension_action_runner.cc`): the side panel
+/// when the extension asked for that and the tab has an active panel
+/// (`SidePanelService::HasSidePanelActionForTab`), else the popup under
+/// the button if the action has one, else `action.onClicked`, else
+/// nothing.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ActionClick {
     Popup(String),
@@ -634,9 +687,9 @@ pub(crate) fn decide_action_click(
     panel: Option<ExtensionRequest>,
     bridged: bool,
 ) -> ActionClick {
-    match (popup, panel, bridged) {
-        (Some(url), _, _) => ActionClick::Popup(url),
-        (None, Some(request), _) => ActionClick::Panel(request),
+    match (panel, popup, bridged) {
+        (Some(request), _, _) => ActionClick::Panel(request),
+        (None, Some(url), _) => ActionClick::Popup(url),
         (None, None, true) => ActionClick::OnClicked,
         (None, None, false) => ActionClick::NotBridged,
     }
@@ -857,7 +910,10 @@ mod tests {
     }
 
     #[test]
-    fn a_click_is_a_popup_then_a_panel_then_onclicked() {
+    fn a_click_is_a_panel_then_a_popup_then_onclicked() {
+        // Chromium's order (`ExtensionActionRunner::RunAction`): an
+        // extension that asked for its panel on a click, with a panel for
+        // the tab, gets the panel even when its action has a popup.
         let url = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html".to_string();
         let request = ExtensionRequest::OpenSidePanel {
             window: WindowId(1),
@@ -866,11 +922,19 @@ mod tests {
         };
         assert_eq!(
             decide_action_click(Some(url.clone()), Some(request.clone()), true),
-            ActionClick::Popup(url)
+            ActionClick::Panel(request.clone())
         );
         assert_eq!(
             decide_action_click(None, Some(request.clone()), true),
             ActionClick::Panel(request)
+        );
+        assert_eq!(
+            decide_action_click(Some(url.clone()), None, true),
+            ActionClick::Popup(url.clone())
+        );
+        assert_eq!(
+            decide_action_click(Some(url.clone()), None, false),
+            ActionClick::Popup(url)
         );
         assert_eq!(
             decide_action_click(None, None, true),
@@ -880,6 +944,136 @@ mod tests {
             decide_action_click(None, None, false),
             ActionClick::NotBridged
         );
+    }
+
+    #[test]
+    fn a_side_panel_call_without_the_permission_is_refused() {
+        // The bridge's script installs nothing for such an extension, but
+        // any context can call the bridge directly.
+        let mut store = SidePanelStore::default();
+        store.listed(&[Listed {
+            id: EXT.to_string(),
+            enabled: true,
+            permitted: false,
+            side_panel_path: Some("panel.html".to_string()),
+        }]);
+        let panels = PanelRegistry::default();
+        for (method, options) in [
+            ("getOptions", json!({})),
+            ("setOptions", json!({ "path": "p.html" })),
+            ("getPanelBehavior", json!({})),
+            (
+                "setPanelBehavior",
+                json!({ "openPanelOnActionClick": true }),
+            ),
+            ("open", json!({ "windowId": 11 })),
+            ("close", json!({ "windowId": 11 })),
+            ("getLayout", json!({})),
+        ] {
+            let routed = call(&mut store, &panels, method, options);
+            assert_eq!(rejection(routed.clone()), NOT_PERMITTED, "{method}");
+            assert!(routed.also.is_empty() && !routed.save, "{method}");
+        }
+        // Nothing was stored, and the manifest's page is no panel.
+        assert!(!store.opens_on_action_click(EXT));
+        assert_eq!(store.options(EXT, None).0, PanelOptions::default());
+        assert_eq!(
+            action_click(&store, &panels, &Fake::default(), EXT, TabId(1)),
+            None
+        );
+        // `window.close()` asks all the same, and is told to close itself.
+        assert_eq!(
+            answer(call(&mut store, &panels, "closeSelf", json!({}))),
+            json!(false)
+        );
+        // With the permission the same calls are answered.
+        store.listed(&[Listed {
+            id: EXT.to_string(),
+            enabled: true,
+            permitted: true,
+            side_panel_path: Some("panel.html".to_string()),
+        }]);
+        assert_eq!(
+            answer(call(&mut store, &panels, "getOptions", json!({}))),
+            json!({ "enabled": true, "path": "panel.html" })
+        );
+    }
+
+    #[test]
+    fn a_closed_tabs_own_options_go_with_the_tab() {
+        let mut store = store_with_manifest();
+        let panels = PanelRegistry::default();
+        for tab in [101, 102] {
+            call(
+                &mut store,
+                &panels,
+                "setOptions",
+                json!({ "tabId": tab, "path": format!("panel.html?tab={tab}") }),
+            );
+        }
+        call(
+            &mut store,
+            &panels,
+            "setOptions",
+            json!({ "path": "default.html" }),
+        );
+        // The strip no longer holds tab 102.
+        store.keep_tabs(|tab| tab == 101);
+        assert!(store.specific(EXT, 101).is_some());
+        assert_eq!(store.specific(EXT, 102), None);
+        // What was set without a tab stays.
+        assert_eq!(
+            store.options(EXT, Some(102)).0.path.as_deref(),
+            Some("default.html")
+        );
+    }
+
+    #[test]
+    fn a_tabs_first_own_options_leave_the_windows_open_panel_as_it_is() {
+        // Chromium (156): `SidePanelService::SetOptions` tells the tab's
+        // coordinator, which registers the tab's entry and shows nothing
+        // (`ExtensionSidePanelCoordinator::OnPanelOptionsChanged`,
+        // `SidePanelRegistry::Register`). The window's panel stays on
+        // screen until something opens the tab's.
+        let mut store = store_with_manifest();
+        let mut panels = PanelRegistry::default();
+        open_panel(&mut panels, 20, 1, None, "panel.html");
+        let first = call(
+            &mut store,
+            &panels,
+            "setOptions",
+            json!({ "tabId": 101, "path": "panel.html?tab=101", "enabled": true }),
+        );
+        assert_eq!(answer(first.clone()), Value::Null);
+        assert!(first.also.is_empty());
+        // Disabling the tab's own leaves the window's panel too.
+        let off = call(
+            &mut store,
+            &panels,
+            "setOptions",
+            json!({ "tabId": 101, "enabled": false }),
+        );
+        assert!(off.also.is_empty());
+    }
+
+    #[test]
+    fn the_behaviour_file_is_replaced_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("side-panel-behavior.json");
+        assert_eq!(
+            beside(&file),
+            dir.path().join("side-panel-behavior.json.tmp")
+        );
+        std::fs::write(&file, "{\"old\": true}").unwrap();
+        // A stale temporary file of an interrupted write is no obstacle.
+        std::fs::write(beside(&file), "{\"half").unwrap();
+        write_replacing(&file, "{\"new\": true}").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"new\": true}");
+        assert!(!beside(&file).exists());
+        // A write that cannot be made leaves the file as it was.
+        let missing = dir.path().join("no-such-dir").join("b.json");
+        assert!(write_replacing(&missing, "{}").is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{\"new\": true}");
     }
 
     #[test]
@@ -1328,6 +1522,7 @@ mod tests {
         let mut listing = vec![Listed {
             id: EXT.to_string(),
             enabled: true,
+            permitted: true,
             side_panel_path: None,
         }];
         assert!(orphaned(&panels, &listing).is_empty());
@@ -1389,6 +1584,7 @@ mod tests {
         let mut listing = [Listed {
             id: EXT.to_string(),
             enabled: false,
+            permitted: true,
             side_panel_path: Some("panel.html".to_string()),
         }];
         store.listed(&listing);
@@ -1397,14 +1593,14 @@ mod tests {
         listing[0].enabled = true;
         store.listed(&listing);
         assert!(store.options(EXT, None).0.active());
-        assert!(store.uninstalled(EXT));
-        assert!(!store.uninstalled(EXT));
-        assert!(!store.opens_on_action_click(EXT));
-        assert_eq!(store.options(EXT, None), (PanelOptions::default(), false));
         assert_eq!(
             answer(call(&mut store, &panels, "getLayout", json!({}))),
             json!({ "side": "right" })
         );
+        assert!(store.uninstalled(EXT));
+        assert!(!store.uninstalled(EXT));
+        assert!(!store.opens_on_action_click(EXT));
+        assert_eq!(store.options(EXT, None), (PanelOptions::default(), false));
     }
 
     #[test]

@@ -389,7 +389,7 @@ impl DelegateState {
             return;
         };
         let text = self.side_panels.borrow().behaviors_json();
-        if let Err(e) = std::fs::write(&file, text) {
+        if let Err(e) = crate::bridge::side_panel::write_replacing(&file, &text) {
             log::warn!("cannot write {}: {e}", file.display());
         }
     }

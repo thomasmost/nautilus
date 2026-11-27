@@ -325,6 +325,25 @@ impl Hub {
         )
     }
 
+    /// Drop the side panel options of tabs the published strip no longer
+    /// holds: an extension's `setOptions({tabId})` outlives its tab
+    /// otherwise, for the whole run. Called wherever a strip may have
+    /// been published.
+    fn forget_closed_tabs(&self) {
+        let Some(delegate) = self.delegate.upgrade() else {
+            return;
+        };
+        let state = self.state.borrow();
+        let world = StripWorld {
+            snapshot: &state.published,
+            ids: &state.ids,
+        };
+        delegate
+            .side_panels
+            .borrow_mut()
+            .keep_tabs(|tab| side_panel::World::tab(&world, tab).is_some());
+    }
+
     /// Tell extensions about the panels that opened and closed
     /// (`chrome.sidePanel.onOpened`, `onClosed`): each notice goes to the
     /// contexts of its extension that listen for the event
@@ -363,6 +382,7 @@ impl Hub {
             .state
             .borrow_mut()
             .strip_changed(snapshot, &*self.table, Instant::now());
+        self.forget_closed_tabs();
         self.run(effects);
     }
 
@@ -389,6 +409,7 @@ impl Hub {
             .state
             .borrow_mut()
             .table_changed(&*self.table, Instant::now());
+        self.forget_closed_tabs();
         self.run(effects);
     }
 
@@ -446,6 +467,8 @@ impl Hub {
             }
             state.tick(&*self.table, Instant::now())
         };
+        // A held strip may have been published in this tick.
+        self.forget_closed_tabs();
         self.run(effects);
     }
 

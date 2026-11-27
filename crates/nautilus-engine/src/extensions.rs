@@ -109,9 +109,11 @@ pub(crate) struct ManifestFacts {
     pub module_worker: bool,
     /// `side_panel.default_path`, trimmed; `None` when absent or empty.
     pub side_panel: Option<String>,
-    /// Whether the extension can show a side panel at all: it names a
-    /// default page, or holds the `sidePanel` permission and may set a
-    /// page later with `chrome.sidePanel.setOptions`.
+    /// Whether the extension can show a side panel at all: it holds the
+    /// `sidePanel` permission, with a default page here or one it sets
+    /// later with `chrome.sidePanel.setOptions`. The manifest key alone
+    /// is no panel: Chromium reads it for any Manifest V3 extension and
+    /// makes a panel only for one with the permission.
     pub declares_side_panel: bool,
     /// `commands`, by name, each with this platform's key as written
     /// (`commands::commands_from` parses it).
@@ -177,7 +179,7 @@ pub(crate) fn manifest_facts(manifest: &serde_json::Value, platform: KeyPlatform
             .and_then(|b| b.get("type"))
             .and_then(|t| t.as_str())
             == Some("module"),
-        declares_side_panel: side_panel_permitted || side_panel.is_some(),
+        declares_side_panel: side_panel_permitted,
         side_panel,
         commands,
     }
@@ -984,11 +986,9 @@ mod native {
                 .iter()
                 .any(|k| k.id == id && k.bridged && k.enabled);
             let popup = self.popup_url(id);
-            let panel = if popup.is_none() {
-                self.hub.side_panel_click(id, tab)
-            } else {
-                None
-            };
+            // Asked whether or not the action has a popup: the panel
+            // comes first (`decide_action_click`).
+            let panel = self.hub.side_panel_click(id, tab);
             match decide_action_click(popup, panel, bridged) {
                 ActionClick::Popup(url) => Clicked::Popup(url),
                 ActionClick::Panel(request) => {
@@ -1561,6 +1561,7 @@ mod native {
                 listing.push(crate::bridge::side_panel::Listed {
                     id: id.clone(),
                     enabled,
+                    permitted: manifest.facts.declares_side_panel,
                     side_panel_path: manifest.facts.side_panel.clone(),
                 });
                 known.push(Known {
@@ -2247,6 +2248,28 @@ mod side_panel_manifest_tests {
         let manifest = json!({ "permissions": ["sidePanel", "tabs"] });
         assert_eq!(facts(&manifest).side_panel, None);
         assert!(facts(&manifest).declares_side_panel);
+    }
+
+    #[test]
+    fn a_default_path_without_the_permission_is_no_panel() {
+        // Chromium parses the key for any Manifest V3 extension
+        // (`_manifest_features.json`), but makes a panel only for one that
+        // holds the permission (`ExtensionSidePanelManager::
+        // MaybeCreateExtensionSidePanelCoordinator`), and `chrome.sidePanel`
+        // depends on it (`_api_features.json`).
+        let manifest = json!({ "side_panel": { "default_path": "sidepanel.html" } });
+        assert_eq!(
+            facts(&manifest).side_panel.as_deref(),
+            Some("sidepanel.html")
+        );
+        assert!(!facts(&manifest).declares_side_panel);
+        // An optional permission is not held until it is granted, which
+        // the manifest cannot say.
+        let optional = json!({
+            "optional_permissions": ["sidePanel"],
+            "side_panel": { "default_path": "sidepanel.html" }
+        });
+        assert!(!facts(&optional).declares_side_panel);
     }
 
     #[test]

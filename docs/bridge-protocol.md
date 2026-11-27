@@ -942,6 +942,23 @@ Chromium gave it. Known: a panel's own page that calls `getContexts`
 while its first calls are still held (`Hold::Tab`, up to 2 s) gets the
 fallback.
 
+**The permission.** A `sidePanel` call of an extension whose manifest
+does not hold the `sidePanel` permission is rejected (`chrome.sidePanel
+is not available: the extension's manifest does not hold the "sidePanel"
+permission.`), whichever context made it: the script installs nothing
+for such an extension, but any context can call the bridge directly.
+`sidePanel.closeSelf` and `runtime.getContexts` are answered for every
+extension. The manifest's `side_panel.default_path` without the
+permission is no panel, as in Chromium, which parses the key for any
+Manifest V3 extension and makes a panel only for one with the
+permission (`SidePanelStore::listed`, `ManifestFacts::declares_side_panel`).
+`optional_permissions` are not counted. A tab's own options
+(`setOptions({tabId})`) are dropped when the published strip no longer
+holds the tab (`SidePanelStore::keep_tabs`). `setOptions` that gives a
+tab its first own options while the window's panel is shown on that tab
+changes nothing on screen, as in Chromium 156. The behaviour file is
+written to `side-panel-behavior.json.tmp` and renamed into place.
+
 Any other `sidePanel` method rejects
 `chrome.sidePanel.<name> is not supported in this browser.`; any other
 `runtime` method is not bridged at all (the script replaces only
@@ -1004,10 +1021,12 @@ held like a call from a tab the strip does not hold while a strip is
 pending (`Hold::Tab`, 2 s at most).
 
 **The action click.** `ExtensionManager::click` is the one decision
-(`side_panel::decide_action_click`): the popup if the action has one,
-else the panel when the extension asked for it with `setPanelBehavior`
-and the tab has an active panel (`Hub::side_panel_click`), else
-`action.onClicked` through the bridge as before. The toolbar
+(`side_panel::decide_action_click`), in Chromium's order
+(`ExtensionActionRunner::RunAction`): the panel when the extension asked
+for it with `setPanelBehavior` and the tab has an active panel
+(`Hub::side_panel_click`), even when the action has a popup; else the
+popup if the action has one; else `action.onClicked` through the bridge
+as before. The toolbar
 (`TabHost::open_extension_action`) and the test control's `click` both
 take it; the control's log line says `sent to the bridge`, `not sent`,
 `opened or closed its side panel`, or `the action has a popup, which the
