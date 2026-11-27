@@ -99,6 +99,32 @@
     removed[id] = Date.now();
   });
 
+  // The panel page's debugger check (panel.js, debuggerCheck). While the
+  // page holds a session on a tab, what this worker can do with that tab:
+  // a command through the page's session, and an attach of its own. Then
+  // the page waits here (a checkpoint) while the harness reads the log.
+  const debuggerSteps = { held: null, done: null };
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message && typeof message.debuggerProbe === 'number') {
+      const tabId = message.debuggerProbe;
+      const said = (promise) => promise.then(() => 'ok', (error) => 'rejected: ' + error.message);
+      (async () => {
+        const command = await said(chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression: '1', returnByValue: true }));
+        const attach = await said(chrome.debugger.attach({ tabId }, '1.3'));
+        // A second session of this worker's own would be its own to end.
+        const detach = attach === 'ok' ? await said(chrome.debugger.detach({ tabId })) : 'not tried';
+        sendResponse({ command, attach, detach });
+      })();
+      return true;
+    }
+    if (message && typeof message.debuggerHeld === 'number') {
+      checkpoint('debugger-held').then(() => sendResponse(true));
+      return true;
+    }
+    if (message && typeof message.debuggerDone === 'number' && debuggerSteps.done) debuggerSteps.done();
+    return undefined;
+  });
+
   async function panelSuite() {
     const sp = chrome.sidePanel;
     const self_ = chrome.runtime.id;
@@ -286,6 +312,14 @@
     );
     chrome.runtime.sendMessage({ command: 'describe' }).catch(() => {});
     await checkpoint('bystander-page');
+
+    // The panel's page attaches chrome.debugger to the tab that is behind
+    // the active one, and commands it (panel.js). The harness judges the
+    // timings and the engine's log.
+    const finished = new Promise((resolve) => { debuggerSteps.done = resolve; });
+    chrome.runtime.sendMessage({ command: 'debugger-check', tabId: other.id }).catch(() => {});
+    await Promise.race([finished, sleep(40000)]);
+    await checkpoint('debugger-done');
     let before = seen();
     await sp.setOptions({ path: 'panel-tab.html' });
     step(
@@ -435,7 +469,11 @@
     const commands = [];
     chrome.commands.onCommand.addListener((command, tab) => commands.push({ command, tab: tab && tab.id, window: tab && tab.windowId }));
     const clicks = [];
-    chrome.action.onClicked.addListener((tab) => clicks.push(tab && tab.id));
+    const clicked = [];
+    chrome.action.onClicked.addListener((tab) => {
+      clicks.push(tab && tab.id);
+      clicked.push(tab);
+    });
     const names = () => events.map((e) => e[0]);
     const shape = (title) => ({ id: null, collapsed: false, color: 'grey', title, windowId: window, shared: false });
     const is = (group, id, title) => same(group, { ...shape(title), id });
@@ -511,6 +549,20 @@
       await until(() => clicks.length >= 1, 10) && clicks.length === 1 && tabs.some((t) => t.id === clicks[0]) && commands.length === 1,
       { clicks, commands }
     );
+
+    // The click's tab is the tab as the strip has it: the window id and the
+    // index an extension passes on to sidePanel.open and tabs.group, and
+    // the group the tab is in now.
+    const hit = clicked[0] || {};
+    const known = (await chrome.tabs.query({})).find((t) => t.id === hit.id) || {};
+    step(
+      "action.onClicked's tab has the strip's windowId, index, active and groupId",
+      hit.windowId === window && hit.windowId >= 1 && hit.index === known.index && hit.index >= 0 &&
+        hit.active === known.active && hit.groupId === known.groupId && typeof hit.url === 'string',
+      { clicked: hit, strip: { id: known.id, index: known.index, windowId: known.windowId, active: known.active, groupId: known.groupId } }
+    );
+    const reopened = await rejection(chrome.sidePanel.getOptions({ tabId: hit.id }));
+    step('and its id and windowId are ones the bridge takes', reopened === null && (await chrome.windows.get(hit.windowId).then((w) => w.id === window, () => false)), reopened);
 
     const ungrouped = await chrome.tabs.ungroup([active.id]).then((value) => (value === undefined ? 'undefined' : value), (error) => error.message);
     step('tabs.ungroup([tab]) resolves undefined', ungrouped === 'undefined', ungrouped);

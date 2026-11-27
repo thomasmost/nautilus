@@ -492,6 +492,8 @@ def panel_checks(h):
         "extra-open": lambda: h.check("the window panel is open for the further checks", wait(lambda: h.shown("panel.html"))),
         "bystander": lambda: bystander(h),
         "bystander-page": lambda: bystander_page(h),
+        "debugger-held": lambda: debugger_held(h),
+        "debugger-done": lambda: debugger_done(h),
         "path-changed": lambda: path_changed(h),
         "path-restored": lambda: h.check(
             "setOptions({path}) back shows the first page again",
@@ -672,6 +674,49 @@ def bystander_page(h):
     info = (said["data"].get("info") or {}) if said else {}
     h.check("after another extension is installed chrome.sidePanel is still the engine's in the panel's page",
             info.get("frozen") is True and info.get("property", {}).get("configurable") is False, info or None)
+
+
+def debugger_lines(h):
+    log = h.log_text()
+    return (re.findall(r"bridge: TabId\(\d+\) \(Chromium tab \d+\) was hidden; shown for the debugger of " + re.escape(h.ext_id or "-"), log),
+            re.findall(r"bridge: TabId\(\d+\) \(Chromium tab \d+\) hidden again: no debugger is left on it", log))
+
+
+def debugger_held(h):
+    """The panel's page holds a chrome.debugger session on the tab behind
+    the active one (panel.js, debuggerCheck): the engine has shown that tab
+    for it, and every command was answered at once."""
+    said = wait(lambda: latest("debugger-check", lambda d: d.get("phase") == "attached"), 5)
+    data = said["data"] if said else {}
+    h.note("the panel page's debugger on the background tab: " + json.dumps(data))
+    h.check("the page's bridge wraps chrome.debugger", "debugger.reports" in (data.get("installed") or []), data.get("installed"))
+    commands = data.get("commands") or []
+    sent = [c for c in commands if c.get("name") != "attach"]
+    h.check("the panel page attached its debugger to the background tab",
+            any(c.get("name") == "attach" and c.get("outcome") == "ok" for c in commands), commands)
+    h.check("each of its DevTools commands was answered in under a second",
+            len(sent) == 6 and all(c.get("outcome") == "ok" and c.get("ms", 9999) < 1000 for c in sent),
+            [(c.get("name"), c.get("ms"), c.get("outcome")) for c in sent])
+    h.note("command times in ms: " + json.dumps([c.get("ms") for c in sent])
+           + "; attach: " + json.dumps([c.get("ms") for c in commands if c.get("name") == "attach"]))
+    shown, hidden = debugger_lines(h)
+    h.check("the log shows the background tab shown for the page's debugger, and not hidden again while it is held",
+            len(shown) == 1 and not hidden, [shown, hidden])
+    worker = data.get("worker")
+    h.note("the worker on the same tab while the page holds the session: " + json.dumps(worker))
+    h.check("the session is the extension's, not the page's: the worker commands the tab through it and cannot attach a second",
+            isinstance(worker, dict) and worker.get("command") == "ok"
+            and "already attached" in str(worker.get("attach")), worker)
+
+
+def debugger_done(h):
+    said = wait(lambda: latest("debugger-check", lambda d: d.get("phase") == "done"), 5)
+    data = said["data"] if said else {}
+    detach = [c for c in data.get("commands") or [] if c.get("name") == "detach"]
+    h.check("the panel page detached its debugger", len(detach) == 1 and detach[0].get("outcome") == "ok" and "error" not in data,
+            data.get("error") or detach)
+    hidden = wait(lambda: len(debugger_lines(h)[1]) == 1, 5)
+    h.check("after the detach the log shows the tab hidden again", hidden, debugger_lines(h))
 
 
 def path_changed(h):

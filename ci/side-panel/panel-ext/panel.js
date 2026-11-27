@@ -66,6 +66,47 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message && message.command === 'describe') describe(location.pathname.slice(1) + ', after another extension was installed');
 });
 
+// A debugger held by this page on a tab behind another (the worker asks
+// for it): attach, a few DevTools commands each timed, what the worker can
+// do with the same tab meanwhile, detach. The engine must have shown the
+// tab by the time attach resolves, or each command takes seconds.
+async function debuggerCheck(tabId) {
+  const page = location.pathname.slice(1);
+  const out = { page, tabId, installed: self.__nautilusBridge ? self.__nautilusBridge.installed : null, commands: [] };
+  const timed = async (name, call) => {
+    const started = performance.now();
+    const outcome = await call().then(() => 'ok', (error) => 'rejected: ' + error.message);
+    out.commands.push({ name, ms: Math.round(performance.now() - started), outcome });
+  };
+  try {
+    await timed('attach', () => chrome.debugger.attach({ tabId }, '1.3'));
+    for (let i = 0; i < 3; i += 1) {
+      await timed('Input.dispatchMouseEvent', () =>
+        chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', { type: 'mouseMoved', x: 20 + i, y: 20 })
+      );
+    }
+    for (let i = 0; i < 3; i += 1) {
+      await timed('Runtime.evaluate', () =>
+        chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', { expression: '1 + 1', returnByValue: true })
+      );
+    }
+    // The same tab from the worker, while this page holds the session.
+    out.worker = await chrome.runtime.sendMessage({ debuggerProbe: tabId }).catch((error) => 'no answer: ' + error.message);
+    await record('debugger-check', Object.assign({ phase: 'attached' }, out));
+    // The harness reads the log while the session is held, then lets go.
+    await chrome.runtime.sendMessage({ debuggerHeld: tabId }).catch(() => {});
+    await timed('detach', () => chrome.debugger.detach({ tabId }));
+  } catch (error) {
+    out.error = String((error && error.message) || error);
+  }
+  await record('debugger-check', Object.assign({ phase: 'done' }, out));
+  chrome.runtime.sendMessage({ debuggerDone: tabId }).catch(() => {});
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message && message.command === 'debugger-check') debuggerCheck(message.tabId);
+});
+
 (async () => {
   const page = location.pathname.slice(1);
   describe(page);
