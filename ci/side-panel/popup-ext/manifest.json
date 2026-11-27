@@ -1,0 +1,7 @@
+{
+  "manifest_version": 3,
+  "name": "Nautilus Popup Close Test",
+  "version": "1.0",
+  "description": "An action with a popup whose button calls window.close(). The side panel run installs it in the middle of its checks; the popup's close is checked by hand.",
+  "action": { "default_title": "Popup close test", "default_popup": "popup.html" }
+}

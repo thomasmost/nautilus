@@ -55,6 +55,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 APP = REPO / "target/release/Nautilus.app/Contents/MacOS/Nautilus"
 EXT = HERE / "panel-ext"
+POPUP_EXT = HERE / "popup-ext"
 RUN_SH = HERE / "run.sh"
 PORT = 47616
 PANEL_WIDTH = 360  # osmena-chrome theme::SIDE_PANEL_WIDTH, in points
@@ -560,18 +561,11 @@ def click_close(h):
 def bystander(h):
     """Install a second extension while the test extension's worker and its
     panel's page are alive: Chromium then defines every API on `chrome`
-    again in each of them."""
-    other = h.out / "bystander"
-    shutil.rmtree(other, ignore_errors=True)
-    other.mkdir(parents=True)
-    (other / "manifest.json").write_text(json.dumps({
-        "manifest_version": 3,
-        "name": "Nautilus Panel Test Bystander",
-        "version": "1.0",
-        "description": "Installed in the middle of the side panel run. It does nothing.",
-    }, indent=2) + "\n")
+    again in each of them. It is the popup extension, whose popup's close is
+    one of the steps by hand."""
+    other = POPUP_EXT
     h.send({"load": str(other)})
-    listed = wait(lambda: h.installed_id("Nautilus Panel Test Bystander"), 30)
+    listed = wait(lambda: h.installed_id("Nautilus Popup Close Test"), 30)
     h.check("a second extension is installed while the panel is open", listed is not None)
     time.sleep(2)  # the renderers hear of it after the browser does
 
