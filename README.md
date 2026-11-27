@@ -70,6 +70,19 @@ this repository holds only what is Chromium's.
   Settings) or load
   an unpacked directory; pin them to the toolbar, where their popups
   open under the button; switch them off or remove them in Settings.
+  An extension's side panel (`chrome.sidePanel`) opens docked at the
+  right of the window under a header with its name and a close
+  control, from the extension itself, its toolbar button or its
+  keyboard shortcut; a toolbar button without a popup clicks through
+  to the extension; a shortcut an extension declares works unless a
+  Nautilus shortcut has the keys, and Settings lists them. Extensions
+  see Nautilus's own tabs and windows, and a tab group an extension
+  makes is a tab folder in the strip. The panel, the folders, the
+  keymap and the Settings list are osmena's (its README has that
+  behaviour); here the panel's page is one more off-screen Chromium
+  browser and `chrome.tabs`, `windows`, `tabGroups`, `sidePanel` and
+  `commands` are answered by the extension bridge
+  (`docs/bridge-protocol.md`).
 - **Session restore.** "Continue where you left off" brings the windows
   and tabs back where they were (tabs load when first shown, after a
   look at each in turn, half a second apart, for its title and
@@ -266,9 +279,51 @@ under `<dir>` instead, for a second Nautilus beside the first.
   id, so `sender.tab` carries the strip's fields. The relay page's port is
   adopted although the engine hosts that page in a tab. The status is described
   in `docs/bridge-protocol.md`, "The scripted run (phase5.py)".
+- `ci/side-panel/panel.sh panel|groups|behavior|sample-global
+  <dir>|sample-site <dir>` (macOS, needs the same bundle; judge each by
+  its exit status, not through a pipe) — the side panel, tab groups and
+  commands in the real window. `panel_checks.py` starts the browser
+  through `run.sh serve` on a scratch data directory, with no DevTools
+  port, loads its own test extension (`ci/side-panel/panel-ext`)
+  through the test control, and reads what the extension's worker and
+  pages report to its local server; it prints PASS or FAIL per check
+  and captures the launched browser's window into
+  `ci/side-panel/out/shots-<mode>/`, to be looked at. Every launch is
+  judged as `run.sh` judges one (exit status, crash and leak markers).
+  `panel` (about 150 s, then `HOLD` seconds, default 180, with the
+  window panel left open for the steps by hand) checks
+  `chrome.sidePanel` for a window and for a tab, its rejections,
+  `getContexts`, the page's and the panel's widths, a tab's panel
+  showing only with its tab, `setOptions` and `window.close()` closing
+  a panel, the action's click through the test control, a second
+  window's panel, `browser.*` against `chrome.*`, a second extension
+  (`ci/side-panel/popup-ext`) installed mid-run, and a debugger
+  attached from the panel's page to a background tab. `groups` checks
+  `tabs.group`, `tabGroups.update`, `get`, `query` and `tabs.ungroup`
+  with the calls an extension makes as it opens its panel, each read
+  straight after the call before it, the group events' order, and a
+  declared command and `_execute_action` through the control's
+  `extension_command`. `behavior` launches twice on one kept data
+  directory: the first sets `setPanelBehavior` and reads
+  `side-panel-behavior.json`, the second calls nothing and a click
+  must still open the panel. `sample-global` and `sample-site` take
+  the directory of the side panel cookbook of that name from a
+  checkout of GoogleChrome/chrome-extensions-samples
+  (`functional-samples/cookbook.sidepanel-global` and
+  `cookbook.sidepanel-site-specific`; run at its commit `7314683`),
+  copy it with a probe added to its page, and click its action three
+  times; `sample-site` needs `www.google.com` to load. **Status:** on
+  2026-11-27 (`79eb6c4`) `panel` passed 116 checks, `groups` 44 and
+  `behavior` 23, none failing; the two samples last ran earlier that
+  day, before the groups and commands work, with 11 and 22. Not in CI.
+  No run presses a key or moves the pointer: the toolbar's button, a
+  shortcut's keys and everything inside a panel are checklist item 25.
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the
   browser read commands from the named directory: `load` an unpacked
-  extension, `click` an action, send a raw DevTools message on the
+  extension, `click` an action (which opens or closes a side panel
+  where the toolbar's button would, and never opens a popup),
+  `extension_command` (an extension's shortcut as if pressed for the
+  focused tab), send a raw DevTools message on the
   management browser's browser-wide channel (its answers go to
   `devtools.log`, which records that browser's DevTools traffic), and
   `table`. The hook exists only in a build with the `test-hooks` cargo
@@ -566,6 +621,36 @@ engine glue. Each item must pass.
     the same run shows no dialog. After a restart it asks once more.
 24. **Clean exit.** Closing the last window and Cmd+Q both exit with code 0,
     and no `nautilus` process is left behind (Task Manager / `ps`).
+25. **Extension side panel.** The two extensions to try are Claude
+    (<https://chromewebstore.google.com/detail/claude/fcoeoabgfenejglbffodgkkbkcdhcgfn>)
+    and Raindrop.io, installed from the store as in item 12 and pinned.
+    Click Claude's toolbar button: a panel opens at the right of the
+    window under a header reading "Claude" with a close control, the
+    page is narrower beside it, and a folder named "Claude" appears in
+    the strip around the tab. Move the pointer over the panel's
+    buttons and links: each lights under the pointer where it is
+    drawn, and a click lands on what is under it. Click in a text
+    field of the panel and type: the text goes into the panel, not the
+    page; a click in the page gives typing back to the page. With the
+    keyboard in the panel, Cmd+L (Ctrl+L on Windows) still focuses the
+    address bar and Cmd+T opens the Launch Panel. Click the header's
+    close control: the panel goes and the page takes the full width
+    again. Cmd+E (Ctrl+E on Windows), Claude's own shortcut, opens the
+    panel, and pressed again closes it (signed in to claude.ai; on its
+    sign-in screen the second press does nothing); Settings lists the
+    shortcut under Extensions. Switch to another tab: Claude's panel
+    belongs to its tab and is not shown; switch back and it is.
+    Open Raindrop.io's panel (its toolbar button, or the shortcut
+    Settings lists for it): it opens under a header reading
+    "Raindrop.io" and its page renders. If that panel is the window's
+    it stays beside every tab, except that Claude's tab shows Claude's
+    panel while Claude's is open, and the window's is back on the next
+    tab. Full screen
+    (F11, Ctrl+Cmd+F on macOS) shows the page alone; leaving it brings
+    the panel back. Click the toolbar button of an extension that has
+    a popup (item 12) while a panel is open: the popup opens and
+    closes as before. Quit with a panel open: a clean exit (item 24),
+    and after a restart no panel is open.
 
 ## Packaging
 
@@ -742,9 +827,10 @@ Upstream causes and the features they block are tracked in
   Extensions see Nautilus's tabs and windows through a bridge that
   replaces `chrome.tabs` and `chrome.windows`: pinning, muting state,
   window bounds and focus changes asked for by an extension are not
-  carried out, `windows.create` always opens an ordinary window, a tab
-  cannot be moved between windows, and `tabs.group` rejects until tab
-  groups arrive. A page's address and title are given only to an
+  carried out, `windows.create` always opens an ordinary window, and a
+  tab cannot be moved between windows (side panels, tab groups and
+  shortcuts have the next bullet). A page's address and title are
+  given only to an
   extension whose manifest has the `tabs` permission or a matching host
   permission (`activeTab` and optional permissions are not counted; in
   Manifest V3 a host pattern counts only under `host_permissions`). A host
@@ -769,7 +855,9 @@ Upstream causes and the features they block are tracked in
   `iframe`s have no `chrome.tabs`. The relay page and the helper's pages are
   not bridged, and neither is Chromium's own PDF viewer, which is an
   extension page too and keeps Chromium's `chrome.tabs`. A tab an extension is
-  debugging is kept painted, for any extension whose worker is bridged; a background tab nothing
+  debugging is kept painted, whether the debugger was attached from the
+  extension's worker or from one of its pages, and counts as visible to its
+  own page meanwhile; a background tab nothing
   reported as debugged is hidden, so DevTools ("Inspect") on a background
   tab is slow until it is shown. A debugged tab is hidden again when its
   extension is reloaded and the browser sees its session end (measured
@@ -778,9 +866,9 @@ Upstream causes and the features they block are tracked in
   bridge page that will not load is given up after five openings: its
   extension's clicks are refused until the extension changes, and its
   debuggers are kept (the browser forgets a debugger only on the worker's
-  own word, or when the extension is off or its tab closes). A debugger
-  called from an extension page (popup, options, side panel) is not reported
-  (see `docs/bridge-protocol.md`, "Limits in protocol 1"). A symlink in an
+  own word, or when the extension is off or its tab closes). A page's
+  report of a debugger on a tab the browser cannot name yet is dropped, not
+  kept for later. A symlink in an
   unpacked extension is not copied: it is skipped with a warning that
   names it, and a worker entry that is a link or missing fails the load.
   Dot-files and dot-directories (`.git`, `.DS_Store`) are not copied
@@ -797,6 +885,55 @@ Upstream causes and the features they block are tracked in
   removal in its preferences up to ten seconds later, so closing the
   browser within that time keeps the process alive, windowless, until
   it has.
+- Extension side panels, tab groups and shortcuts, where they differ
+  from Chrome or stop short. Chromium's own side panel, tab groups and
+  commands know nothing of Nautilus's windowless tabs (C11 to C13 in
+  `docs/upstream-issues.md`), so Nautilus answers `chrome.sidePanel`,
+  `chrome.tabGroups` and `chrome.commands` itself, on `chrome` and on
+  `browser`, and a function it does not know rejects as unsupported
+  rather than reaching Chromium.
+  - `sidePanel.open` needs no user gesture: an extension can open its
+    panel at any time, which Chrome refuses (C20). A click or a
+    shortcut Nautilus delivers grants no `activeTab` either.
+  - The panel is 360 points wide, at the right, and cannot be resized
+    or moved; it is not drawn in full screen or in a window too narrow
+    for it and the page (it is back when there is room).
+  - A panel has no context menu, takes no text from an input method
+    (as pages take none), and cannot use the microphone or the camera;
+    a window it opens becomes a tab without an opener.
+  - A tab's `setOptions({tabId, enabled: false})` cannot hide the
+    window's panel on that tab alone.
+  - A panel is not restored after a restart, and a panel's page loads
+    again each time the panel is opened. Options set with `setOptions`
+    last for the run; only `setPanelBehavior` is kept.
+  - A message from a panel's page has no `sender.tab`, as in Chrome,
+    except that the first message a panel sends as it loads, or the
+    first one a just-started worker receives, can still carry one
+    (with `index` and `windowId` -1). A port from a panel
+    (`runtime.onConnect`) keeps the `sender.tab` Chromium gives it.
+  - Every tab group is grey: a folder has no colour, and a colour
+    passed to `tabGroups.update` is ignored. `tabGroups.move` is
+    refused and `tabGroups.onMoved` never fires. Tabs are grouped
+    within their own window only.
+  - `commands.getAll` reports the shortcut a command declares even
+    when a Nautilus shortcut has the keys and the command can never
+    fire (Settings shows which are not active). An extension's
+    shortcut cannot be assigned or changed.
+  - What an extension sets on its toolbar button is not shown: the
+    badge and its colours, a title, an icon set at run time.
+    `chrome.action` is Chromium's own and Nautilus draws the button
+    from the manifest. `action.getUserSettings` is Chromium's answer
+    too, which knows nothing of the pins here (read in the code, not
+    seen to matter).
+  - An optional permission granted while an extension runs
+    (`permissions.request`) is not expected to give its API to the
+    worker or page that asked until that context starts again (C19;
+    read in Chromium's source, not seen).
+  - An event for an extension's worker (a command among them) that is
+    queued while the worker is being replaced is dropped; a click is
+    not.
+  - Not run on Windows. On macOS nothing here has been done with a
+    real pointer or key by the project's own runs (checklist item 25).
 - **No H.264 video or AAC audio.** The CEF binaries Nautilus builds
   against are open-source Chromium builds without the patented codecs
   (Chrome ships them under Google's licence). Pages that serve only
@@ -834,3 +971,8 @@ Upstream causes and the features they block are tracked in
       keys) and offer to become the default there
 - [ ] An Icon Composer icon for macOS 26
 - [ ] A history page
+- [ ] Assigning and changing an extension's keyboard shortcut, and
+      `commands.getAll` telling an extension which of its shortcuts
+      the keymap leaves it
+- [ ] An extension's badge, title and icon on its toolbar button
+- [ ] The extension side panel's checklist item (25) on Windows

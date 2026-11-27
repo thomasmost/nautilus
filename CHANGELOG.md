@@ -101,6 +101,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
   a magnifier, its tiles are cards on rows as tall as their tallest
   tile, and Most visited is a shelf of shortcut discs across the
   panel, so the mosaic has no hole.
+- The toolbar button of an extension that has a popup and has also
+  asked for its side panel on a click
+  (`sidePanel.setPanelBehavior({openPanelOnActionClick: true})`) opens
+  and closes the panel, as in Chrome; it used to open the popup.
 - An extension's toolbar action with no popup now shows its button in
   the toolbar and the puzzle menu; pressing it sends the click to the
   extension's worker through the extension bridge.
@@ -118,7 +122,8 @@ has no releases yet; `Unreleased` holds everything on `main`.
   off, with a message.
 - An extension whose bridge cannot be put in is switched off with a message,
   and an extension page whose bridge cannot be put in refuses Chromium's
-  `tabs` and `windows` rather than leaving them callable.
+  `tabs`, `windows`, `tabGroups`, `commands` and `sidePanel` rather than
+  leaving them callable.
 - `captureVisibleTab` captures only a web page (`http`, `https`, `ftp`,
   `data`) or the extension's own pages. A browser page, another extension's
   page or a file page is refused, with a message that names its address.
@@ -132,6 +137,45 @@ has no releases yet; `Unreleased` holds everything on `main`.
   message.
 
 ### Added
+
+- Extension side panels. An extension that uses `chrome.sidePanel`
+  shows its page in a panel docked at the right of the window, beside
+  the page, under a header with the extension's icon and name and a
+  close control (osmena 13b073b draws it; the page in it is one more
+  off-screen Chromium browser here). The extension opens the panel
+  itself (`sidePanel.open`), for the window, where it stays beside
+  every tab, or for one tab, where it shows only while that tab is the
+  active one; an extension that asked for it (`setPanelBehavior`) has
+  the panel opened and closed by its toolbar button. `chrome.sidePanel`
+  (`setOptions`, `getOptions`, `open`, `close`, `setPanelBehavior`,
+  `getPanelBehavior`, `getLayout`, `onOpened`, `onClosed`) is answered
+  by Nautilus, and `chrome.runtime.getContexts` lists an open panel as
+  a `SIDE_PANEL` context. The panel is 360 points wide and is not
+  drawn in full screen or in a window too narrow for it. It has no
+  context menu, takes no text from an input method and cannot use the
+  microphone or the camera; a window it opens becomes a tab; and
+  `sidePanel.open` is not held to a user gesture, as Chrome holds it.
+  A panel is not brought back after a restart; what an extension chose
+  with `setPanelBehavior` is.
+- Tab groups for extensions, as tab folders. `chrome.tabs.group` makes
+  a folder in the strip, expanded and named "<extension name> Session"
+  until the extension titles it; `chrome.tabGroups.update` renames,
+  collapses and expands it, `chrome.tabs.ungroup` takes tabs out, and a
+  folder whose last tab goes is gone. `tabGroups.get` and `query` list
+  the folders, one made by hand among them, and `tabGroups.onCreated`,
+  `onUpdated` and `onRemoved` fire whoever made the change. Folders
+  have no colour: every group reports grey and a colour passed to
+  `update` is ignored. `tabGroups.move` is refused, and tabs are
+  grouped within their own window only.
+- Extension keyboard shortcuts. A shortcut an extension declares in its
+  manifest (`commands`, with the key it suggests for this platform)
+  runs its `chrome.commands.onCommand` listeners with the active tab,
+  starting its service worker if it had stopped, or acts as a click on
+  its toolbar button for `_execute_action`. The browser's own shortcuts
+  win: a chord the keymap uses stays the keymap's, and Settings lists
+  each extension's shortcuts and marks the ones that are not active
+  (osmena). `chrome.commands.getAll` lists the commands with the
+  shortcuts they declare, also for one that is not active.
 
 - A tab pulled more than a tab's height off the strip comes away from
   it, and let go there it opens in a window of its own under the
@@ -166,8 +210,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
   tab's id is the one `chrome.scripting`, `chrome.debugger` and
   `chrome.webNavigation` accept. A restored tab that has not loaded yet is
   listed too and takes its real id when first shown (`tabs.onReplaced`).
-  `tabs.group` and `tabs.discard`, which used to crash the browser, now
-  answer without reaching Chromium. An unpacked extension is run from a
+  `tabs.discard`, which used to crash the browser, now answers without
+  reaching Chromium, and `tabs.group` makes a tab folder (above). An
+  unpacked extension is run from a
   copy inside the profile: choose "Load unpacked…" on the same folder again
   to pick up edits.
 - Each profile gets a small helper extension, written into it on start,
@@ -208,6 +253,26 @@ has no releases yet; `Unreleased` holds everything on `main`.
   read itself was unsafe. Seen with the Claude extension started
   again on a profile that already had it: its log line named the
   extension as 32 bytes of 0xCD.
+
+- Extensions that reach the browser through `browser.*` see
+  Nautilus's tabs and windows. Chromium 156 gives an extension a
+  `browser` object beside `chrome`, and only `chrome`'s `tabs` and
+  `windows` were Nautilus's: an extension written against `browser`
+  (Proton Pass reaches its tabs that way) was shown none of the
+  browser's tabs, could open a Chromium window of its own with
+  `browser.tabs.create`, and could end the browser with
+  `browser.tabs.group`. `browser.tabs`, `windows`, `tabGroups`,
+  `commands` and `sidePanel` are now the very objects `chrome` has.
+- A tab that an extension debugs from one of its pages (a side panel,
+  a popup, a page in a tab) and that is behind another tab answers at
+  once. Only a debugger attached from the extension's service worker
+  kept such a tab painting; attached from a page, every input command
+  to the tab waited five seconds.
+- The tab an extension's `action.onClicked` listener is given has its
+  window and its place in the strip; it had `windowId` -1 and `index`
+  -1.
+- `chrome.runtime.getContexts` no longer lists a page of the browser's
+  own (the extension bridge's) among an extension's contexts.
 
 - A folder's chip no longer sits on top of one of its window's tabs.
   A folder and a tab that happened to carry the same number inside
@@ -374,11 +439,10 @@ has no releases yet; `Unreleased` holds everything on `main`.
   was behind another tab stopped answering input and screenshots, so
   each of the debugger's calls to it waited about five seconds. Such a
   tab is now kept painting while the extension debugs it, and hidden
-  again when the last debugger goes. For an extension the bridge reaches,
-  the bridge reports each attach and detach, by tab id or by target id
-  (`attach({targetId})`). In this build the bridge reaches the scripted
-  test extension only: a store-installed or "Load unpacked…" extension's
-  debugger is not reported yet, nor one called from an extension page.
+  again when the last debugger goes. The bridge reports each attach and
+  detach, by tab id or by target id (`attach({targetId})`), for every
+  extension it is in (a store install, "Load unpacked…"), from the
+  extension's service worker and from its pages.
   A background tab that no reported debugger is on stays hidden as before.
 - A tab that an extension is debugging is hidden again when the extension
   is reloaded and the browser sees its debugger session end. Before, a
