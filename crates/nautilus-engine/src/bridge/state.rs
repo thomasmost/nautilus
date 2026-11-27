@@ -15,6 +15,7 @@ use super::pattern::Grants;
 use super::router::{self, Outcome, Settled, Then};
 use super::shape::View;
 use super::snapshot::Snapshot;
+use super::table::PanelIds;
 use super::transport::{Asker, BridgeCall, CallId};
 use super::{ExtensionFacts, NO_FACTS};
 
@@ -101,6 +102,10 @@ pub(crate) enum Effect {
     },
 }
 
+/// The event that tells a context the Chromium tab ids of its extension's
+/// open side panels (`js/runtime.js` taps it): one argument, the list.
+pub(crate) const PANELS_EVENT: &str = "bridge.panels";
+
 /// Whether `call` is one the side panel's stores answer, not the router.
 fn side_panel_call(call: &BridgeCall) -> bool {
     call.namespace == "sidePanel" || (call.namespace == "runtime" && call.method == "getContexts")
@@ -154,6 +159,9 @@ pub(crate) struct BridgeState {
     last_focused: Option<WindowId>,
     /// The window of each open side panel's view (`set_panel_windows`).
     panel_windows: HashMap<TabId, WindowId>,
+    /// The Chromium tab ids of the open panels' pages, which the scripts
+    /// take off `sender.tab` (`table::PanelIds`).
+    panel_ids: PanelIds,
     seq: u64,
 }
 
@@ -179,7 +187,45 @@ impl BridgeState {
     /// registry: what "the current window" is for a call from a panel's
     /// page (`View::current_window`).
     pub(crate) fn set_panel_windows(&mut self, panels: HashMap<TabId, WindowId>) {
+        // A closed panel's Chromium id is no panel's any more. The scripts
+        // are not told (that would start a stopped worker to forget an id
+        // Chromium never gives out again in this run); they hear the whole
+        // list at the next panel, and ask for it when they start.
+        self.panel_ids.keep(|view| panels.contains_key(&view));
         self.panel_windows = panels;
+    }
+
+    /// The page of `extension`'s panel in `view` reported its Chromium tab
+    /// id (`pages::panel_report`). Kept while the panel is open, and told
+    /// to the contexts of that extension that listen (`bridge.panels`,
+    /// with every id of the extension's panels), so a message from the
+    /// panel's page reaches them without a `sender.tab`. Refused: the view
+    /// is no open panel, or the id is a strip tab's.
+    pub(crate) fn panel_reported(
+        &mut self,
+        view: TabId,
+        extension: &str,
+        chromium: i64,
+    ) -> Vec<Effect> {
+        let strip_tab = self
+            .ids
+            .tab(chromium)
+            .is_some_and(|tab| self.published.locate(tab).is_some());
+        if strip_tab || !self.panel_windows.contains_key(&view) {
+            log::warn!(
+                "bridge: {extension}'s side panel report of Chromium tab {chromium} for {view:?} was ignored"
+            );
+            return Vec::new();
+        }
+        if !self.panel_ids.report(view, extension, chromium) {
+            return Vec::new();
+        }
+        log::info!("bridge: {extension}'s side panel {view:?} is Chromium tab {chromium} (no tab)");
+        self.emit(
+            extension,
+            PANELS_EVENT,
+            vec![json!(self.panel_ids.of(extension))],
+        )
     }
 
     /// Whether `tick` has anything to wait for.
@@ -251,9 +297,24 @@ impl BridgeState {
                     }
                     Ok(Value::Null)
                 }
+                // What a context asks as it starts: the Chromium tab ids
+                // of its extension's open side panels.
+                ("panels", _) => Ok(json!(self.panel_ids.of(&call.extension))),
                 _ => Err(router::unsupported("bridge", &call.method)),
             };
             return vec![Effect::Reply(call.id, result)];
+        }
+        // `sender.tab`'s strip, asked for an id that is a panel's: the
+        // mark, in place of the `null` a tab the strip lacks gets.
+        if call.namespace == "tabs"
+            && call.method == "stripOf"
+            && call
+                .args
+                .first()
+                .and_then(Value::as_i64)
+                .is_some_and(|id| self.panel_ids.holds(&call.extension, id))
+        {
+            return vec![Effect::Reply(call.id, Ok(json!({ "panel": true })))];
         }
         if side_panel_call(&call) {
             return vec![Effect::SidePanel(call)];
@@ -1465,6 +1526,99 @@ mod tests {
             state.outcome_effects(10, EXT, Outcome::Reject("no".into())),
             vec![Effect::Reply(10, Err("no".into()))]
         );
+    }
+
+    #[test]
+    fn a_panels_chromium_id_is_told_to_its_extension_and_is_never_a_tab() {
+        const PANELS: &str = "bridge.panels";
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        let panels_of = |state: &mut BridgeState, extension: &str| {
+            let effects = state.call(call(4, extension, "bridge", "panels", json!([])));
+            let [Effect::Reply(4, Ok(ids))] = &effects[..] else {
+                panic!("{effects:?}");
+            };
+            ids.clone()
+        };
+        assert_eq!(panels_of(&mut state, EXT), json!([]));
+
+        // A report for a view that is no open panel is refused.
+        assert_eq!(state.panel_reported(TabId(20), EXT, 433), vec![]);
+        assert_eq!(panels_of(&mut state, EXT), json!([]));
+
+        // The panel is open: its page's id is kept. Nobody listens yet, so
+        // nothing is sent (and no stopped worker is started for it); a
+        // context that starts later asks.
+        state.set_panel_windows(HashMap::from([(TabId(20), WindowId(1))]));
+        assert_eq!(state.panel_reported(TabId(20), EXT, 433), vec![]);
+        assert_eq!(panels_of(&mut state, EXT), json!([433]));
+        assert_eq!(panels_of(&mut state, OTHER), json!([]));
+
+        // A second panel, with the worker and a page listening: both are
+        // told every id of the extension's panels. The other extension's
+        // listener hears nothing.
+        listen(&mut state, EXT, PANELS);
+        page_listen(&mut state, EXT, 5, PANELS);
+        listen(&mut state, OTHER, PANELS);
+        state.set_panel_windows(HashMap::from([
+            (TabId(20), WindowId(1)),
+            (TabId(21), WindowId(1)),
+        ]));
+        assert_eq!(
+            state.panel_reported(TabId(21), EXT, 434),
+            vec![
+                Effect::Emit {
+                    extension: EXT.to_string(),
+                    event: PANELS,
+                    args: vec![json!([433, 434])],
+                },
+                Effect::EmitPage {
+                    page: 5,
+                    extension: EXT.to_string(),
+                    event: PANELS,
+                    args: vec![json!([433, 434])],
+                },
+            ]
+        );
+        // The same report again (the page reloaded) says nothing new.
+        assert_eq!(state.panel_reported(TabId(21), EXT, 434), vec![]);
+
+        // What `sender.tab` is given for a panel's id: the mark, for the
+        // panel's own extension only; a tab's strip as before.
+        assert_eq!(
+            state.call(call(5, EXT, "tabs", "stripOf", json!([433]))),
+            vec![Effect::Reply(5, Ok(json!({ "panel": true })))]
+        );
+        assert_eq!(
+            state.call(call(6, OTHER, "tabs", "stripOf", json!([433]))),
+            vec![Effect::Reply(6, Ok(Value::Null))]
+        );
+        let effects = state.call(call(7, EXT, "tabs", "stripOf", json!([101])));
+        let [Effect::Reply(7, Ok(strip))] = &effects[..] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(strip["index"], 0);
+        assert_eq!(strip.get("panel"), None);
+
+        // A page cannot make a strip tab a panel: the id of a tab the
+        // strip holds is refused.
+        state.set_panel_windows(HashMap::from([
+            (TabId(20), WindowId(1)),
+            (TabId(21), WindowId(1)),
+            (TabId(22), WindowId(1)),
+        ]));
+        assert_eq!(state.panel_reported(TabId(22), EXT, 101), vec![]);
+        assert_eq!(panels_of(&mut state, EXT), json!([433, 434]));
+
+        // The panel in view 20 closed: its id goes. No table row was ever
+        // made for a panel: the strip's tabs are as they were.
+        state.set_panel_windows(HashMap::from([(TabId(21), WindowId(1))]));
+        assert_eq!(panels_of(&mut state, EXT), json!([434]));
+        assert_eq!(
+            state.call(call(8, EXT, "tabs", "stripOf", json!([433]))),
+            vec![Effect::Reply(8, Ok(Value::Null))]
+        );
+        assert_eq!(queried_ids(&mut state), vec![101]);
+        let _ = now;
     }
 
     #[test]

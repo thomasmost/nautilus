@@ -104,13 +104,44 @@ pub(crate) fn report_of(text: &str) -> Option<i64> {
     (0 < tab && tab <= i32::MAX as i64).then_some(tab)
 }
 
-/// Whether a report comes from a side panel's view. A panel's page runs the
-/// report script like every bridged page and Chromium may answer it with an
-/// id, but a panel is no tab: it has no row in the tab table, and its report
-/// is dropped without a word (it would otherwise be refused, with a warning
-/// in the log, at every load of a panel).
-pub(crate) fn from_panel(panels: &PanelRegistry, view: Option<TabId>) -> bool {
-    view.is_some_and(|view| panels.get(view).is_some())
+/// What a tab report from the view `view` is, as far as side panels go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PanelReport {
+    /// The view is no open panel's: the report is a tab's (`report_source`).
+    NotPanel,
+    /// A panel's view, but not the main frame of a page of the panel's own
+    /// extension: dropped without a word, like every panel report before
+    /// the ids were kept.
+    Dropped,
+    /// The page of `extension`'s panel in `view`: its id is kept beside the
+    /// tab table (`table::PanelIds`), never in it.
+    Panel { view: TabId, extension: String },
+}
+
+/// Sort a tab report by the panel registry. A panel's page runs the report
+/// script like every bridged page and Chromium answers it with an id, but
+/// a panel is no tab: the report of a panel's view never reaches the tab
+/// table (it would be refused there, with a warning in the log at every
+/// load of a panel). It counts as the panel's id only from the main frame
+/// of a page of the extension the panel is of (a panel's page can navigate
+/// nowhere else, but a frame inside it can be anyone's).
+pub(crate) fn panel_report(
+    panels: &PanelRegistry,
+    main: bool,
+    url: &str,
+    view: Option<TabId>,
+) -> PanelReport {
+    let Some(open) = view.and_then(|view| panels.get(view)) else {
+        return PanelReport::NotPanel;
+    };
+    if main && extension_of(url).as_deref() == Some(open.extension.as_str()) {
+        PanelReport::Panel {
+            view: open.view,
+            extension: open.extension.clone(),
+        }
+    } else {
+        PanelReport::Dropped
+    }
 }
 
 /// Whether a report may come from a frame, and for which view and extension:
@@ -400,7 +431,7 @@ impl PageLane {
     /// frame must be the main frame of a bridged extension's page, and the
     /// browser's view for its browser must be a tab (`report_source`). A
     /// report that is not accepted is logged once and ignored; one from a
-    /// side panel's view is ignored without the log line (`from_panel`).
+    /// side panel's view never reaches the table (`panel_report`).
     fn report(
         &self,
         delegate: &DelegateState,
@@ -413,10 +444,20 @@ impl PageLane {
             Asker::View(tab) => Some(tab),
             Asker::Worker | Asker::Popup { .. } => None,
         };
-        if from_panel(&delegate.panels.borrow(), view) {
-            return true;
-        }
         let text = message_text(message);
+        let sorted = panel_report(&delegate.panels.borrow(), frame.is_main() != 0, &url, view);
+        match sorted {
+            PanelReport::NotPanel => {}
+            PanelReport::Dropped => return true,
+            PanelReport::Panel { view, extension } => {
+                if let Some(chromium) = text.as_deref().and_then(report_of)
+                    && let Some(hub) = delegate.hub()
+                {
+                    hub.report_panel(view, chromium, &extension);
+                }
+                return true;
+            }
+        }
         let Some(chromium) = text.as_deref().and_then(report_of) else {
             log::warn!("a tab report from {url} was dropped: it is not a tab id");
             return true;
@@ -758,7 +799,7 @@ mod report_tests {
     }
 
     #[test]
-    fn a_side_panels_view_reports_no_tab() {
+    fn a_panels_report_is_its_own_extensions_main_frame_or_nothing() {
         use osmena_core::{ExtensionRequest, WindowId};
 
         let mut panels = PanelRegistry::default();
@@ -768,16 +809,70 @@ mod report_tests {
             page: "panel.html".to_string(),
         };
         panels.expect(1, ID, &request);
-        // Asked for, with no view yet: nothing is a panel.
-        assert!(!from_panel(&panels, Some(TabId(9))));
         panels.bind(TabId(9), ID, "panel.html").unwrap();
-        assert!(from_panel(&panels, Some(TabId(9))));
+        let page = format!("chrome-extension://{ID}/panel.html");
+        assert_eq!(
+            panel_report(&panels, true, &page, Some(TabId(9))),
+            PanelReport::Panel {
+                view: TabId(9),
+                extension: ID.to_string()
+            }
+        );
+        // A frame inside the panel, a page of another extension, and a web
+        // page in the panel's view are not the panel's page.
+        assert_eq!(
+            panel_report(&panels, false, &page, Some(TabId(9))),
+            PanelReport::Dropped
+        );
+        assert_eq!(
+            panel_report(
+                &panels,
+                true,
+                "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/panel.html",
+                Some(TabId(9))
+            ),
+            PanelReport::Dropped
+        );
+        assert_eq!(
+            panel_report(&panels, true, "https://example.com/", Some(TabId(9))),
+            PanelReport::Dropped
+        );
+        // A tab's view and a browser that is no view are not sorted here.
+        assert_eq!(
+            panel_report(&panels, true, &page, Some(TabId(5))),
+            PanelReport::NotPanel
+        );
+        assert_eq!(
+            panel_report(&panels, true, &page, None),
+            PanelReport::NotPanel
+        );
+    }
+
+    #[test]
+    fn a_side_panels_view_reports_no_tab() {
+        use osmena_core::{ExtensionRequest, WindowId};
+
+        let page = format!("chrome-extension://{ID}/panel.html");
+        let is_panel = |panels: &PanelRegistry, view: Option<TabId>| {
+            panel_report(panels, true, &page, view) != PanelReport::NotPanel
+        };
+        let mut panels = PanelRegistry::default();
+        let request = ExtensionRequest::OpenSidePanel {
+            window: WindowId(1),
+            tab: None,
+            page: "panel.html".to_string(),
+        };
+        panels.expect(1, ID, &request);
+        // Asked for, with no view yet: nothing is a panel.
+        assert!(!is_panel(&panels, Some(TabId(9))));
+        panels.bind(TabId(9), ID, "panel.html").unwrap();
+        assert!(is_panel(&panels, Some(TabId(9))));
         // A tab's view, and a browser that is no view at all.
-        assert!(!from_panel(&panels, Some(TabId(5))));
-        assert!(!from_panel(&panels, None));
+        assert!(!is_panel(&panels, Some(TabId(5))));
+        assert!(!is_panel(&panels, None));
         // The panel closed: its id is no panel's any more.
         panels.remove(TabId(9));
-        assert!(!from_panel(&panels, Some(TabId(9))));
+        assert!(!is_panel(&panels, Some(TabId(9))));
     }
 
     #[test]

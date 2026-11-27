@@ -25,7 +25,7 @@ function nativeEvent() {
 
 const RELAY_CONTEXT = { contextType: 'TAB', documentUrl: 'chrome-extension://x/nautilus-bridge/relay.html', tabId: 5, incognito: false };
 
-function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null }) {
+function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null, panels = null }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
@@ -123,6 +123,9 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
   sandbox.self = sandbox;
   vm.createContext(sandbox);
   if (prime) { answers.set('tabs.query', () => prime); }
+  // The Chromium tab ids of the extension's open side panels, as the engine
+  // answers a context that asks when it starts.
+  if (panels) { answers.set('bridge.panels', () => panels); }
   if (viaPage) {
     // The page lane: the native function and the delivery function.
     sandbox.__nautilusBridgeSend = (text) => {
@@ -509,7 +512,62 @@ for (const viaPage of [false, true]) {
   const paged = world({ viaPage: true });
   paged.chrome.runtime.onMessage.addListener(() => {});
   await tick();
-  assert.ok(!paged.calls.some(([ns, method]) => ns === 'bridge' && method === 'listen'), 'a page asked for tab events for its cache');
+  assert.ok(!paged.calls.some(([ns, method, args]) => ns === 'bridge' && method === 'listen' && String(args[0]).indexOf('tabs.') === 0), 'a page asked for tab events for its cache');
+  // A side panel's page is no tab. Chromium takes the panel's browser for a
+  // tab and names it as sender.tab; the engine tells this context the ids
+  // of its extension's panels (asked at the start, told when one opens, and
+  // marked in the answer about an id it was not told), and a message from
+  // one arrives without a tab, as in Chrome. Nothing is guessed from an id
+  // being unknown: a content script's tab keeps its sender.tab whether or
+  // not this context has learnt its strip yet.
+  {
+    const s = world({ viaPage, panels: [50] });
+    s.answers.set('tabs.stripOf', ([id]) => (id === 7 ? { index: 3, windowId: 1, groupId: -1, active: true } : id === 52 ? { panel: true } : null));
+    const seen = [];
+    s.chrome.runtime.onMessage.addListener((message, sender) => { seen.push('tab' in sender ? Object.assign({}, sender.tab) : 'none'); });
+    assert.ok(s.calls.some(([ns, method]) => ns === 'bridge' && method === 'panels'), 'the context did not ask for the panels\' ids');
+    assert.ok(s.calls.some(([ns, method, args]) => ns === 'bridge' && method === 'listen' && args[0] === 'bridge.panels'), 'the context does not listen for the panels\' ids');
+    await tick(); await tick();
+    const from = (id) => s.messages.fire('hi', { id: 'x', url: 'chrome-extension://x/panel.html', tab: { id, index: -1, windowId: -1 } }, () => {});
+    from(50);
+    assert.equal(seen.at(-1), 'none', 'a panel\'s message arrived with a sender.tab');
+    // A content script's tab the cache has not learnt: it has its tab, as
+    // Chromium gave it; and with the strip's fields from the next message.
+    from(7);
+    assert.deepEqual(seen.at(-1), { id: 7, index: -1, windowId: -1 }, 'a tab the cache does not hold lost its sender.tab');
+    await tick(); await tick();
+    from(7);
+    assert.deepEqual(seen.at(-1), { id: 7, index: 3, windowId: 1, groupId: -1, active: true }, 'a content script\'s tab lost its strip');
+    // A tab the engine knows nothing of keeps its tab, however often it writes.
+    from(8); await tick(); await tick(); from(8);
+    assert.deepEqual(seen.at(-1), { id: 8, index: -1, windowId: -1 });
+    // A panel that opens later: the engine says so (every id, each time).
+    from(51);
+    assert.equal(seen.at(-1).id, 51, 'an id nobody named was taken for a panel');
+    s.emit('bridge.panels', [[50, 51]]);
+    from(51);
+    assert.equal(seen.at(-1), 'none', 'a panel the engine named kept its sender.tab');
+    from(50);
+    assert.equal(seen.at(-1), 'none');
+    // A panel this context was never told of: its first message has the
+    // tab (the race that remains), the answer about its strip marks it,
+    // and the next message has none.
+    from(52);
+    assert.equal(seen.at(-1).id, 52);
+    await tick(); await tick();
+    from(52);
+    assert.equal(seen.at(-1), 'none', 'the mark in the strip\'s answer was not taken');
+    // Where the sender's tab cannot be deleted, the listener gets a copy without it.
+    const stuck = { id: 'x', url: 'chrome-extension://x/panel.html' };
+    Object.defineProperty(stuck, 'tab', { value: { id: 50 }, enumerable: true, configurable: false });
+    s.messages.fire('hi', stuck, () => {});
+    assert.equal(seen.at(-1), 'none', 'a sender whose tab cannot be deleted kept it');
+    // An extension without a side panel asks nothing of this.
+    const bare = world({ viaPage, sidePanel: false });
+    bare.chrome.runtime.onMessage.addListener(() => {});
+    await tick();
+    assert.ok(!bare.calls.some(([ns, method, args]) => ns === 'bridge' && (method === 'panels' || (method === 'listen' && args[0] === 'bridge.panels'))), 'an extension without a side panel asked for panel ids');
+  }
   // An asynchronous listener keeps the channel.
   chrome.runtime.onMessage.addListener((message) => (message === 'later' ? Promise.resolve('promised') : undefined));
   assert.deepEqual(w.messages.fire('later', {}, (v) => responses.push(v)), [true]);

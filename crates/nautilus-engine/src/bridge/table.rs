@@ -7,7 +7,7 @@
 //! tab id beside the same target id. The join of the two is the table.
 //! Pure: the CEF calls that feed it are in `relay`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use osmena_core::TabId;
 use serde_json::Value;
@@ -157,6 +157,58 @@ pub(crate) enum Report {
     Same,
     /// The report is ignored, and why.
     Refused(&'static str),
+}
+
+/// The Chromium tab ids of the open side panels' pages, by the panel's
+/// view, each with the extension the panel is of. Kept beside the tab
+/// table and never in it: a panel is no tab (it has no row, no extension
+/// may address it, and `chrome.debugger` never shows or hides it), but
+/// Chromium takes its windowless browser for a tab and names that id as
+/// `sender.tab` in every message the panel's page sends. The bridge's
+/// scripts are told the ids so they can take `sender.tab` off again
+/// (`js/runtime.js`). An id is only ever told to the panel's own
+/// extension.
+#[derive(Debug, Default)]
+pub(crate) struct PanelIds {
+    by_view: BTreeMap<TabId, (String, i64)>,
+}
+
+impl PanelIds {
+    /// The page of `extension`'s panel in `view` reported its Chromium tab
+    /// id. Returns whether the set changed.
+    pub(crate) fn report(&mut self, view: TabId, extension: &str, chromium: i64) -> bool {
+        let entry = (extension.to_string(), chromium);
+        if self.by_view.get(&view) == Some(&entry) {
+            return false;
+        }
+        self.by_view.insert(view, entry);
+        true
+    }
+
+    /// Keep only the ids of views for which `open` holds: a closed panel's
+    /// id goes. Returns whether any went.
+    pub(crate) fn keep(&mut self, open: impl Fn(TabId) -> bool) -> bool {
+        let before = self.by_view.len();
+        self.by_view.retain(|view, _| open(*view));
+        self.by_view.len() != before
+    }
+
+    /// The ids of `extension`'s panels, in order.
+    pub(crate) fn of(&self, extension: &str) -> Vec<i64> {
+        let mut ids: Vec<i64> = self
+            .by_view
+            .values()
+            .filter(|(owner, _)| owner == extension)
+            .map(|(_, id)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Whether `chromium` is the id of one of `extension`'s panels.
+    pub(crate) fn holds(&self, extension: &str, chromium: i64) -> bool {
+        self.of(extension).contains(&chromium)
+    }
 }
 
 /// The table the engine keeps: each tab's target id, and the rows of
@@ -336,6 +388,42 @@ pub(crate) fn debuggee_of(arg: Option<&Value>) -> Option<Debuggee> {
             .as_str()
             .map(|id| Debuggee::Target(id.to_string())),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod panel_id_tests {
+    use super::*;
+
+    const EXT: &str = "abcdefghijklmnopabcdefghijklmnop";
+    const OTHER: &str = "ponmlkjihgfedcbaponmlkjihgfedcba";
+
+    #[test]
+    fn a_panels_id_is_kept_for_its_extension_until_the_panel_closes() {
+        let mut ids = PanelIds::default();
+        assert!(ids.of(EXT).is_empty());
+        assert!(ids.report(TabId(20), EXT, 433));
+        assert!(ids.report(TabId(21), EXT, 401));
+        assert!(ids.report(TabId(30), OTHER, 500));
+        // The same report again (the page reloaded) changes nothing; a
+        // new id for the view replaces the old one.
+        assert!(!ids.report(TabId(20), EXT, 433));
+        assert_eq!(ids.of(EXT), [401, 433]);
+        assert_eq!(ids.of(OTHER), [500]);
+        assert!(ids.holds(EXT, 433));
+        // Another extension is never told of it.
+        assert!(!ids.holds(OTHER, 433));
+        assert!(!ids.holds(EXT, 500));
+        assert!(ids.report(TabId(20), EXT, 434));
+        assert_eq!(ids.of(EXT), [401, 434]);
+
+        // The panel in view 21 closed.
+        assert!(ids.keep(|view| view != TabId(21)));
+        assert!(!ids.keep(|view| view != TabId(21)));
+        assert_eq!(ids.of(EXT), [434]);
+        assert!(!ids.holds(EXT, 401));
+        assert!(ids.keep(|_| false));
+        assert!(ids.of(EXT).is_empty() && ids.of(OTHER).is_empty());
     }
 }
 

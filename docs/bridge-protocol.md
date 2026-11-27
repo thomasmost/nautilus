@@ -783,7 +783,7 @@ browser to ask).
 | `discard(id?)` | S | resolves `undefined` ("not discarded"), after checking the id. Never forwarded. |
 | `group(options)`, `ungroup(id \| ids)` | R | `GroupTabs`, `UngroupTabs`: see "Messages Phase 7 adds". Never forwarded: Chromium's `tabs.group` ends the browser process on these tabs. |
 | `captureVisibleTab(windowId?, options?)` | engine | needs `<all_urls>` in the manifest; the window's active tab must be an `http`, `https`, `ftp` or `data` page, or one of the extension's own pages (any other, a file page included, is refused with a message that names its URL); `Page.captureScreenshot` on the window's active tab's browser; resolves `data:image/<format>;base64,…` |
-| `stripOf(id)` | S | internal, and not a `chrome.tabs` member: the seven strip fields of tab `id`, or `null`. `runtime.js` asks for it to lay the strip over `sender.tab`. Any bridged caller can reach it through the transport, and it gives nothing `get` does not (no URL, no title). |
+| `stripOf(id)` | S | internal, and not a `chrome.tabs` member: the seven strip fields of tab `id`, or `null` (or `{panel: true}` for the id of a side panel's page of the calling extension, "Messages Phase 6 adds"). `runtime.js` asks for it to lay the strip over `sender.tab`. Any bridged caller can reach it through the transport, and it gives nothing `get` does not (no URL, no title). |
 | `reload`, `goBack`, `goForward`, `getZoom`, `setZoom`, `getZoomSettings`, `setZoomSettings`, `detectLanguage` (tab id optional) | F | the id translated, or filled in with the current window's active tab (Chromium has no current window to fall back on) |
 | `executeScript`, `insertCSS`, `removeCSS` (Manifest V2 only) | F | the same, defined only where Chromium defines them |
 | `sendMessage`, `connect` | D | Chromium's own functions, bound |
@@ -1014,11 +1014,47 @@ holds falls back to the window focused last.
 **A panel's page and the tab report.** A panel's page runs
 `js/page_report.js` like every bridged page. Its view is no tab and has
 no row in the table (`TabHost::create_view` never calls `track_tab`), so
-`PageLane::report` drops a report from a registered panel's view
-without the log line (`pages::from_panel`). The page's calls still wait
-for the report's bound (1 s at most), and a call from a panel's view is
-held like a call from a tab the strip does not hold while a strip is
-pending (`Hold::Tab`, 2 s at most).
+`PageLane::report` never hands a report from a registered panel's view to
+the table (`pages::panel_report`). The page's calls still wait for the
+report's bound (1 s at most), and a call from a panel's view is held
+like a call from a tab the strip does not hold while a strip is pending
+(`Hold::Tab`, 2 s at most).
+
+**A panel's page is no `sender.tab`.** Chromium takes the panel's
+windowless browser for a tab, so a message from the panel's page reaches
+its extension with `sender.tab = {id, index: -1, windowId: -1, ...}`,
+where Chrome gives a side panel's sender no `tab`. The id in the panel
+page's report is therefore kept, beside the tab table and never in it
+(`table::PanelIds`, held by `BridgeState`: the view, its extension, the
+id), when the report comes from the main frame of a page of the panel's
+own extension, the view is an open panel, and the id is no strip tab's
+(`BridgeState::panel_reported`). It goes when the panel closes
+(`set_panel_windows`). The scripts learn the ids three ways, all in
+`js/runtime.js` and only in a context that has `chrome.sidePanel`:
+
+| | |
+| --- | --- |
+| `bridge.panels` (call, `[]`) | the Chromium tab ids of the calling extension's open panels, asked once as the context starts |
+| `bridge.panels` (event, `[ids]`) | every id of the extension's panels, sent when one is learnt to the contexts of that extension that announced the event (`bridge.listen`, a tap of `js/core.js`); a stopped worker that listens is started by it, as by any event. Nothing is sent when a panel closes: Chromium does not give the id out again in the run, and the next list leaves it out |
+| `tabs.stripOf(id)` answering `{panel: true}` | for an id that is a panel's of the calling extension, in place of the `null` an unknown tab gets: what a context that was never told learns after the first message |
+
+`onNative` gives a message whose `sender.tab.id` is one of those ids to
+the extension's listeners without `sender.tab` (deleted, or a copy of
+the sender without it where the property does not let go). An id is
+told only to the panel's own extension, and nothing is inferred from an
+id being unknown to the context: a content script's tab the cache has
+not learnt keeps its `sender.tab`.
+
+What remains: a message is delivered at once, so the first message can
+still carry the tab in two cases. (1) The panel's page sends as it
+loads: its report to the engine (after Chromium's own
+`tabs.getCurrent()`) and the engine's word to the receiving context
+travel beside the message and usually lose. (2) The receiving context
+has just started (a worker the message itself woke) and its question
+has not been answered. In both the next message from that panel has no
+`tab` (the answer to `stripOf` marks the id). A port
+(`runtime.onConnect`'s `port.sender`) is not wrapped by the bridge at
+all, for tabs or panels: its `sender.tab` is Chromium's.
 
 **The action click.** `ExtensionManager::click` is the one decision
 (`side_panel::decide_action_click`), in Chromium's order

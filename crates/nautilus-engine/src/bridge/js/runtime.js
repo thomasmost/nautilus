@@ -7,6 +7,7 @@
 // is synchronous, so it returns exactly what Chromium needs: true only when a
 // listener of this context kept the channel open, and false otherwise, which
 // lets Chromium close a channel that no listener of this context holds.
+// A message from a side panel's page is given without sender.tab (`panels`).
 (function (root) {
   'use strict';
   var bridge = root.__nautilusBridge;
@@ -29,10 +30,44 @@
     strips[tab.id] = strip;
   }
 
+  // The Chromium tab ids of this extension's open side panels. Chromium
+  // takes a panel's windowless browser for a tab and names it as sender.tab;
+  // in Chrome a side panel's sender has no tab, and an extension tells its
+  // panel from its content scripts by that. The ids are the engine's to say
+  // (a panel's page reports its own, `PanelIds` in bridge/table.rs): asked
+  // for when this context starts, told again when a panel's id is learnt
+  // (`bridge.panels`, every id each time), and marked in the answer about
+  // the strip of an id this context was not told. Never guessed from an id
+  // being unknown here: a context that just started knows no tab at all.
+  // Only an extension that can have a side panel asks.
+  var panels = Object.create(null);
+  function learnPanels(ids) {
+    panels = Object.create(null);
+    (Array.isArray(ids) ? ids : []).forEach(function (id) { panels[id] = true; });
+  }
+  if (root.chrome.sidePanel) {
+    bridge.call('bridge', 'panels', []).then(function (ids) {
+      // Added to what was told meanwhile, not put in its place.
+      (Array.isArray(ids) ? ids : []).forEach(function (id) { panels[id] = true; });
+    }, function () {});
+    bridge.tap('bridge.panels', learnPanels);
+  }
+
   function fetchStrip(id) {
     bridge.call('tabs', 'stripOf', [id]).then(function (strip) {
+      if (strip && strip.panel === true) { panels[id] = true; return; }
       if (strip) { remember(Object.assign({ id: id }, strip)); }
     }, function () {});
+  }
+
+  // `sender` without its tab: the property is deleted, or where Chromium's
+  // object does not let go of it, a copy without it is given.
+  function withoutTab(sender) {
+    try { delete sender.tab; } catch (e) { /* not configurable */ }
+    if (!('tab' in sender)) { return sender; }
+    var copy = {};
+    Object.keys(sender).forEach(function (key) { if (key !== 'tab') { copy[key] = sender[key]; } });
+    return copy;
   }
 
   // A worker lists the tabs now, so the tabs that exist when it starts carry
@@ -79,6 +114,9 @@
     var tab = sender && sender.tab;
     if (!tab || typeof tab.id !== 'number') {
       return deliver(message, sender, sendResponse);
+    }
+    if (panels[tab.id]) {
+      return deliver(message, withoutTab(sender), sendResponse);
     }
     var strip = strips[tab.id];
     if (strip) { Object.assign(tab, strip); }

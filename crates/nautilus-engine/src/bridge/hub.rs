@@ -403,6 +403,19 @@ impl Hub {
         }
     }
 
+    /// The page of `extension`'s side panel in `view` reported its
+    /// Chromium tab id: kept beside the tab table, and told to the
+    /// extension's listening contexts (`BridgeState::panel_reported`).
+    pub(crate) fn report_panel(self: &Rc<Self>, view: TabId, chromium: i64, extension: &str) {
+        // The state hears of the open panels before it judges the view.
+        self.sync_panels();
+        let effects = self
+            .state
+            .borrow_mut()
+            .panel_reported(view, extension, chromium);
+        self.run(effects);
+    }
+
     /// The table gained or lost a tab's Chromium id.
     pub(crate) fn table_changed(self: &Rc<Self>) {
         let effects = self
