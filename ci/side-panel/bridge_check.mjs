@@ -205,6 +205,18 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
   sandbox.self = sandbox;
   if (twin) { sandbox.browser = twin; }
   vm.createContext(sandbox);
+  // Chromium's own functions of the namespaces the bridge replaces, as they
+  // are before it runs.
+  const natives = [];
+  for (const holder of [chrome, twin]) {
+    for (const name of ['tabs', 'windows', 'tabGroups', 'commands', 'sidePanel']) {
+      let own = null;
+      try { own = holder && holder[name]; } catch { /* a property that throws when read */ }
+      for (const key of own ? Object.keys(own) : []) {
+        if (typeof own[key] === 'function') natives.push(own[key]);
+      }
+    }
+  }
   // The refusal is the first script of every bridged context.
   vm.runInContext(read('refuse.js'), sandbox);
   if (prime) { answers.set('tabs.query', () => prime); }
@@ -229,7 +241,7 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
     sandbox.__nautilusTransport = { protocol: 1, portHidden: true };
   }
   vm.runInContext(namespacesScript(), sandbox);
-  return { chrome, reached, calls, answers, messages, filters, debuggerState, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
+  return { chrome, natives, reached, calls, answers, messages, filters, debuggerState, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -853,6 +865,88 @@ for (const viaPage of [false, true]) {
     assert.ok(w.calls.some(([ns, m]) => ns === 'sidePanel' && m === 'open'));
   }
 }
+// Nothing of Chromium's own tabs, windows, tabGroups, commands or sidePanel
+// can be had through `__nautilusBridge`, which every script of a bridged
+// context can read: Chromium's bound tabs.group ends the browser process.
+// Every value reachable from it through own properties (objects, functions
+// and their properties, prototypes included) is looked at: none is one of
+// Chromium's functions, and none of the functions found inside it reaches
+// Chromium when called.
+function reachableFrom(start, depth) {
+  const found = [];
+  const seen = new Set();
+  const walk = (value, path, left) => {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function') || seen.has(value)) return;
+    seen.add(value);
+    found.push({ path, value });
+    if (left === 0) return;
+    for (const key of Reflect.ownKeys(value)) {
+      let member;
+      try { member = value[key]; } catch { continue; }
+      walk(member, `${path}.${String(key)}`, left - 1);
+    }
+  };
+  walk(start, '__nautilusBridge', depth);
+  return found;
+}
+for (const viaPage of [false, true]) {
+  for (const twin of [null, 'alias', 'separate']) {
+    const where = `${viaPage ? 'page' : 'worker'}, ${twin || 'no browser'}`;
+    const w = world({ viaPage, browser: twin, debuggerApi: true });
+    await tick();
+    const bridge = w.sandbox.__nautilusBridge;
+    assert.ok(bridge, 'the bridge is not there');
+    assert.ok(w.natives.length > 20, 'the stand-in has no functions to look for');
+    const found = reachableFrom(bridge, 5);
+    for (const { path, value } of found) {
+      assert.ok(!w.natives.includes(value), `${path} is a function of Chromium's (${where})`);
+    }
+    assert.equal(found.some(({ path }) => /\.native(\.|$)/.test(path)), false, `Chromium's namespaces are reachable (${where})`);
+    // A bound copy is not the function itself: every function inside an
+    // object of the bridge's is called, and none reaches Chromium. (The
+    // bridge's own top-level functions are left out here; `define` is
+    // tried below.)
+    w.reached.length = 0;
+    for (const { path, value } of found) {
+      if (typeof value !== 'function' || path.split('.').length < 3 || path.includes('.prototype')) continue;
+      try { await Promise.resolve(value(() => {})).catch(() => {}); } catch { /* it threw: it was called */ }
+    }
+    assert.deepEqual(w.reached, [], `a function inside __nautilusBridge reached Chromium (${where})`);
+    // `define`, called again by an extension with every function named
+    // as Chromium's own: what it finds to bind is the bridge's.
+    const everything = { direct: ['group', 'ungroup', 'query', 'create', 'update', 'get', 'getAll', 'move', 'open', 'getOptions', 'frobnicate', 'createSplit'] };
+    for (const name of ['tabs', 'windows', 'tabGroups', 'commands', 'sidePanel']) {
+      try { if (typeof bridge.define === 'function') bridge.define(name, everything); } catch { /* refused */ }
+      try { if (typeof bridge.pin === 'function') bridge.pin(name, {}); } catch { /* refused */ }
+    }
+    for (const api of [w.sandbox.chrome, w.sandbox.browser].filter(Boolean)) {
+      for (const name of ['tabs', 'windows', 'tabGroups', 'commands', 'sidePanel']) {
+        for (const key of Object.keys(api[name] || {})) {
+          if (typeof api[name][key] !== 'function' || ['sendMessage', 'connect'].includes(key)) continue;
+          try { await Promise.resolve(api[name][key]({})).catch(() => {}); } catch { /* it threw */ }
+        }
+      }
+    }
+    assert.deepEqual(w.reached, [], `a namespace defined again reached Chromium (${where})`);
+  }
+}
+{
+  // The one function of Chromium's the page's report needs (its own tab)
+  // is handed over once: page_report.js takes it, and nothing is left on
+  // the bridge's object afterwards.
+  const p = pageContext({});
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 433, windowId: 1 });
+  p.mutate();
+  await tick(); await tick();
+  assert.deepEqual(p.reports, [{ tab: 433 }]);
+  const found = reachableFrom(p.sandbox.__nautilusBridge, 5);
+  assert.equal(found.some(({ path }) => /native|takeCurrentTab/.test(path)), false, 'the page\'s bridge still hands out a function of Chromium\'s');
+  for (const { path, value } of found) {
+    if (typeof value !== 'function' || path.includes('.prototype') || /\.(define|pin|call|tap)$/.test(path)) continue;
+    try { await Promise.resolve(value()).catch(() => {}); } catch { /* it threw */ }
+  }
+  assert.deepEqual(p.reached, [], 'a function of the page\'s bridge reached Chromium');
+}
 // chrome.debugger in an extension page (debugger.js): an attach and a
 // detach are reported to the engine after Chromium made them, the caller's
 // own call resolves only once the engine has answered (it has shown the tab
@@ -1168,19 +1262,22 @@ function loadWorker(runtime) {
   // tabs.group. A click that came without a strip asks the engine for it.
   const w = workerWorld();
   const clicked = [];
+  const asked = [];
   const sandbox = {
-    chrome: { runtime: w.runtime, action: { onClicked: { dispatch: (tab) => clicked.push(JSON.parse(JSON.stringify(tab))) } } },
+    // Chromium's own tabs.get, which the transport takes for itself when it
+    // loads, before the namespaces replace chrome.tabs: no window, no index.
+    chrome: { runtime: w.runtime, action: { onClicked: { dispatch: (tab) => clicked.push(JSON.parse(JSON.stringify(tab))) } }, tabs: { get: (id, callback) => {
+      asked.push(id);
+      callback({ id, index: -1, windowId: -1, active: false, highlighted: false, selected: false, pinned: false, groupId: -1, url: 'https://x.example/', title: 'X' });
+    } } },
     console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Date, setTimeout, clearTimeout,
   };
   sandbox.self = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(read('bridge.js'), sandbox);
-  // Chromium's own tabs.get, as core.js keeps it: no window, no index.
-  const asked = [];
-  sandbox.__nautilusBridge = { native: { tabs: { get: (id, callback) => {
-    asked.push(id);
-    callback({ id, index: -1, windowId: -1, active: false, highlighted: false, selected: false, pinned: false, groupId: -1, url: 'https://x.example/', title: 'X' });
-  } } } };
+  // The namespaces then replace chrome.tabs, and the click still reaches
+  // Chromium's own function.
+  sandbox.chrome.tabs = { get: () => assert.fail('the click asked the replaced tabs.get') };
   // The relay page's end of the port, connected to the worker.
   const worker = portEnd('nautilus-bridge-1');
   const relay = portEnd('nautilus-bridge-1');

@@ -289,19 +289,19 @@
     );
   }
 
-  // Chromium's own chrome.tabs.get. core.js copies the namespace's original
-  // functions (bound) into `native` before it replaces the namespace, so the
-  // click reaches Chromium and never the engine. Core runs in this same script,
-  // before any delivery can arrive.
+  // Chromium's own chrome.tabs.get, taken here, before core.js (later in
+  // this same script) replaces the namespace: the click reaches Chromium and
+  // never the engine. Kept in this closure; the core hands out nothing of
+  // Chromium's.
+  var ownTabs = chrome.tabs;
+  var ownTabGet = ownTabs && ownTabs.get;
   function nativeTabGet(tabId) {
     return new Promise(function (resolve, reject) {
-      var core = self.__nautilusBridge;
-      var get = core && core.native && core.native.tabs && core.native.tabs.get;
-      if (typeof get !== 'function') {
+      if (typeof ownTabGet !== 'function') {
         reject(new Error('chrome.tabs.get is not available in this worker'));
         return;
       }
-      get(tabId, function (tab) {
+      ownTabGet.call(ownTabs, tabId, function (tab) {
         var error = runtime.lastError;
         if (error) { reject(new Error(error.message)); } else { resolve(tab); }
       });

@@ -246,6 +246,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- An extension's own scripts can no longer reach Chromium's `tabs`,
+  `windows`, `tabGroups` or `sidePanel` functions through the
+  bridge's object. `__nautilusBridge` carried them as a member
+  (`native`), so any script of a bridged extension could call
+  Chromium's own `tabs.group`, which ends the browser on these tabs.
+  They are kept out of reach now.
+
 - An extension context in which one of the replaced APIs cannot be
   put in no longer keeps Chromium's own for the ones after it. Each of
   `tabs`, `windows`, `tabGroups`, `commands` and `sidePanel` is put in

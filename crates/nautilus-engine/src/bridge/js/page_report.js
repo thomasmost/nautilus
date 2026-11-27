@@ -1,6 +1,6 @@
 // The page's own Chromium tab id. It runs in the deferred install, after the
-// namespaces have replaced Chromium's: the functions they replaced are kept
-// in `native` (core.js), so Chromium's `tabs.getCurrent` is still reachable.
+// namespaces have replaced Chromium's: the core hands this script Chromium's
+// `tabs.getCurrent`, once (`takeCurrentTab`, which is gone when taken).
 // The id goes to the browser process as a report, and a call of the page
 // waits for the report (page_transport.js), so the browser handles the report
 // before any call. The wait is bounded: a page that is no tab, an answer that
@@ -8,7 +8,8 @@
 (function (root) {
   'use strict';
   var REPORT_WAIT_MS = 1000;
-  var native = root.__nautilusBridge && root.__nautilusBridge.native;
+  var bridge = root.__nautilusBridge;
+  var take = bridge && bridge.takeCurrentTab;
   var report = root.__nautilusBridgeReport;
   delete root.__nautilusBridgeReport;
   var open = false;
@@ -27,10 +28,13 @@
   };
   var timer = setTimeout(release, REPORT_WAIT_MS);
   function settle() { clearTimeout(timer); release(); }
-  var getCurrent = native && native.tabs && native.tabs.getCurrent;
-  if (typeof getCurrent !== 'function' || typeof report !== 'function') { settle(); return; }
+  if (typeof take !== 'function') { settle(); return; }
+  var current;
+  // Taken even when there is nobody to report to, so it is never left.
+  try { current = take(); } catch (e) { settle(); return; }
+  if (!current || typeof report !== 'function') { settle(); return; }
   try {
-    Promise.resolve(getCurrent.call(native.tabs)).then(function (tab) {
+    Promise.resolve(current).then(function (tab) {
       if (tab && typeof tab.id === 'number') {
         try { report(JSON.stringify({ tab: tab.id })); }
         catch (e) { console.error('nautilus-bridge: ' + e); }

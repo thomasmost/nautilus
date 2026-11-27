@@ -886,8 +886,15 @@ worker that listens for it (see "The scripted run", below).
 its own Chromium tab id, so the table has a row for it as it has for a web page
 (`sender.tab` in a worker then carries the strip's fields). The page's bridge
 reads `chrome.tabs.getCurrent()` from Chromium's own function, which `core.js`
-keeps in `native` when it replaces the namespaces; `js/page_report.js` runs in
-the deferred install after the replacement. The report is one process message,
+keeps in its closure when it replaces the namespaces and hands over once
+(`__nautilusBridge.takeCurrentTab`, deleted when taken); `js/page_report.js`
+runs in the deferred install after the replacement and takes it before the
+page's first script. Nothing else of Chromium's replaced namespaces is on
+`__nautilusBridge` (its members are `call`, `tap`, `define`, `pin`,
+`BridgeEvent` and `installed`), which every script of a bridged context
+can read: the worker's click takes Chromium's `tabs.get` for itself when
+`bridge.js` loads, and `bridge_check.mjs` walks the object in both kinds
+of context. The report is one process message,
 `nautilus-bridge-tab` (`pages::REPORT_MESSAGE`), whose one string argument is
 `{"tab": n}` (`pages::report_of`): an object with only that key, holding a
 positive integer below `SYNTHETIC_BASE`. It carries no view, tab or extension.

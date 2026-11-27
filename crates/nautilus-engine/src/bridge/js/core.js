@@ -19,7 +19,10 @@
     return;
   }
   // Chromium's own namespaces, kept as plain objects of bound functions
-  // and event objects, for forwarded calls.
+  // and event objects, for forwarded calls. They stay in this closure:
+  // nothing that reaches them is put on `__nautilusBridge`, which every
+  // script of the context can read (Chromium's bound tabs.group ends the
+  // browser process).
   var native = {};
   var events = new Map();
   // The methods the engine answers with a forward (`__forward`), in every
@@ -321,17 +324,33 @@
     taps.get(name).push(fn);
   }
 
+  // What the namespace scripts need, and nothing that reaches a function
+  // of Chromium's: `define` binds what it finds under `chrome` when it is
+  // called, which after this evaluation is the bridge's own.
   var bridge = {
-    native: native,
     call: call,
     tap: tap,
-    run: run,
-    bridged: bridged,
     define: define,
     pin: install,
     BridgeEvent: BridgeEvent,
     installed: []
   };
+  // A page's own Chromium tab, for its report (page_report.js, the one
+  // reader outside this file of anything of Chromium's): handed over once,
+  // and gone from the object when it is taken, which is before the page's
+  // first script. A worker has no tab of its own and gets none.
+  if (!root.__nautilusTransport) {
+    Object.defineProperty(bridge, 'takeCurrentTab', {
+      configurable: true,
+      value: function () {
+        delete bridge.takeCurrentTab;
+        var getCurrent = native.tabs && native.tabs.getCurrent;
+        if (typeof getCurrent !== 'function') { return null; }
+        // Asked as it always was, without a callback: Chromium's promise.
+        return Promise.resolve(getCurrent());
+      }
+    });
+  }
   Object.defineProperty(root, '__nautilusBridge', { value: bridge });
 
   onEvent(function (name, args) {
