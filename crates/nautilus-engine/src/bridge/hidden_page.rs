@@ -1,7 +1,9 @@
 //! A hidden page: a windowless browser nobody paints, in which the engine
 //! evaluates scripts (each bridged extension's relay page, and the helper
 //! extension's page). Its CEF handlers report to the `Bridge` that owns it,
-//! each naming the page by its key and generation.
+//! each naming the page by its key and generation. A handler hands the
+//! bridge a copy of its key and calls through a clone of its `Rc`: the
+//! bridge can close the page inside the call, which drops the handler.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -184,7 +186,8 @@ wrap_life_span_handler! {
             self.delegate.add_live(-1);
             // Closed by the engine, the page is already gone and this is
             // a no-op; closed underneath (an extension reload), it goes.
-            self.bridge.page_gone(&self.key, self.generation, "it closed", false);
+            let (bridge, key) = (self.bridge.clone(), self.key.clone());
+            bridge.page_gone(&key, self.generation, "it closed", false);
         }
     }
 }
@@ -206,8 +209,8 @@ wrap_request_handler! {
             _error_code: ::std::os::raw::c_int,
             _error_string: Option<&CefString>,
         ) {
-            self.bridge
-                .page_gone(&self.key, self.generation, "its renderer terminated", true);
+            let (bridge, key) = (self.bridge.clone(), self.key.clone());
+            bridge.page_gone(&key, self.generation, "its renderer terminated", true);
         }
     }
 }
@@ -227,7 +230,8 @@ wrap_load_handler! {
             _http_status_code: ::std::os::raw::c_int,
         ) {
             if frame.is_some_and(|f| f.is_main() != 0) {
-                self.bridge.page_ready(&self.key, self.generation);
+                let (bridge, key) = (self.bridge.clone(), self.key.clone());
+                bridge.page_ready(&key, self.generation);
             }
         }
     }
@@ -272,8 +276,12 @@ wrap_dev_tools_message_observer! {
             success: ::std::os::raw::c_int,
             result: Option<&[u8]>,
         ) {
-            self.bridge.page_result(
-                &self.key,
+            // The bridge may close this page inside the call (a delivery
+            // that was not acknowledged, a page with no script), and that
+            // drops this observer: it is given copies, never `self`'s own.
+            let (bridge, key) = (self.bridge.clone(), self.key.clone());
+            bridge.page_result(
+                &key,
                 self.generation,
                 message_id,
                 success != 0,
@@ -285,7 +293,34 @@ wrap_dev_tools_message_observer! {
         /// will never arrive (CEF's header says so), so they are dropped
         /// and what was waiting for them is asked again.
         fn on_dev_tools_agent_detached(&self, _browser: Option<&mut Browser>) {
-            self.bridge.page_detached(&self.key, self.generation);
+            let (bridge, key) = (self.bridge.clone(), self.key.clone());
+            bridge.page_detached(&key, self.generation);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A handler's call into the bridge can close the very page the handler
+    /// belongs to (`Bridge::close_relay`, from a delivery that was not
+    /// acknowledged or a page with no script), and closing drops the
+    /// handler while its callback is still running: CEF holds no reference
+    /// of its own across the call. A key lent from the handler is then
+    /// freed memory in the bridge's hands (seen as an extension id of 32
+    /// bytes of 0xCD in a retried delivery's log line). So a handler gives
+    /// the bridge copies, and calls it through a clone of its `Rc`.
+    #[test]
+    fn a_handler_lends_the_bridge_nothing_of_its_own() {
+        let source = include_str!("hidden_page.rs");
+        // Built from parts, so that this test's own text is not a match.
+        let lent_key = ["&self", ".key"].concat();
+        let own_bridge = ["self", ".bridge", ".page_"].concat();
+        let own_bridge_wrapped = ["self", ".bridge", "\n"].concat();
+        for forbidden in [lent_key, own_bridge, own_bridge_wrapped] {
+            assert!(
+                !source.contains(&forbidden),
+                "a handler passes {forbidden:?} into the bridge"
+            );
         }
     }
 }

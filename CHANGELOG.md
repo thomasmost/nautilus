@@ -201,6 +201,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- An event for an extension's service worker that the worker did not
+  acknowledge is sent once more, as it was meant to be. The second
+  try was queued under a name read from memory that closing the
+  extension's bridge page had just freed, so it was dropped, and the
+  read itself was unsafe. Seen with the Claude extension started
+  again on a profile that already had it: its log line named the
+  extension as 32 bytes of 0xCD.
+
 - A folder's chip no longer sits on top of one of its window's tabs.
   A folder and a tab that happened to carry the same number inside
   the browser (the first folder made in a window, and its first tab)
