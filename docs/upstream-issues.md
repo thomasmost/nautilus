@@ -200,13 +200,17 @@ An id no tab has gets `No tab with id`, and a page with no script does not
 crash. The crash is there with the bridge's code never called.
 **Workaround:** a script ahead of each extension's service worker, and the
 namespaces of each extension page, replace `chrome.tabs`, `tabGroups`,
-`windows` and `sidePanel` and answer from Nautilus's own model, so these
-calls never reach Chromium. An extension page's namespaces are replaced at
-the first change to its document, before its first script runs
-(`bridge/js/page_defer.js`). The engine refuses `tabs.group` and `ungroup`
-for a bridged caller. Until a page is bridged an extension that calls either
-crashes Nautilus.
-**Blocks:** tab groups for extensions, unless bridged.
+`windows`, `commands` and `sidePanel`, on `chrome` and on `browser` (C19),
+and answer from Nautilus's own model, so these calls never reach Chromium.
+An extension page's namespaces are replaced at the first change to its
+document, before its first script runs (`bridge/js/page_defer.js`). Since
+2026-11-27 `tabs.group` and `tabs.ungroup` are answered: a tab group is one
+of the browser's tab folders (`bridge/groups.rs`; `docs/bridge-protocol.md`,
+"Messages Phase 7 adds"). `tabs.discard` is answered without discarding
+anything. A page whose bridge cannot be put in has the five namespaces
+refused rather than left Chromium's (`__nautilusRefuseNative`).
+**Blocks:** Chromium's own tab groups (their colours, `tabGroups.move`, a
+group across windows); tab groups as folders do not need them.
 
 ### C12: the window and tab-strip APIs do not see Alloy-style tabs; `tabs.create` opens a Chromium window
 
@@ -224,8 +228,11 @@ URL into a Nautilus tab and closes it; the id it resolved with is dead
 upstream issue found; same cause as C11.
 **Workaround:** the extension bridge (C11), with a tab-id table joined
 from each tab's DevTools target id and `chrome.debugger.getTargets()`
-called by a helper extension (`bridge/table.rs`). Phase 1 answers
-`tabs.query` for a bridged extension; the rest is Phase 5.
+called by a helper extension (`bridge/table.rs`). `chrome.tabs` and
+`chrome.windows` are answered from the browser's own strip for every
+bridged extension, in its service worker and its pages
+(`docs/bridge-protocol.md`, "Messages Phase 5 adds"), and no bridged call
+makes Chromium open a window.
 
 ### C13: `sidePanel.open` has nowhere to open
 
@@ -235,8 +242,39 @@ called by a helper extension (`bridge/table.rs`). Phase 1 answers
 nothing: the side panel is a feature of Chrome's browser window, and a
 windowless tab has none. A call without a user gesture is refused
 before either. No upstream issue found.
-**Workaround (planned):** osmena's side panel, with `chrome.sidePanel`
-bridged (Phase 6).
+**Workaround (2026-11-27):** the bridge replaces `chrome.sidePanel`
+whole and answers it from the engine (`bridge/side_panel.rs`,
+`js/side_panel.js`), the panel is osmena's, docked in the browser
+window, its page a windowless browser of Nautilus's own
+(`TabHost::create_view`, `panel.rs`), and `runtime.getContexts` is
+wrapped to report it as a `SIDE_PANEL` context. Chromium takes that
+browser for a tab, so two things are put right by hand: the panel's
+page is kept out of the tab-id table, and a message from it is given
+without `sender.tab`. A click on the action is decided by Nautilus, in
+Chromium's order (the panel, then the popup, then `action.onClicked`).
+If CEF ever
+hosts extension side panels for Alloy browsers, the store and the
+wrapper can go. **Blocks:** nothing while the bridge is in.
+
+### C20: `sidePanel.open` cannot be held to a user gesture
+
+Chromium rejects `chrome.sidePanel.open()` outside a user gesture
+("`sidePanel.open()` may only be called in response to a user
+gesture."). That is what an extension got from Chromium's own
+`sidePanel` here whenever the bridge's was not in place (seen
+2026-11-27, before the namespace was pinned: C19). A call the bridge
+carries has no gesture the engine can see: a service worker has no
+`navigator.userActivation`, and a click or a shortcut Nautilus delivers
+to an extension (`action.onClicked`, `commands.onCommand`) is a message
+to its worker, not an input event in one of its contexts. So Nautilus
+does not ask for one (`docs/bridge-protocol.md`, "Messages Phase 6
+adds": "No user gesture is asked for"), and an extension can open its
+panel at any time, which Chrome would refuse. The same gap is why a
+delivered click grants no `activeTab`. No upstream issue found: this is
+the embedder's own delivery, not a fault of CEF's.
+**Blocks:** matching Chrome's refusal. **Workaround:** none; the user
+closes an unwanted panel with its close control, and switching the
+extension off closes its panels.
 
 ### C14: CEF's external message pump is not asked for all of Chromium's work
 
@@ -274,7 +312,8 @@ a hidden-tab stall); with it off, the two runs above failed. The
 hidden-tab stall is a separate issue and is not upstream's: a tab behind
 another is hidden, and a debugger's call to a hidden renderer waits for
 the renderer's answer. Nautilus keeps a tab painted while an extension
-debugs it: `bridge.js` reports each `chrome.debugger` attach and detach,
+debugs it: `bridge.js` (in a service worker) and `js/debugger.js` (in an
+extension's page) report each `chrome.debugger` attach and detach,
 and `bridge/debugger.rs` keeps the set. An earlier version keyed this on
 CEF's DevTools-agent callback, which fires for the engine's own
 `Target.getTargetInfo` probe at every tab's creation, so no tab was ever

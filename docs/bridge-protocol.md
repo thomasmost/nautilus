@@ -605,8 +605,10 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   (`bridge_into`). An extension that cannot take the bridge is switched
   off, with a message.
 - A module worker (`"type": "module"`) gets a loader of two static
-  imports, which is unit-tested as text only; no module-worker extension
-  has run.
+  imports, unit-tested as text. One module-worker extension has run
+  behind it (the Claude extension, 2026-11-27, on a scratch profile:
+  its worker said hello and its `sidePanel`, `tabs` and `tabGroups`
+  calls were answered); no scripted run has one.
 - The loader for a classic worker loads the bridge in a `try`: if the
   bridge fails to load, the extension's own worker still runs, unbridged.
 - The session check is `sendCommand`, which runs `Runtime.evaluate` of `1` in
