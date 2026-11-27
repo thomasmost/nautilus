@@ -185,7 +185,6 @@ impl DelegateState {
 
     /// `create_view` made the view of the panel the model asked for.
     /// False if no request of the engine's was waiting for it.
-    #[allow(dead_code)] // Task 6 (`host.rs` `create_view`) is the first user.
     pub(crate) fn panel_opened(&self, view: TabId, extension: &str, page: &str) -> bool {
         let bound = self.panels.borrow_mut().bind(view, extension, page);
         match bound {
@@ -648,6 +647,10 @@ pub(crate) struct ViewState {
     pub paused: Cell<bool>,
     /// The drag the page is carrying out, while it is.
     pub drag: RefCell<Option<DragSession>>,
+    /// The pointer's last place in the view, in logical pixels: what a
+    /// drag's end or a button's release is at, when the pointer is not
+    /// over the view any more.
+    pub last_pointer: Cell<(i32, i32)>,
     /// The cursor the page last asked for, to put back after a drag
     /// (a drag shows its own, and Chromium does not repeat a cursor it
     /// believes is still shown).
@@ -664,7 +667,6 @@ pub(crate) struct ViewState {
     /// The browser is closing without the host having asked (a panel
     /// whose renderer died, or that closed natively): the host drops
     /// its entry the next time it looks.
-    #[allow(dead_code)] // Task 6 (`host.rs`) reads it; tests read it now.
     pub gone: Cell<bool>,
 }
 
@@ -727,6 +729,7 @@ impl ViewState {
             debugged: Cell::new(false),
             paused: Cell::new(false),
             drag: RefCell::new(None),
+            last_pointer: Cell::new((0, 0)),
             cursor: Cell::new(Cursor::Default),
             media_requests: RefCell::new(HashMap::new()),
             panel: None,
@@ -738,7 +741,6 @@ impl ViewState {
     /// tab's view in everything but what it reports (`panel_reports`)
     /// and what it may open. `origin` is its own, not the page's. It
     /// starts hidden, as `create_view` tells the browser.
-    #[allow(dead_code)] // Task 6 (`host.rs` `create_view`) is the first user.
     pub(crate) fn panel(
         view: TabId,
         delegate: Rc<DelegateState>,
