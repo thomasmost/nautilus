@@ -219,7 +219,6 @@ impl PanelRegistry {
 
     /// The window hosting the panel whose view is `view`: the "current
     /// window" of a call made from the panel's page.
-    #[allow(dead_code)] // Task 7 (`bridge::hub`, the panel's window) is the first user.
     pub(crate) fn window_of(&self, view: TabId) -> Option<WindowId> {
         self.get(view).map(|p| p.window)
     }

@@ -171,7 +171,6 @@ impl DelegateState {
 
     /// Every reply passes here first. Returns true when the request was
     /// the engine's own, which nobody else waits for.
-    #[allow(dead_code)] // Task 7 (`engine.rs` via `ExtensionManager`) is the first user.
     pub(crate) fn note_reply(&self, token: u64, reply: &ExtensionReply) -> bool {
         self.panels.borrow_mut().settle(token);
         if token & ENGINE_TOKEN == 0 {
@@ -208,7 +207,6 @@ impl DelegateState {
         }
     }
 
-    #[allow(dead_code)] // Task 7 (the bridge's notices) is the first user.
     pub(crate) fn take_panel_notices(&self) -> Vec<PanelNotice> {
         self.panel_notices.take()
     }
@@ -379,7 +377,6 @@ impl DelegateState {
 
     /// Read the panel behaviours of earlier runs from `file`, where
     /// later changes are written.
-    #[allow(dead_code)] // Task 7 (`ExtensionManager::start`) is the first user.
     pub(crate) fn load_side_panel_behaviors(&self, file: PathBuf) {
         if let Ok(text) = std::fs::read_to_string(&file) {
             self.side_panels.borrow_mut().load_behaviors(&text);
@@ -387,7 +384,6 @@ impl DelegateState {
         *self.side_panel_file.borrow_mut() = Some(file);
     }
 
-    #[allow(dead_code)] // Task 7 (the behaviour's setter) is the first user.
     pub(crate) fn save_side_panel_behaviors(&self) {
         let Some(file) = self.side_panel_file.borrow().clone() else {
             return;

@@ -23,13 +23,17 @@ function nativeEvent() {
   };
 }
 
-function world({ viaPage, prime = null }) {
+function world({ viaPage, prime = null, sidePanel = true, pinned = false }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
   let handler = null;
   const messages = nativeEvent(); // Chromium's runtime.onMessage
-  const runtime = { onMessage: messages, id: 'x' };
+  const runtime = {
+    onMessage: messages,
+    id: 'x',
+    getContexts: () => { reached.push('runtime.getContexts'); return Promise.resolve([{ contextType: 'BACKGROUND', tabId: -1 }]); },
+  };
   const chromium = (name, result) => (...args) => {
     reached.push(name);
     const callback = args.pop();
@@ -58,7 +62,20 @@ function world({ viaPage, prime = null }) {
       create: chromium('windows.create', () => ({})),
       onFocusChanged: nativeEvent(),
     },
+    // Chromium's own sidePanel, none of which may be reached, with one
+    // function the bridge does not name.
+    sidePanel: {
+      open: chromium('sidePanel.open', () => undefined),
+      getOptions: chromium('sidePanel.getOptions', () => ({})),
+      frobnicate: chromium('sidePanel.frobnicate', () => undefined),
+      onOpened: nativeEvent(),
+    },
   };
+  if (!sidePanel) { delete chrome.sidePanel; }
+  if (pinned) {
+    // A namespace property Chromium does not let go of.
+    Object.defineProperty(chrome, 'sidePanel', { value: chrome.sidePanel, configurable: false, writable: false, enumerable: true });
+  }
   const engine = (ns, method, args) => {
     // Through JSON, as on the wire (and so the arrays are this realm's).
     calls.push(JSON.parse(JSON.stringify([ns, method, args])));
@@ -86,7 +103,7 @@ function world({ viaPage, prime = null }) {
     // The worker's marker (bridge.js): the worker primes its tab cache.
     sandbox.__nautilusTransport = { protocol: 1, portHidden: true };
   }
-  for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js']) {
+  for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'side_panel.js']) {
     vm.runInContext(read(file), sandbox);
   }
   return { chrome, reached, calls, answers, messages, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
@@ -172,6 +189,96 @@ for (const viaPage of [false, true]) {
   // Chromium's own events the bridge does not fire exist and stay quiet.
   chrome.tabs.onSelectionChanged.addListener(() => assert.fail('never fires'));
   assert.equal(typeof chrome.tabs.onZoomChange.fire, 'function');
+
+  // chrome.sidePanel is replaced whole: its members are the engine's and
+  // nothing of Chromium's is left in it.
+  const sp = chrome.sidePanel;
+  assert.ok(Object.isFrozen(sp));
+  assert.deepEqual(
+    Object.keys(sp).sort(),
+    ['Side', 'close', 'getLayout', 'getOptions', 'getPanelBehavior', 'onClosed', 'onOpened', 'open', 'setOptions', 'setPanelBehavior']
+  );
+  for (const name of ['open', 'close', 'getOptions', 'setOptions', 'getPanelBehavior', 'setPanelBehavior', 'getLayout']) {
+    assert.equal(typeof sp[name], 'function', name);
+  }
+  assert.equal(sp.Side.RIGHT, 'right');
+  // Every function asks the engine, and none reaches Chromium.
+  w.calls.length = 0;
+  w.reached.length = 0;
+  w.answers.set('sidePanel.getOptions', () => ({ enabled: true, path: 'panel.html' }));
+  w.answers.set('sidePanel.getLayout', () => ({ side: 'right' }));
+  assert.equal((await sp.getOptions({ tabId: 7 })).path, 'panel.html');
+  assert.equal(await sp.setOptions({ path: 'p.html', enabled: true, tabId: undefined }), undefined);
+  assert.equal(await sp.setPanelBehavior({ openPanelOnActionClick: true }), undefined);
+  await sp.getPanelBehavior();
+  assert.equal((await sp.getLayout()).side, 'right');
+  assert.equal(await sp.open({ windowId: 1 }), undefined);
+  assert.equal(await sp.close({ tabId: 7 }), undefined);
+  assert.deepEqual(w.calls, [
+    ['sidePanel', 'getOptions', [{ tabId: 7 }]],
+    ['sidePanel', 'setOptions', [{ path: 'p.html', enabled: true }]],
+    ['sidePanel', 'setPanelBehavior', [{ openPanelOnActionClick: true }]],
+    ['sidePanel', 'getPanelBehavior', []],
+    ['sidePanel', 'getLayout', []],
+    ['sidePanel', 'open', [{ windowId: 1 }]],
+    ['sidePanel', 'close', [{ tabId: 7 }]],
+  ]);
+  assert.deepEqual(w.reached, [], 'a sidePanel call reached Chromium');
+  // The engine's rejection is the promise's; a bad argument never leaves.
+  w.answers.set('sidePanel.open', () => { throw new Error('No active side panel for tabId: 7'); });
+  await assert.rejects(sp.open({ tabId: 7 }), /No active side panel for tabId: 7/);
+  w.calls.length = 0;
+  await assert.rejects(sp.open({ bogus: 1 }), /Error in invocation of sidePanel\.open: Unexpected property: 'bogus'\./);
+  await assert.rejects(sp.open(), /sidePanel\.open: No matching signature\./);
+  await assert.rejects(sp.setOptions({ enabled: 'yes' }), /Error at property 'enabled': Invalid type\./);
+  assert.deepEqual(w.calls, []);
+  // The callback style.
+  w.answers.set('sidePanel.open', () => null);
+  assert.equal(await new Promise((resolve) => sp.getLayout((layout) => resolve(layout.side))), 'right');
+  // The two events are the core's: the first listener is announced, the
+  // core's one handler dispatches them, and the tabs' events still arrive.
+  w.calls.length = 0;
+  const panels = [];
+  sp.onOpened.addListener((info) => panels.push('opened ' + info.path));
+  sp.onOpened.addListener((info) => panels.push('again ' + info.path));
+  await tick();
+  assert.deepEqual(w.calls, [['bridge', 'listen', ['sidePanel.onOpened']]]);
+  w.emit('sidePanel.onOpened', [{ windowId: 1, path: 'panel.html' }]);
+  w.emit('sidePanel.onClosed', [{ windowId: 1, path: 'panel.html' }]);
+  assert.deepEqual(panels, ['opened panel.html', 'again panel.html']);
+  sp.onClosed.addListener((info) => panels.push('closed ' + info.path));
+  await tick();
+  assert.deepEqual(w.calls[1], ['bridge', 'listen', ['sidePanel.onClosed']]);
+  w.emit('sidePanel.onClosed', [{ windowId: 1, path: 'panel.html' }]);
+  assert.equal(panels[2], 'closed panel.html');
+  w.emit('tabs.onCreated', [{ id: 12 }]);
+  assert.deepEqual(created.slice(-1), ['second 12'], 'the side panel script took the event handler');
+
+  // runtime.getContexts: Chromium is asked for every context, and the
+  // engine gets the filter with Chromium's answer.
+  w.calls.length = 0;
+  w.reached.length = 0;
+  w.answers.set('runtime.getContexts', ([filter, originals]) => originals.concat([{ contextType: 'SIDE_PANEL', windowId: 1 }]));
+  const contexts = await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL'] });
+  assert.deepEqual(contexts.map((c) => c.contextType), ['BACKGROUND', 'SIDE_PANEL']);
+  assert.deepEqual(w.reached, ['runtime.getContexts']);
+  assert.deepEqual(w.calls, [['runtime', 'getContexts', [{ contextTypes: ['SIDE_PANEL'] }, [{ contextType: 'BACKGROUND', tabId: -1 }]]]]);
+  assert.throws(() => chrome.runtime.getContexts('all'), /runtime\.getContexts: No matching signature\./);
+  w.reached.length = 0;
+
+  // An extension without the "sidePanel" permission has no chrome.sidePanel.
+  assert.equal(world({ viaPage, sidePanel: false }).chrome.sidePanel, undefined);
+  // Where Chromium does not let go of the property, its own object is
+  // filled with the engine's members, and what the bridge does not name rejects.
+  {
+    const p = world({ viaPage, pinned: true });
+    p.answers.set('sidePanel.getLayout', () => ({ side: 'right' }));
+    assert.equal((await p.chrome.sidePanel.getLayout()).side, 'right');
+    await p.chrome.sidePanel.open({ windowId: 1 });
+    await assert.rejects(p.chrome.sidePanel.frobnicate(), /sidePanel\.frobnicate is not supported\./);
+    assert.deepEqual(p.reached, [], 'a pinned sidePanel reached Chromium');
+    assert.throws(() => { 'use strict'; p.chrome.sidePanel.open = () => {}; });
+  }
 
   // runtime.onMessage: a message from a tab is delivered at once, synchronously.
   // The strip's fields come from this context's cache: a message from a tab the
@@ -290,7 +397,7 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
   };
   vm.createContext(sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
-  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'page_report.js'].map(read).join('\n');
+  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'side_panel.js', 'page_report.js'].map(read).join('\n');
   vm.runInContext(
     `(function (root, install) {\n${read('page_defer.js')}\n})(self, function () {\ntry {\n${namespaces}\n} catch (e) { console.error('nautilus-bridge: ' + e); }\n});`,
     sandbox,
@@ -635,4 +742,28 @@ function loadWorker(runtime) {
   assert.deepEqual(reached, [], 'the refusal left a native tabs or windows call callable');
   assert.equal(sandbox.__bridgeCall, undefined, 'the transport answered without a send');
 }
+// window.close() in an extension page asks the engine first: a side panel's
+// page is closed by the model (the engine answers nothing), any other page
+// closes itself (false, or no answer at all).
+for (const [answer, closes] of [[() => null, 0], [() => false, 1], [() => { throw new Error('the extension is not bridged.'); }, 1]]) {
+  let closed = 0;
+  const asked = [];
+  const sandbox = { chrome: { runtime: { id: 'x' } }, console: { error() {}, log() {} }, close: () => { closed += 1; } };
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  sandbox.top = sandbox;
+  sandbox.__bridgeCall = (ns, method, args) => {
+    asked.push([ns, method]);
+    try { return Promise.resolve(answer(args)); } catch (e) { return Promise.reject(e); }
+  };
+  sandbox.__bridgeOnEvent = () => {};
+  vm.createContext(sandbox);
+  vm.runInContext(read('core.js'), sandbox);
+  vm.runInContext(read('side_panel.js'), sandbox);
+  vm.runInContext('window.close()', sandbox);
+  await tick(); await tick();
+  assert.deepEqual(asked, [['sidePanel', 'closeSelf']]);
+  assert.equal(closed, closes);
+}
+
 console.log('bridge scripts: ok');

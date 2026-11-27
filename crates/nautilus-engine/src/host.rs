@@ -800,21 +800,13 @@ impl TabHostApi for TabHost {
         }
     }
 
-    /// A click on `extension`'s toolbar action: its popup under the
-    /// button if it has one, otherwise the click itself, delivered
-    /// to the extension's worker for `tab` through the bridge.
+    /// A click on `extension`'s toolbar action: a popup opens under the
+    /// button; everything else (its side panel, or the click itself
+    /// delivered to its worker) is `ExtensionManager::action_clicked`.
     fn open_extension_action(&self, tab: TabId, extension: &str, anchor: ScreenRect) {
-        match self.extensions.popup_url(extension) {
-            Some(url) => self
-                .popups
-                .open(extension, &url, anchor, self.scale.get(), tab),
-            None => {
-                if !self.extensions.click_action(extension, tab) {
-                    log::warn!(
-                        "extension {extension} has no popup and no bridge: its action does nothing yet"
-                    );
-                }
-            }
+        if let Some(url) = self.extensions.action_clicked(extension, tab) {
+            self.popups
+                .open(extension, &url, anchor, self.scale.get(), tab);
         }
     }
 

@@ -20,20 +20,68 @@ use cef::{
     ImplDevToolsMessageObserver, ImplDictionaryValue, Registration, WrapDevToolsMessageObserver,
     wrap_dev_tools_message_observer,
 };
-use osmena_core::{EngineEvent, ExtensionReply, TabId};
+use osmena_core::{EngineEvent, ExtensionReply, ExtensionRequest, TabId, WindowId};
 use osmena_engine::WindowStrip;
 use serde_json::Value;
 
+use super::ids::{self, IdSpace};
 use super::pages::PageLane;
 use super::pattern::Grants;
+use super::side_panel;
 use super::snapshot::Snapshot;
 use super::state::{BridgeState, Effect};
 use super::table::Report;
+use super::transport::Asker;
 
 /// Records a page's report of its own Chromium tab id (`Hub::report_tab`).
 pub(crate) type Reporter = Box<dyn Fn(TabId, i64, &str) -> Report>;
 use super::transport::{BridgeCall, BridgeTransport, CallId};
 use crate::delegate::DelegateState;
+
+/// The browser as `side_panel.rs` needs it: the published strip and the
+/// id space extensions use.
+pub(crate) struct StripWorld<'a> {
+    pub snapshot: &'a Snapshot,
+    pub ids: &'a IdSpace,
+}
+
+impl side_panel::World for StripWorld<'_> {
+    fn tab(&self, id: i64) -> Option<side_panel::TabRef> {
+        let tab = self.ids.tab(id)?;
+        let window = self.window_of(tab)?;
+        Some(side_panel::TabRef { window, tab })
+    }
+
+    fn tab_id(&self, tab: TabId) -> Option<i64> {
+        self.ids.ext(tab)
+    }
+
+    fn window(&self, id: i64) -> Option<WindowId> {
+        let window = ids::window_from(id)?;
+        self.snapshot.window(window).map(|_| window)
+    }
+
+    fn window_id(&self, window: WindowId) -> i64 {
+        ids::window_id(window)
+    }
+
+    fn window_of(&self, tab: TabId) -> Option<WindowId> {
+        self.snapshot.window_of_view(tab).map(|w| w.id)
+    }
+
+    fn focused_window(&self) -> Option<WindowId> {
+        self.snapshot
+            .windows
+            .iter()
+            .find(|w| w.focused)
+            .or_else(|| self.snapshot.windows.first())
+            .map(|w| w.id)
+    }
+
+    fn shown_panel(&self, window: WindowId) -> Option<TabId> {
+        self.snapshot.window(window)?.panel_view
+    }
+}
 
 /// Which way a call came, and so which way its answer goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,6 +206,136 @@ impl Hub {
         self.run(effects);
     }
 
+    /// `chrome.sidePanel`, and the panel's part of `runtime.getContexts`
+    /// (`Effect::SidePanel`): answered from the two stores in
+    /// `DelegateState`, which `route` may change, so they are borrowed here
+    /// and not by the router. The borrows end before anything is run.
+    fn side_panel_call(&self, call: &BridgeCall) -> Vec<Effect> {
+        let Some(delegate) = self.delegate.upgrade() else {
+            return vec![Effect::Reply(
+                call.id,
+                Err("the browser is closing.".into()),
+            )];
+        };
+        let asker_view = match &call.asker {
+            Asker::View(view) => Some(*view),
+            _ => None,
+        };
+        let routed = {
+            let state = self.state.borrow();
+            let world = StripWorld {
+                snapshot: &state.published,
+                ids: &state.ids,
+            };
+            let panels = delegate.panels.borrow();
+            if call.namespace == "runtime" {
+                let empty = serde_json::json!({});
+                let filter = call.args.first().unwrap_or(&empty);
+                let originals = call
+                    .args
+                    .get(1)
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let contexts =
+                    side_panel::get_contexts(&panels, &world, &call.extension, filter, originals);
+                side_panel::Routed::answer(Value::Array(contexts))
+            } else {
+                // The window a panel's page is in is the registry's to say:
+                // the strip names only the panel its window shows, and a
+                // tab's panel whose tab is not the active one is not that.
+                let origin_window =
+                    asker_view
+                        .and_then(|view| panels.window_of(view))
+                        .or_else(|| {
+                            state
+                                .view(&call.extension)
+                                .current_window(&call.asker)
+                                .map(|window| window.id)
+                        });
+                side_panel::route(
+                    &mut delegate.side_panels.borrow_mut(),
+                    &panels,
+                    &world,
+                    &side_panel::Call {
+                        extension: &call.extension,
+                        origin_window,
+                        origin_view: asker_view,
+                        method: &call.method,
+                        args: &call.args,
+                    },
+                )
+            }
+        };
+        if routed.save {
+            delegate.save_side_panel_behaviors();
+        }
+        let mut effects: Vec<Effect> = routed
+            .also
+            .into_iter()
+            .map(|request| Effect::EngineRequest {
+                extension: call.extension.clone(),
+                request,
+            })
+            .collect();
+        let outcome = routed.outcome.into_router();
+        effects.extend(
+            self.state
+                .borrow_mut()
+                .outcome_effects(call.id, &call.extension, outcome),
+        );
+        effects
+    }
+
+    /// A click on `extension`'s action with `tab` active: the request
+    /// that opens (or closes) its side panel, when the extension asked for
+    /// that with `setPanelBehavior` and has an active panel for the tab.
+    /// `None`: the click is an `action.onClicked`.
+    pub(crate) fn side_panel_click(&self, extension: &str, tab: TabId) -> Option<ExtensionRequest> {
+        let delegate = self.delegate.upgrade()?;
+        let state = self.state.borrow();
+        let world = StripWorld {
+            snapshot: &state.published,
+            ids: &state.ids,
+        };
+        side_panel::action_click(
+            &delegate.side_panels.borrow(),
+            &delegate.panels.borrow(),
+            &world,
+            extension,
+            tab,
+        )
+    }
+
+    /// Tell extensions about the panels that opened and closed
+    /// (`chrome.sidePanel.onOpened`, `onClosed`): each notice goes to the
+    /// contexts of its extension that listen for the event
+    /// (`BridgeState::emit`).
+    pub(crate) fn send_panel_notices(self: &Rc<Self>) {
+        let Some(delegate) = self.delegate.upgrade() else {
+            return;
+        };
+        let notices = delegate.take_panel_notices();
+        if notices.is_empty() {
+            return;
+        }
+        let effects: Vec<Effect> = {
+            let state = self.state.borrow();
+            let world = StripWorld {
+                snapshot: &state.published,
+                ids: &state.ids,
+            };
+            notices
+                .iter()
+                .flat_map(|notice| {
+                    let (extension, event, info) = side_panel::notice_event(&world, notice);
+                    state.emit(&extension, event, vec![info])
+                })
+                .collect()
+        };
+        self.run(effects);
+    }
+
     /// `Engine::strip_changed`.
     pub(crate) fn strip_changed(self: &Rc<Self>, windows: &[WindowStrip<'_>]) {
         let snapshot = Snapshot::copy_of(windows);
@@ -269,6 +447,9 @@ impl Hub {
                         log::debug!(
                             "bridge: {extension} asks the browser for {request:?} (token {token})"
                         );
+                        // A panel this opens is expected by the time its
+                        // view is asked for (`TabHost::create_view`).
+                        delegate.note_request(token, &extension, &request);
                         delegate.push(EngineEvent::ExtensionRequest {
                             token,
                             extension,
@@ -283,6 +464,18 @@ impl Hub {
                     quality,
                 } => {
                     self.capture(call, tab, format, quality);
+                }
+                Effect::SidePanel(call) => {
+                    let effects = self.side_panel_call(&call);
+                    self.run(effects);
+                }
+                Effect::EngineRequest { extension, request } => {
+                    if let Some(delegate) = self.delegate.upgrade() {
+                        log::debug!(
+                            "bridge: the engine asks the browser for {request:?} on behalf of {extension}"
+                        );
+                        delegate.request_of_engine(&extension, request);
+                    }
                 }
             }
         }
@@ -440,7 +633,66 @@ wrap_dev_tools_message_observer! {
 
 #[cfg(test)]
 mod tests {
+    use super::side_panel::World as _;
     use super::*;
+    use crate::bridge::snapshot::tests::{snapshot, tab, window};
+
+    #[test]
+    fn the_strip_and_the_ids_are_the_side_panels_world() {
+        // Window 1 (not focused) holds tabs 1 and 2 and shows the panel view
+        // 9; window 2 (focused) holds tab 3, which is deferred.
+        let mut first = window(1, false, vec![tab(1, "a*"), tab(2, "b")]);
+        first.panel_view = Some(TabId(9));
+        let strip = snapshot(vec![first, window(2, true, vec![tab(3, "c~")])]);
+        let mut ids = IdSpace::default();
+        ids.sync(&[
+            (TabId(1), Some(101)),
+            (TabId(2), Some(102)),
+            (TabId(3), None),
+        ]);
+        let world = StripWorld {
+            snapshot: &strip,
+            ids: &ids,
+        };
+        // A tab by the id extensions use, with its window.
+        assert_eq!(
+            world.tab(102),
+            Some(side_panel::TabRef {
+                window: WindowId(1),
+                tab: TabId(2)
+            })
+        );
+        assert_eq!(world.tab(777), None);
+        assert_eq!(world.tab_id(TabId(1)), Some(101));
+        // A deferred tab has a synthetic id, and is found by it.
+        let synthetic = world.tab_id(TabId(3)).expect("a deferred tab has an id");
+        assert_eq!(
+            world.tab(synthetic).map(|found| found.window),
+            Some(WindowId(2))
+        );
+        // A window exists only while the strip holds it.
+        assert_eq!(world.window(ids::window_id(WindowId(2))), Some(WindowId(2)));
+        assert_eq!(world.window(ids::window_id(WindowId(5))), None);
+        assert_eq!(world.window(ids::WINDOW_ID_CURRENT), None);
+        assert_eq!(
+            world.window(world.window_id(WindowId(1))),
+            Some(WindowId(1))
+        );
+        // A strip tab's window, and the window of the panel it shows.
+        assert_eq!(world.window_of(TabId(2)), Some(WindowId(1)));
+        assert_eq!(world.window_of(TabId(9)), Some(WindowId(1)));
+        assert_eq!(world.window_of(TabId(8)), None);
+        assert_eq!(world.focused_window(), Some(WindowId(2)));
+        assert_eq!(world.shown_panel(WindowId(1)), Some(TabId(9)));
+        assert_eq!(world.shown_panel(WindowId(2)), None);
+        // With no window focused, the first stands in.
+        let unfocused = snapshot(vec![window(4, false, vec![tab(1, "a*")])]);
+        let world = StripWorld {
+            snapshot: &unfocused,
+            ids: &ids,
+        };
+        assert_eq!(world.focused_window(), Some(WindowId(4)));
+    }
 
     #[test]
     fn a_capture_is_spent_when_its_browser_is_gone_or_its_wait_is_over() {

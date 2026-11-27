@@ -280,10 +280,6 @@ mod stub {
 
         pub(crate) fn uninstall(&self, _id: &str) {}
 
-        pub(crate) fn popup_url(&self, _id: &str) -> Option<String> {
-            None
-        }
-
         pub(crate) fn shutdown(&self) {}
 
         pub(crate) fn track_tab(
@@ -309,8 +305,8 @@ mod stub {
 
         pub(crate) fn extension_reply(&self, _token: u64, _reply: osmena_core::ExtensionReply) {}
 
-        pub(crate) fn click_action(&self, _id: &str, _tab: osmena_core::TabId) -> bool {
-            false
+        pub(crate) fn action_clicked(&self, _id: &str, _tab: osmena_core::TabId) -> Option<String> {
+            None
         }
     }
 }
@@ -459,6 +455,72 @@ mod native {
         Some(Control { dir, next: 1 })
     }
 
+    /// The file under the profile's Chromium directory that keeps which
+    /// extensions open their side panel on an action click
+    /// (`chrome.sidePanel.setPanelBehavior`), as Chromium keeps it in its
+    /// preferences.
+    const SIDE_PANEL_BEHAVIOR_FILE: &str = "side-panel-behavior.json";
+
+    /// What a click on an extension's toolbar action came to
+    /// (`ExtensionManager::click`).
+    #[derive(Debug, PartialEq)]
+    enum Clicked {
+        /// The action has a popup at this address; the caller opens it.
+        Popup(String),
+        /// The engine asked the model to open or close the side panel.
+        Panel,
+        /// The click was handed to the bridge for `action.onClicked`.
+        Delivered,
+        /// The bridge did not take the click (its relay is given up).
+        Refused,
+        /// No popup, no panel, and the extension is not bridged.
+        NotBridged,
+    }
+
+    /// What the test control logs for a click; `None` when there was no
+    /// tab to click for. A click that reached nothing says `not sent`, and
+    /// one handed to the bridge `sent to the bridge`: the scripted runs
+    /// read those two phrases (`ci/side-panel/driver.py`).
+    #[cfg(feature = "test-hooks")]
+    fn click_report(clicked: Option<&Clicked>) -> &'static str {
+        match clicked {
+            None => "not sent (no tab to click for)",
+            Some(Clicked::Popup(_)) => "the action has a popup, which the control does not open",
+            Some(Clicked::Panel) => "opened or closed its side panel",
+            Some(Clicked::Delivered) => "sent to the bridge",
+            Some(Clicked::Refused) | Some(Clicked::NotBridged) => "not sent",
+        }
+    }
+
+    #[cfg(all(test, feature = "test-hooks"))]
+    mod click_tests {
+        use super::{Clicked, click_report};
+
+        #[test]
+        fn the_controls_click_line_keeps_the_phrases_the_scripted_runs_read() {
+            // `run.sh broken` requires `not sent` for a click the bridge
+            // refused; the other modes look for `sent to the bridge`.
+            assert_eq!(
+                click_report(Some(&Clicked::Delivered)),
+                "sent to the bridge"
+            );
+            for refused in [Clicked::Refused, Clicked::NotBridged] {
+                assert_eq!(click_report(Some(&refused)), "not sent");
+            }
+            assert!(click_report(None).contains("not sent"));
+            assert_eq!(
+                click_report(Some(&Clicked::Panel)),
+                "opened or closed its side panel"
+            );
+            let popup = Clicked::Popup("chrome-extension://x/popup.html".into());
+            assert!(click_report(Some(&popup)).contains("popup"));
+            // Neither new phrase can be taken for one of the old two.
+            for other in [Clicked::Panel, popup] {
+                assert!(!click_report(Some(&other)).contains("sent"));
+            }
+        }
+    }
+
     /// What the manager remembers of an extension beyond the model.
     struct Known {
         id: String,
@@ -564,6 +626,9 @@ mod native {
             if let Err(e) = bridge::install::write_helper(&store_dir) {
                 log::error!("cannot write the helper extension: {e}");
             }
+            // The panel behaviours of earlier runs, before the first listing
+            // or call can ask for them.
+            delegate.load_side_panel_behaviors(engine_dir.join(SIDE_PANEL_BEHAVIOR_FILE));
             let bridge = Bridge::new(delegate.clone());
             let hub = {
                 let table = {
@@ -777,9 +842,11 @@ mod native {
         }
 
         /// Called after CEF's work on every turn: strips held for a tab's
-        /// id, and answers held for a strip.
+        /// id, answers held for a strip, and the side panels that opened
+        /// or closed since the last turn, for the extensions that listen.
         pub(crate) fn tick_bridge(&self) {
             self.hub.tick();
+            self.hub.send_panel_notices();
         }
 
         /// `Engine::strip_changed`: extensions' queries are answered from
@@ -790,6 +857,11 @@ mod native {
 
         /// `Engine::extension_reply`: the model's answer to a request.
         pub(crate) fn extension_reply(&self, token: u64, reply: osmena_core::ExtensionReply) {
+            // Every reply settles what the panel registry expected of its
+            // request; a reply to a request of the engine's own ends here.
+            if self.delegate.note_reply(token, &reply) {
+                return;
+            }
             self.hub.extension_reply(token, reply);
         }
 
@@ -815,16 +887,59 @@ mod native {
             self.bridge.untrack(tab);
         }
 
-        /// Deliver a click on `id`'s popup-less action for `tab` to its
-        /// worker. False when the extension is not bridged.
-        pub(crate) fn click_action(&self, id: &str, tab: TabId) -> bool {
+        /// A click on `id`'s toolbar action at `tab`. Returns the popup's
+        /// address when the action has a popup, which the caller opens
+        /// under the button; everything else is carried out here.
+        pub(crate) fn action_clicked(&self, id: &str, tab: TabId) -> Option<String> {
+            match self.click(id, tab) {
+                Clicked::Popup(url) => Some(url),
+                Clicked::Panel | Clicked::Delivered => None,
+                Clicked::Refused => {
+                    log::warn!("extension {id}: its action click was not delivered");
+                    None
+                }
+                Clicked::NotBridged => {
+                    log::warn!(
+                        "extension {id} has no popup and no bridge: its action does nothing yet"
+                    );
+                    None
+                }
+            }
+        }
+
+        /// The one decision for a click on `id`'s toolbar action at `tab`
+        /// (`decide_action_click`), carried out but for the popup, which
+        /// only a caller with the button's place can open. The toolbar
+        /// (`action_clicked`) and the test control take this same path.
+        fn click(&self, id: &str, tab: TabId) -> Clicked {
+            use bridge::side_panel::{ActionClick, decide_action_click};
             let bridged = self
                 .inner
                 .borrow()
                 .known
                 .iter()
                 .any(|k| k.id == id && k.bridged && k.enabled);
-            bridged && self.bridge.click(id, tab)
+            let popup = self.popup_url(id);
+            let panel = if popup.is_none() {
+                self.hub.side_panel_click(id, tab)
+            } else {
+                None
+            };
+            match decide_action_click(popup, panel, bridged) {
+                ActionClick::Popup(url) => Clicked::Popup(url),
+                ActionClick::Panel(request) => {
+                    self.delegate.request_of_engine(id, request);
+                    Clicked::Panel
+                }
+                ActionClick::OnClicked => {
+                    if self.bridge.click(id, tab) {
+                        Clicked::Delivered
+                    } else {
+                        Clicked::Refused
+                    }
+                }
+                ActionClick::NotBridged => Clicked::NotBridged,
+            }
         }
 
         /// Ask the user for the directory, with a dialog owned by the
@@ -932,7 +1047,7 @@ mod native {
         }
 
         /// The URL of `id`'s action popup, if it has one.
-        pub(crate) fn popup_url(&self, id: &str) -> Option<String> {
+        fn popup_url(&self, id: &str) -> Option<String> {
             let inner = self.inner.borrow();
             let known = inner.known.iter().find(|k| k.id == id)?;
             let popup = known.popup.as_ref()?;
@@ -990,14 +1105,10 @@ mod native {
                     .delegate
                     .last_focused()
                     .or_else(|| self.bridge.any_tab());
-                let sent = tab.is_some_and(|tab| self.click_action(id, tab));
+                let clicked = tab.map(|tab| self.click(id, tab));
                 log::info!(
                     "TEST HOOK: command {number}: click on {id} for {tab:?}: {}",
-                    if sent {
-                        "sent to the bridge"
-                    } else {
-                        "not sent"
-                    }
+                    click_report(clicked.as_ref())
                 );
             } else if let Some(message) = command.get("devtools").filter(|m| m.is_object()) {
                 let mut message = message.clone();

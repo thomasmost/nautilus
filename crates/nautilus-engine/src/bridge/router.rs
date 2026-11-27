@@ -157,6 +157,9 @@ pub(crate) enum Then {
     CreatedWindow { more: Vec<Url> },
     /// `window`'s object from the next strip.
     Window { window: WindowId, populate: bool },
+    /// `undefined` once the model is done: the answer of a call whose
+    /// only effect is a request (`sidePanel.open`, `close`).
+    Undefined,
 }
 
 /// Where a continuation stands.
@@ -810,6 +813,7 @@ pub(crate) fn settle(
             _ => Settled::Wait,
         };
     match then {
+        Then::Undefined => Settled::Now(Ok(Value::Null)),
         Then::Removed { tabs } => {
             let gone = tabs.iter().all(|tab| view.snapshot.locate(*tab).is_none());
             if gone || last_chance {
@@ -920,6 +924,43 @@ mod tests {
     use crate::bridge::transport::{Asker, BridgeCall};
 
     const EXT: &str = "abcdefghijklmnopabcdefghijklmnop";
+
+    #[test]
+    fn then_undefined_resolves_on_done_and_rejects_on_refusal() {
+        let ids = IdSpace::default();
+        let view = View {
+            snapshot: &Snapshot::default(),
+            ids: &ids,
+            grants: &Grants::default(),
+            last_focused: None,
+        };
+        assert_eq!(
+            settle(
+                &Then::Undefined,
+                &ExtensionReply::Done,
+                &view,
+                true,
+                Duration::ZERO
+            ),
+            Settled::Now(Ok(Value::Null))
+        );
+        // Not fresh and not waited for: there is no strip to wait on.
+        assert_eq!(
+            settle(
+                &Then::Undefined,
+                &ExtensionReply::Done,
+                &view,
+                false,
+                Duration::ZERO
+            ),
+            Settled::Now(Ok(Value::Null))
+        );
+        let refused = ExtensionReply::Refused("No active side panel for tabId: 7.".into());
+        assert_eq!(
+            settle(&Then::Undefined, &refused, &view, true, Duration::ZERO),
+            Settled::Now(Err("No active side panel for tabId: 7.".into()))
+        );
+    }
 
     /// A model for the router: live tabs are known to Chromium as
     /// 100 + their id.

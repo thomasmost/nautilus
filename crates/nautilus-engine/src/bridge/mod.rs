@@ -39,6 +39,7 @@ const CORE_JS: &str = include_str!("js/core.js");
 const TABS_JS: &str = include_str!("js/tabs.js");
 const WINDOWS_JS: &str = include_str!("js/windows.js");
 const RUNTIME_JS: &str = include_str!("js/runtime.js");
+const SIDE_PANEL_JS: &str = include_str!("js/side_panel.js");
 // The page lane's transport script, which `pages::page_script` puts first in an
 // extension page's context.
 pub(crate) const PAGE_TRANSPORT_JS: &str = include_str!("js/page_transport.js");
@@ -46,7 +47,7 @@ pub(crate) const PAGE_TRANSPORT_JS: &str = include_str!("js/page_transport.js");
 /// The replacement of every bridged namespace, for a context whose
 /// transport has already defined `__bridgeCall` and `__bridgeOnEvent`.
 pub(crate) fn namespaces_script() -> String {
-    [CORE_JS, TABS_JS, WINDOWS_JS, RUNTIME_JS].join("\n")
+    [CORE_JS, TABS_JS, WINDOWS_JS, RUNTIME_JS, SIDE_PANEL_JS].join("\n")
 }
 
 /// The whole script of a bridged service worker, as it is written to
@@ -128,11 +129,12 @@ mod tests {
     use super::pattern::Grants;
     use super::router::{self, Outcome};
     use super::shape::View;
+    use super::side_panel;
     use super::snapshot::Snapshot;
     use super::transport::{Asker, BridgeCall};
     use super::{
-        CORE_JS, PAGE_TRANSPORT_JS, RUNTIME_JS, TABS_JS, WINDOWS_JS, namespaces_script,
-        worker_script,
+        CORE_JS, PAGE_TRANSPORT_JS, RUNTIME_JS, SIDE_PANEL_JS, TABS_JS, WINDOWS_JS,
+        namespaces_script, worker_script,
     };
 
     /// The names in `key: ['a', 'b']` of a namespace script.
@@ -193,9 +195,60 @@ mod tests {
         assert!(CORE_JS.contains("target[key] = unsupported(namespace, key);"));
         assert!(CORE_JS.contains("target[key] = new BridgeEvent(null);"));
         assert!(CORE_JS.contains("configurable: false, writable: false"));
-        for script in [CORE_JS, TABS_JS, WINDOWS_JS, RUNTIME_JS, PAGE_TRANSPORT_JS] {
+        for script in [
+            CORE_JS,
+            TABS_JS,
+            WINDOWS_JS,
+            RUNTIME_JS,
+            SIDE_PANEL_JS,
+            PAGE_TRANSPORT_JS,
+        ] {
             assert!(script.contains("'use strict';"));
         }
+    }
+
+    #[test]
+    fn every_side_panel_function_is_ours() {
+        // The members the script declares as the engine's, and nothing else.
+        assert_eq!(
+            list(SIDE_PANEL_JS, "bridged"),
+            [
+                "open",
+                "close",
+                "getOptions",
+                "setOptions",
+                "getPanelBehavior",
+                "setPanelBehavior",
+                "getLayout"
+            ]
+        );
+        assert_eq!(list(SIDE_PANEL_JS, "events"), ["onOpened", "onClosed"]);
+        for method in list(SIDE_PANEL_JS, "bridged") {
+            assert!(side_panel::is_method(&method), "{method}");
+            // Each is defined on the object the script installs.
+            assert!(
+                SIDE_PANEL_JS.contains(&format!("      {method}: callbackable(")),
+                "{method}"
+            );
+        }
+        // A name the script does not declare is not one of the engine's:
+        // `route` rejects it as unsupported.
+        assert!(!side_panel::is_method("frobnicate"));
+        assert!(SIDE_PANEL_JS.contains("Object.freeze(api)"));
+        assert!(SIDE_PANEL_JS.contains("Object.defineProperty(chrome, 'sidePanel'"));
+        // Its events are the core's, announced and dispatched there: the
+        // script registers no event handler of its own.
+        for event in list(SIDE_PANEL_JS, "events") {
+            assert!(
+                SIDE_PANEL_JS.contains(&format!(
+                    "{event}: new bridge.BridgeEvent('sidePanel.{event}')"
+                )),
+                "{event}"
+            );
+        }
+        assert!(!SIDE_PANEL_JS.contains("__bridgeOnEvent("));
+        // It is the last of the namespaces, after the core it needs.
+        assert!(namespaces_script().ends_with(SIDE_PANEL_JS));
     }
 
     #[test]

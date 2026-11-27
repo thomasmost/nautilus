@@ -85,6 +85,24 @@ pub(crate) enum Effect {
         format: String,
         quality: i64,
     },
+    /// A call the side panel's stores answer (`chrome.sidePanel`, and
+    /// `runtime.getContexts`): the hub routes it (`Hub::side_panel_call`),
+    /// because those stores live in `DelegateState` and a call may change
+    /// them. It comes out of `call` like any other effect, so a page's
+    /// call is held, ordered and refused as the rest are.
+    SidePanel(BridgeCall),
+    /// A request the engine makes for itself (a side panel that an action
+    /// click or a `setOptions` closes or opens): `Hub::run` gives it to
+    /// `DelegateState::request_of_engine`, which takes an engine token.
+    EngineRequest {
+        extension: String,
+        request: ExtensionRequest,
+    },
+}
+
+/// Whether `call` is one the side panel's stores answer, not the router.
+fn side_panel_call(call: &BridgeCall) -> bool {
+    call.namespace == "sidePanel" || (call.namespace == "runtime" && call.method == "getContexts")
 }
 
 /// A request the model has not answered.
@@ -110,10 +128,10 @@ struct Waiting {
 pub(crate) struct BridgeState {
     /// The strip extensions have been told of: what queries are answered
     /// from and what the next one is compared with.
-    published: Snapshot,
+    pub(super) published: Snapshot,
     /// The newest strip, when it is not published yet, and since when.
     held: Option<(Snapshot, Instant)>,
-    ids: IdSpace,
+    pub(super) ids: IdSpace,
     grants: HashMap<String, Grants>,
     /// The served extensions that have a service worker.
     workers: BTreeSet<String>,
@@ -135,7 +153,7 @@ pub(crate) struct BridgeState {
 }
 
 impl BridgeState {
-    fn view(&self, extension: &str) -> View<'_> {
+    pub(super) fn view(&self, extension: &str) -> View<'_> {
         View {
             snapshot: &self.published,
             ids: &self.ids,
@@ -217,16 +235,30 @@ impl BridgeState {
             };
             return vec![Effect::Reply(call.id, result)];
         }
+        if side_panel_call(&call) {
+            return vec![Effect::SidePanel(call)];
+        }
         let outcome = router::route(&call, &self.view(&call.extension));
+        self.outcome_effects(call.id, &call.extension, outcome)
+    }
+
+    /// What `outcome` of `call` comes to: the one place a router outcome
+    /// becomes effects, for the router's calls and for the hub's.
+    pub(super) fn outcome_effects(
+        &mut self,
+        call: CallId,
+        extension: &str,
+        outcome: Outcome,
+    ) -> Vec<Effect> {
         match outcome {
-            Outcome::Answer(value) => vec![Effect::Reply(call.id, Ok(value))],
-            Outcome::Reject(message) => vec![Effect::Reply(call.id, Err(message))],
+            Outcome::Answer(value) => vec![Effect::Reply(call, Ok(value))],
+            Outcome::Reject(message) => vec![Effect::Reply(call, Err(message))],
             Outcome::Forward {
                 method,
                 args,
                 strip,
             } => vec![Effect::Reply(
-                call.id,
+                call,
                 Ok(router::forward_value(&method, args, strip)),
             )],
             Outcome::Capture {
@@ -234,15 +266,50 @@ impl BridgeState {
                 format,
                 quality,
             } => vec![Effect::Capture {
-                call: call.id,
+                call,
                 tab,
                 format,
                 quality,
             }],
-            Outcome::Request { requests, then } => {
-                self.request(call.id, &call.extension, requests, then)
+            Outcome::Request { requests, then } => self.request(call, extension, requests, then),
+        }
+    }
+
+    /// An event that is no difference of the strip (`sidePanel.onOpened`,
+    /// `onClosed`), for the contexts of `extension` that listen for it: its
+    /// worker, if it has one and the worker registered the event, and each
+    /// of its pages that did. A stopped worker that does not listen is not
+    /// started for it.
+    pub(super) fn emit(
+        &self,
+        extension: &str,
+        event: &'static str,
+        args: Vec<Value>,
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let worker_listens = self.workers.contains(extension)
+            && self
+                .listeners
+                .get(extension)
+                .is_some_and(|names| names.contains(event));
+        if worker_listens {
+            effects.push(Effect::Emit {
+                extension: extension.to_string(),
+                event,
+                args: args.clone(),
+            });
+        }
+        for (page, (owner, names)) in &self.page_listeners {
+            if owner == extension && names.contains(event) {
+                effects.push(Effect::EmitPage {
+                    page: *page,
+                    extension: extension.to_string(),
+                    event,
+                    args: args.clone(),
+                });
             }
         }
+        effects
     }
 
     /// A call from an extension page (the page lane). It is held while its
@@ -1229,5 +1296,206 @@ mod tests {
             ]
         );
         assert!(!state.needs_tick());
+    }
+
+    /// A page's `chrome.sidePanel.<method>` from the view of `tab`.
+    fn panel_call(extension: &str, id: CallId, tab: u64, method: &str) -> BridgeCall {
+        BridgeCall {
+            id,
+            extension: extension.to_string(),
+            asker: Asker::View(TabId(tab)),
+            namespace: "sidePanel".to_string(),
+            method: method.to_string(),
+            args: vec![json!({ "windowId": 1 })],
+            page: Some(id),
+        }
+    }
+
+    #[test]
+    fn a_side_panel_call_is_handed_to_the_hub_from_either_lane() {
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        // The worker's lane.
+        let open = call(1, EXT, "sidePanel", "open", json!([{ "windowId": 1 }]));
+        assert_eq!(state.call(open.clone()), vec![Effect::SidePanel(open)]);
+        let contexts = call(2, EXT, "runtime", "getContexts", json!([{}, []]));
+        assert_eq!(
+            state.call(contexts.clone()),
+            vec![Effect::SidePanel(contexts)]
+        );
+        // A method of `sidePanel` nobody knows is the hub's to reject too.
+        let unknown = call(3, EXT, "sidePanel", "frobnicate", json!([]));
+        assert_eq!(
+            state.call(unknown.clone()),
+            vec![Effect::SidePanel(unknown)]
+        );
+        // Only that one method of `runtime` is: the rest is the router's,
+        // which serves no `runtime`.
+        assert_eq!(
+            state.call(call(4, EXT, "runtime", "sendMessage", json!([]))),
+            vec![Effect::Reply(
+                4,
+                Err(router::unsupported("runtime", "sendMessage"))
+            )]
+        );
+        // The page lane, from a tab the strip holds: nothing to wait for.
+        let from_page = panel_call(EXT, 5, 1, "open");
+        assert_eq!(
+            state.page_call(from_page.clone(), now),
+            vec![Effect::SidePanel(from_page)]
+        );
+    }
+
+    #[test]
+    fn a_held_side_panel_call_is_handed_to_the_hub_when_its_hold_ends() {
+        // Held for its extension: handed over once the extension is served,
+        // after the call held ahead of it and in that order.
+        let mut state = BridgeState::default();
+        let t0 = Instant::now();
+        let first = panel_call(EXT, 1, 1, "getOptions");
+        let second = panel_call(EXT, 2, 1, "open");
+        assert!(state.page_call(first.clone(), t0).is_empty());
+        assert!(state.page_call(second.clone(), t0).is_empty());
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
+        assert_eq!(
+            state.tick(&unknown, t0 + Duration::from_millis(10)),
+            vec![Effect::SidePanel(first), Effect::SidePanel(second)]
+        );
+        assert!(!state.needs_tick());
+
+        // Held for its view (a panel's view is in no strip) while a strip
+        // is pending: handed over when the strip publishes.
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a*"), tab(2, "b")])]),
+            &unknown,
+            now,
+        );
+        let from_panel = panel_call(EXT, 3, 9, "closeSelf");
+        assert!(state.page_call(from_panel.clone(), now).is_empty());
+        assert_eq!(
+            state.table_changed(&live, now),
+            vec![Effect::SidePanel(from_panel)]
+        );
+    }
+
+    #[test]
+    fn a_held_side_panel_call_of_an_unserved_extension_is_refused_at_the_bound() {
+        let mut state = BridgeState::default();
+        let t0 = Instant::now();
+        assert!(
+            state
+                .page_call(panel_call(OTHER, 1, 1, "open"), t0)
+                .is_empty()
+        );
+        assert_eq!(
+            state.tick(&unknown, t0 + PUBLISH_WAIT),
+            vec![Effect::Reply(1, Err(UNBRIDGED.to_string()))]
+        );
+    }
+
+    #[test]
+    fn a_request_answered_with_nothing_resolves_on_done_and_rejects_on_refusal() {
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        let request = ExtensionRequest::CloseSidePanel {
+            window: WindowId(1),
+            tab: None,
+        };
+        let outcome = || Outcome::Request {
+            requests: vec![request.clone()],
+            then: Then::Undefined,
+        };
+        let effects = state.outcome_effects(7, EXT, outcome());
+        let [
+            Effect::Request {
+                token,
+                extension,
+                request: asked,
+            },
+        ] = &effects[..]
+        else {
+            panic!("{effects:?}");
+        };
+        assert_eq!((extension.as_str(), asked), (EXT, &request));
+        assert_eq!(
+            state.extension_reply(*token, ExtensionReply::Done, now),
+            vec![Effect::Reply(7, Ok(Value::Null))]
+        );
+        let effects = state.outcome_effects(8, EXT, outcome());
+        let [Effect::Request { token, .. }] = &effects[..] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(
+            state.extension_reply(*token, ExtensionReply::Refused("No window.".into()), now),
+            vec![Effect::Reply(8, Err("No window.".into()))]
+        );
+        // An answer and a rejection pass straight through.
+        assert_eq!(
+            state.outcome_effects(9, EXT, Outcome::Answer(json!(false))),
+            vec![Effect::Reply(9, Ok(json!(false)))]
+        );
+        assert_eq!(
+            state.outcome_effects(10, EXT, Outcome::Reject("no".into())),
+            vec![Effect::Reply(10, Err("no".into()))]
+        );
+    }
+
+    #[test]
+    fn an_event_of_the_engines_goes_only_to_the_contexts_that_listen_for_it() {
+        const OPENED: &str = "sidePanel.onOpened";
+        let info = || vec![json!({ "windowId": 1, "path": "panel.html" })];
+        let (mut state, _) = started(vec![tab(1, "a*")]);
+        // Nobody listens: nothing is sent, so a stopped worker is not started.
+        assert_eq!(state.emit(EXT, OPENED, info()), vec![]);
+        // The worker listens for another event only.
+        listen(&mut state, EXT, "sidePanel.onClosed");
+        assert_eq!(state.emit(EXT, OPENED, info()), vec![]);
+        // A page of the extension listens: that page, and not the worker.
+        page_listen(&mut state, EXT, 5, OPENED);
+        page_listen(&mut state, EXT, 6, "sidePanel.onClosed");
+        page_listen(&mut state, OTHER, 7, OPENED);
+        assert_eq!(
+            state.emit(EXT, OPENED, info()),
+            vec![Effect::EmitPage {
+                page: 5,
+                extension: EXT.to_string(),
+                event: OPENED,
+                args: info(),
+            }]
+        );
+        // The worker listens too: the worker first, then the page.
+        listen(&mut state, EXT, OPENED);
+        assert_eq!(
+            state.emit(EXT, OPENED, info()),
+            vec![
+                Effect::Emit {
+                    extension: EXT.to_string(),
+                    event: OPENED,
+                    args: info(),
+                },
+                Effect::EmitPage {
+                    page: 5,
+                    extension: EXT.to_string(),
+                    event: OPENED,
+                    args: info(),
+                },
+            ]
+        );
+        // The page's frame went: its registration went with it.
+        state.page_gone(&[5]);
+        assert!(matches!(
+            &state.emit(EXT, OPENED, info())[..],
+            [Effect::Emit { .. }]
+        ));
+        // An extension served without a worker has no worker to send to,
+        // whatever was registered under its name; its pages still hear.
+        state.set_extensions(vec![(EXT.to_string(), all(), false)]);
+        page_listen(&mut state, EXT, 8, OPENED);
+        assert!(matches!(
+            &state.emit(EXT, OPENED, info())[..],
+            [Effect::EmitPage { page: 8, .. }]
+        ));
+        // An extension the bridge does not serve hears nothing.
+        state.set_extensions(vec![]);
+        assert_eq!(state.emit(EXT, OPENED, info()), vec![]);
     }
 }

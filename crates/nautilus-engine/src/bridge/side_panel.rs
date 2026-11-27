@@ -8,18 +8,14 @@
 //! The rules and the error texts are Chromium's `SidePanelService`
 //! (`chrome/browser/extensions/api/side_panel/side_panel_service.cc`).
 
-// Task 7 (`hub.rs`) is the first user of this module; the allow goes with it.
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, HashMap};
 
 use osmena_core::{ExtensionRequest, TabId, WindowId};
 use serde_json::{Value, json};
 
+use super::ids::WINDOW_ID_CURRENT;
+use super::router::{self, Then};
 use crate::panel::{OpenPanel, PanelNotice, PanelRegistry, normalize_page};
-
-/// `chrome.windows.WINDOW_ID_CURRENT`.
-const WINDOW_ID_CURRENT: i64 = -2;
 
 /// `chrome.sidePanel.PanelOptions` without its tab.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -262,6 +258,21 @@ pub(crate) enum Outcome {
     Reject(String),
 }
 
+impl Outcome {
+    /// The router's outcome for this one. A request's answer is
+    /// `undefined` once the model is done (`Then::Undefined`).
+    pub(crate) fn into_router(self) -> router::Outcome {
+        match self {
+            Outcome::Answer(value) => router::Outcome::Answer(value),
+            Outcome::Reject(message) => router::Outcome::Reject(message),
+            Outcome::Request(request) => router::Outcome::Request {
+                requests: vec![request],
+                then: Then::Undefined,
+            },
+        }
+    }
+}
+
 /// What a call comes to.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Routed {
@@ -274,6 +285,11 @@ pub(crate) struct Routed {
 }
 
 impl Routed {
+    /// A call that comes to `value` and nothing else.
+    pub(crate) fn answer(value: Value) -> Routed {
+        Routed::only(Outcome::Answer(value))
+    }
+
     fn only(outcome: Outcome) -> Routed {
         Routed {
             outcome,
@@ -354,6 +370,22 @@ fn place(world: &dyn World, call: &Call<'_>, options: &Value) -> Result<Place, S
             tab: None,
         }),
     }
+}
+
+/// Whether `name` is a function of `chrome.sidePanel` the engine answers
+/// (the script's `bridged` list; a test in `bridge/mod.rs` reads both).
+#[cfg(test)]
+pub(crate) fn is_method(name: &str) -> bool {
+    matches!(
+        name,
+        "open"
+            | "close"
+            | "getOptions"
+            | "setOptions"
+            | "getPanelBehavior"
+            | "setPanelBehavior"
+            | "getLayout"
+    )
 }
 
 /// `chrome.sidePanel.<method>` from an extension context.
@@ -584,6 +616,31 @@ pub(crate) fn action_click(
     })
 }
 
+/// What a click on an extension's toolbar action does, in the order
+/// Chromium decides it: the popup under the button if the action has one,
+/// else the side panel when the extension asked for that and the tab has
+/// an active panel, else `action.onClicked`, else nothing.
+#[derive(Debug, PartialEq)]
+pub(crate) enum ActionClick {
+    Popup(String),
+    Panel(ExtensionRequest),
+    OnClicked,
+    NotBridged,
+}
+
+pub(crate) fn decide_action_click(
+    popup: Option<String>,
+    panel: Option<ExtensionRequest>,
+    bridged: bool,
+) -> ActionClick {
+    match (popup, panel, bridged) {
+        (Some(url), _, _) => ActionClick::Popup(url),
+        (None, Some(request), _) => ActionClick::Panel(request),
+        (None, None, true) => ActionClick::OnClicked,
+        (None, None, false) => ActionClick::NotBridged,
+    }
+}
+
 /// A stable id for a panel's context, shaped like Chromium's (a UUID).
 fn context_id(view: TabId) -> String {
     format!("00000000-0000-4000-8000-{:012x}", view.0)
@@ -791,6 +848,63 @@ mod tests {
         };
         panels.expect(view, EXT, &request);
         panels.bind(TabId(view), EXT, page).unwrap();
+    }
+
+    #[test]
+    fn a_click_is_a_popup_then_a_panel_then_onclicked() {
+        let url = "chrome-extension://abcdefghijklmnopabcdefghijklmnop/popup.html".to_string();
+        let request = ExtensionRequest::OpenSidePanel {
+            window: WindowId(1),
+            tab: None,
+            page: "panel.html".into(),
+        };
+        assert_eq!(
+            decide_action_click(Some(url.clone()), Some(request.clone()), true),
+            ActionClick::Popup(url)
+        );
+        assert_eq!(
+            decide_action_click(None, Some(request.clone()), true),
+            ActionClick::Panel(request)
+        );
+        assert_eq!(
+            decide_action_click(None, None, true),
+            ActionClick::OnClicked
+        );
+        assert_eq!(
+            decide_action_click(None, None, false),
+            ActionClick::NotBridged
+        );
+    }
+
+    #[test]
+    fn a_routed_request_is_the_routers_request_answered_with_nothing() {
+        let request = ExtensionRequest::CloseSidePanel {
+            window: WindowId(1),
+            tab: None,
+        };
+        assert_eq!(
+            Outcome::Request(request.clone()).into_router(),
+            router::Outcome::Request {
+                requests: vec![request],
+                then: Then::Undefined,
+            }
+        );
+        assert_eq!(
+            Outcome::Answer(json!(false)).into_router(),
+            router::Outcome::Answer(json!(false))
+        );
+        assert_eq!(
+            Outcome::Reject("no".into()).into_router(),
+            router::Outcome::Reject("no".into())
+        );
+        assert_eq!(
+            Routed::answer(json!([])),
+            Routed {
+                outcome: Outcome::Answer(json!([])),
+                also: Vec::new(),
+                save: false,
+            }
+        );
     }
 
     #[test]

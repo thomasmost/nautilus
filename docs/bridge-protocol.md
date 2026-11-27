@@ -901,6 +901,93 @@ serve yet is held until it is served, or for the same bound, and then refused
 with `the extension is not bridged.`. A page's call always gets a reply.
 
 
+## Messages Phase 6 adds
+
+Phase 6 (`chrome.sidePanel`) adds calls and two events to the same
+channel, on both lanes, and no new kind of message. The script is
+`js/side_panel.js`, the last of `namespaces_script()`.
+
+**Calls.** The namespace `sidePanel`, and one method of `runtime`:
+
+| Call | Arguments | Answer |
+| --- | --- | --- |
+| `sidePanel.getOptions` | `[{tabId?}]` | `{enabled?, path?, tabId?}`: the tab's own options (then with `tabId`), else the default ones, else the manifest's |
+| `sidePanel.setOptions` | `[{tabId?, path?, enabled?}]` | `null`; an open panel whose place is no longer active closes, one whose page changed shows the new page (requests of the engine's own, below) |
+| `sidePanel.getPanelBehavior` | `[]` | `{openPanelOnActionClick}` |
+| `sidePanel.setPanelBehavior` | `[{openPanelOnActionClick?}]` | `null`; written to `<profile's Chromium directory>/side-panel-behavior.json` when it changed |
+| `sidePanel.open` | `[{tabId?, windowId?}]` | `ExtensionRequest::OpenSidePanel`; `null` once the model is done, or Chromium's rejection for the case |
+| `sidePanel.close` | `[{tabId?, windowId?}]` | `ExtensionRequest::CloseSidePanel` when this extension's panel is open there, else `null` at once |
+| `sidePanel.getLayout` | `[]` | `{side: "right"}` |
+| `sidePanel.closeSelf` | `[]` | internal, and not a `chrome.sidePanel` member: what the script's `window.close` asks. From a side panel's own page it is `CloseSidePanel` for that panel (answered `null` when the model is done); from any other page it is `false`, and the script then calls Chromium's `window.close` (as it does when the call fails). |
+| `runtime.getContexts` | `[filter, originals]` | the contexts: `originals` is Chromium's own answer for `{}`, which the script asks first; the engine retypes or adds each open panel's entry as `SIDE_PANEL` in its window and applies `filter` |
+
+Any other `sidePanel` method rejects
+`chrome.sidePanel.<name> is not supported in this browser.`; any other
+`runtime` method is not bridged at all (the script replaces only
+`getContexts`, and only where Chromium defines it). The script checks
+the arguments before it calls, so a malformed call rejects with a
+`TypeError` (`Error in invocation of sidePanel.<name>: ...`) and never
+reaches the engine. No user gesture is asked for.
+
+**Events**, each with one argument, `{windowId, path, tabId?}` (`tabId`
+for a tab's own panel only): `sidePanel.onOpened` when a panel's view was
+made, `sidePanel.onClosed` when it went. They are `BridgeEvent`s of
+`js/core.js`, so a context announces its first listener with
+`bridge.listen` like any other event, and the engine sends one only to
+the contexts of the panel's extension that announced it: the worker
+(`Effect::Emit`, which starts a stopped worker that listens) and each
+listening page (`Effect::EmitPage`). `BridgeState::emit` decides; a
+stopped worker that does not listen is not started.
+
+**Who answers.** These calls are not rows of `router::route`.
+`BridgeState::call` hands them back as `Effect::SidePanel(call)`, after
+the `bridge` namespace and for a page's call after its holds
+(`page_call`, `settle`), so the order of a page's calls and the
+`the extension is not bridged.` refusal apply to them as to `tabs`.
+`Hub::run` gives the effect to `Hub::side_panel_call`, which answers from
+two stores in `DelegateState`: the options and behaviours
+(`bridge::side_panel::SidePanelStore`) and the open panels
+(`panel::PanelRegistry`). The answer becomes effects through
+`BridgeState::outcome_effects`, the same function the router's outcomes
+go through; a request is answered with `Then::Undefined` (`null` on
+`Done`, the refusal's text on `Refused`).
+
+**Requests of the engine's own.** A panel that `setOptions` closes or
+re-pages, and a panel an action click opens or closes, are
+`ExtensionRequest`s no call waits for (`Effect::EngineRequest`,
+`DelegateState::request_of_engine`). Their token has bit 63 set
+(`ENGINE_TOKEN`); the bridge's own tokens count up from 1 and never reach
+it. `ExtensionManager::extension_reply` passes every reply to
+`DelegateState::note_reply` first, which settles what the panel registry
+expected of the request and ends a reply to an engine token there.
+
+**The current window of a panel's page.** For a `sidePanel` call the hub
+asks the panel registry first (`PanelRegistry::window_of`), then the
+strip (`View::current_window`). `tabs` and `windows` calls are the
+router's and know only the strip, which names the one panel a window
+shows: a call from the page of a tab's panel whose tab is not the
+active one resolves `currentWindow` to the window focused last.
+
+**A panel's page and the tab report.** A panel's page runs
+`js/page_report.js` like every bridged page. Its view is no tab and has
+no row in the table (`TabHost::create_view` never calls `track_tab`), so
+`PageLane::report` drops a report from a registered panel's view
+without the log line (`pages::from_panel`). The page's calls still wait
+for the report's bound (1 s at most), and a call from a panel's view is
+held like a call from a tab the strip does not hold while a strip is
+pending (`Hold::Tab`, 2 s at most).
+
+**The action click.** `ExtensionManager::click` is the one decision
+(`side_panel::decide_action_click`): the popup if the action has one,
+else the panel when the extension asked for it with `setPanelBehavior`
+and the tab has an active panel (`Hub::side_panel_click`), else
+`action.onClicked` through the bridge as before. The toolbar
+(`TabHost::open_extension_action`) and the test control's `click` both
+take it; the control's log line says `sent to the bridge`, `not sent`,
+`opened or closed its side panel`, or `the action has a popup, which the
+control does not open`.
+
+
 ## How a later phase adds a namespace
 
 1. A file under `bridge/js/` calls `__nautilusBridge.define('<name>', { bridged, optional, direct, events, nativeEvents })` (the comment on `define` in `js/core.js` says what each list does; `js/tabs.js` and `js/windows.js` are the examples). `bridged` names the functions the engine answers, `optional` the same where Chromium defines them, `direct` Chromium's own functions, called bound, `events` the events the engine fires, `nativeEvents` Chromium's events, kept.
@@ -908,6 +995,8 @@ with `the extension is not bridged.`. A page's call always gets a reply.
 3. Its rows go in `router::route` (`bridge/router.rs`): one arm per namespace, one per method, each answered as S, R, F, D or X in the method tables above.
 4. Its events are `StripEvent` variants (`bridge/differ.rs`) produced by `diff`, with a `render` arm giving the event name and its argument list.
 5. Its names are covered by the test `every_function_of_a_replaced_namespace_is_ours` (`bridge/mod.rs`), which checks that every bridged or optional method of the `tabs` and `windows` scripts reaches the router (the names in its `later` list excepted).
+
+**`sidePanel` is written by hand, and is the exception.** `js/side_panel.js` does not use `define`, its calls are not rows of `router::route`, and its events are not `StripEvent`s. The reasons, one per step above: its functions check their arguments as Chromium's do and fail with a `TypeError` naming the function before anything is sent, and its object is frozen whole, neither of which `define` does (what `define` would have given, the callback style with `runtime.lastError` set, it does not have: a callback gets no argument on failure and the error is logged as unchecked); its answers come from stores in `DelegateState` that a call changes (`SidePanelStore`, `PanelRegistry`), which the router, a pure function of the call and the published strip, cannot hold, so the hub answers them (`Effect::SidePanel`, "Messages Phase 6 adds"); and a panel opening or closing is no difference between two strips, so the events come from the panel registry's notices through `BridgeState::emit`. What it keeps of the recipe: its events are `__nautilusBridge.BridgeEvent`s, so they are announced and dispatched like every other; it is fail-closed (a member Chromium defines and the script does not name is not in the frozen object, or rejects where Chromium does not let go of the property; a method the engine does not know rejects); and it has its own test, `every_side_panel_function_is_ours`, with its part of `ci/side-panel/bridge_check.mjs`. A namespace whose answers are a function of the strip follows the five steps, not this.
 
 ## The scripted run (phase5.py)
 

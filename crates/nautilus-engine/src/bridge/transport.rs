@@ -28,7 +28,8 @@ pub(crate) struct BridgeCall {
     /// The calling extension's id.
     pub extension: String,
     pub asker: Asker,
-    /// "tabs", "windows", or "bridge" for the script's own messages.
+    /// "tabs", "windows", "sidePanel", "runtime" (its `getContexts` only),
+    /// or "bridge" for the script's own messages.
     pub namespace: String,
     pub method: String,
     /// The arguments without a trailing callback; `undefined` is `null`.
