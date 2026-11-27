@@ -655,9 +655,16 @@ impl TabHostApi for TabHost {
 
     fn set_hidpi(&self, scale: f32) {
         self.scale.set(scale);
-        let sizes = self.sizes.borrow();
-        for (id, entry) in &self.tabs {
-            let (width, height) = sizes.of(*id);
+        // The sizes are copied out first: CEF can call a handler inside
+        // the two calls below, and nothing of the host's is borrowed then.
+        let sizes: Vec<(TabId, (u32, u32))> = {
+            let sizes = self.sizes.borrow();
+            self.tabs.keys().map(|id| (*id, sizes.of(*id))).collect()
+        };
+        for (id, (width, height)) in sizes {
+            let Some(entry) = self.tabs.get(&id) else {
+                continue;
+            };
             entry.view.scale.set(scale);
             entry.view.dip_size.set(dip_size(width, height, scale));
             if let Some(host) = entry.browser.host() {
