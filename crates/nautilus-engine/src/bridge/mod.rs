@@ -15,6 +15,7 @@ pub(crate) mod install;
 pub(crate) mod migrate;
 pub(crate) mod policy;
 pub(crate) mod rewrite;
+pub(crate) mod side_panel;
 pub(crate) mod table;
 
 mod differ;
