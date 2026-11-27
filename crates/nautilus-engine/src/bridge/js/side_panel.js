@@ -105,10 +105,14 @@
       onClosed: new bridge.BridgeEvent('sidePanel.onClosed'),
     };
 
+    // Not configurable, as `define` leaves a namespace (js/core.js):
+    // Chromium defines every API on `chrome` again in each live context
+    // when the set of extensions changes, and a configurable property is
+    // then its own once more, for good.
     try {
       Object.defineProperty(chrome, 'sidePanel', {
         value: Object.freeze(api),
-        configurable: true,
+        configurable: false,
         enumerable: true,
         writable: false,
       });

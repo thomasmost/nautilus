@@ -202,6 +202,20 @@ for (const viaPage of [false, true]) {
     assert.equal(typeof sp[name], 'function', name);
   }
   assert.equal(sp.Side.RIGHT, 'right');
+  // Chromium cannot put its own back. When the set of extensions changes
+  // it defines every API on `chrome` again, in every live context
+  // (NativeExtensionBindingsSystem::UpdateBindingsForContext, a lazy data
+  // property per API): a replaced namespace must refuse that, or the
+  // extension is left with Chromium's own from then on.
+  for (const name of ['sidePanel', 'tabs', 'windows']) {
+    const ours = chrome[name];
+    assert.throws(
+      () => Object.defineProperty(chrome, name, { value: { chromium: true }, writable: true, enumerable: true, configurable: true }),
+      TypeError,
+      `Chromium could put its own chrome.${name} back`
+    );
+    assert.equal(chrome[name], ours, name);
+  }
   // Every function asks the engine, and none reaches Chromium.
   w.calls.length = 0;
   w.reached.length = 0;
