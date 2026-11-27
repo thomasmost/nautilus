@@ -329,9 +329,20 @@
     if (!chrome.action || !chrome.action.onClicked) {
       return Promise.reject(new Error('this extension has no action'));
     }
-    // Chromium's own tab object, so the listener gets what Chrome
-    // would give it.
-    return nativeTabGet(delivery.tabId).then(function (tab) {
+    // Chromium's own tab object, so the listener gets what Chrome would
+    // give it (its url and title by Chromium's own permission rule), with
+    // the strip's fields laid over it: Chromium knows no window and no
+    // index for these tabs (windowId -1, index -1), and an extension
+    // passes the click's tab on to sidePanel.open and tabs.group. The
+    // engine sends the strip with the click; for a click that came
+    // without one it is asked for, and a strip nobody can give leaves
+    // Chromium's fields.
+    var strip = delivery.strip
+      ? Promise.resolve(delivery.strip)
+      : call('tabs.stripOf', [delivery.tabId]).then(function (value) { return value; }, function () { return null; });
+    return Promise.all([nativeTabGet(delivery.tabId), strip]).then(function (got) {
+      var tab = got[0];
+      if (tab && got[1] && typeof got[1] === 'object' && got[1].panel !== true) { Object.assign(tab, got[1]); }
       chrome.action.onClicked.dispatch(tab);
     });
   }

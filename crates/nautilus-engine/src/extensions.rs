@@ -1003,6 +1003,7 @@ mod native {
                     Clicked::Panel
                 }
                 ActionClick::OnClicked => {
+                    log::info!("extension {id}: action clicked for {tab:?}");
                     if self.bridge.click(id, tab) {
                         Clicked::Delivered
                     } else {

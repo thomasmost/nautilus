@@ -446,7 +446,7 @@ answer. A screenshot fails when its browser is gone or after 10 s.
 
 | `event` | Carries | The bridge does | Since |
 |---------|---------|-----------------|-------|
-| `action.onClicked` | `tabId` (Chromium's) | `chrome.action.onClicked.dispatch(await <Chromium's chrome.tabs.get>(tabId))` | 1 |
+| `action.onClicked` | `tabId` (Chromium's), and since Phase 7 `strip` (the tab's seven strip fields, `View::strip_json`, when the published strip holds the tab) | `chrome.action.onClicked.dispatch(tab)`, `tab` being `await <Chromium's chrome.tabs.get>(tabId)` with `strip` laid over it | 1 |
 
 Any other event is handed to every listener that the
 namespace scripts registered with `__bridgeOnEvent`, as
@@ -457,7 +457,20 @@ with `ok: true`, or, when any listener threw, `done` with `ok: false` and
 the first error's message. The relay reports that as `received` with a
 failure, which the engine never retries (`policy::after_delivery`). Chromium's
 `tabs.get` for the click is the one `core.js` kept in `native` before it
-replaced the namespace, so a click never reaches the engine.
+replaced the namespace, so a click's tab is Chromium's own object: its
+`url` and `title` are there by Chromium's permission rule, not the
+bridge's `Grants`. Chromium knows no window and no index for these tabs
+(`windowId` -1, `index` -1), and an extension passes the click's tab on
+(`sidePanel.open({tabId, windowId})`, `tabs.group({createProperties:
+{windowId}})`), so the engine sends the strip's fields with the click
+(`relay::click_message`, from `Hub::strip_of`) and the bridge lays them
+over the object: `index`, `windowId`, `groupId`, `active`, `highlighted`,
+`selected` and `pinned` are the strip's. A click sent while the published
+strip did not hold its tab carries no `strip`; the bridge then asks the
+engine (`tabs.stripOf`) before it dispatches, and only a tab nobody can
+place keeps Chromium's fields. The click itself keeps Phase 1's path
+(`Bridge::click`, `Payload::Click`) and its log lines; a keyboard
+`_execute_action` takes the same path.
 
 The engine's events are the same messages. It sends `deliver` with
 `{id, event, args}` to a service worker only for an event that the worker's

@@ -114,6 +114,18 @@ struct Delivery {
     payload: Payload,
 }
 
+/// The delivery of a click on an extension's action: the tab by Chromium's
+/// id, which the worker asks Chromium's own `tabs.get` for, and the
+/// strip's fields for that tab (`View::strip_json`), which the worker lays
+/// over the answer. Without a strip the worker asks for one itself.
+fn click_message(id: u64, chromium: i64, strip: Option<Value>) -> Value {
+    let mut message = json!({"id": id, "event": "action.onClicked", "tabId": chromium});
+    if let Some(strip) = strip {
+        message["strip"] = strip;
+    }
+    message
+}
+
 impl Delivery {
     /// How the log names it: `delivery 7` for a click, `event tabs.onCreated
     /// (delivery 7)` for an event.
@@ -128,8 +140,26 @@ impl Delivery {
 #[cfg(test)]
 mod delivery_tests {
     use osmena_core::TabId;
+    use serde_json::json;
 
-    use super::{Delivery, Job, Payload};
+    use super::{Delivery, Job, Payload, click_message};
+
+    #[test]
+    fn a_click_names_its_tab_by_chromiums_id_and_carries_the_strips_fields() {
+        // The worker asks Chromium for the tab by `tabId` and lays `strip`
+        // over it: Chromium knows no window and no index for these tabs.
+        let strip = json!({"index": 2, "windowId": 1, "groupId": -1, "active": true});
+        assert_eq!(
+            click_message(7, 433, Some(strip.clone())),
+            json!({"id": 7, "event": "action.onClicked", "tabId": 433, "strip": strip})
+        );
+        // A tab the published strip does not hold: no `strip`, and the
+        // worker asks for it itself.
+        assert_eq!(
+            click_message(8, 433, None),
+            json!({"id": 8, "event": "action.onClicked", "tabId": 433})
+        );
+    }
     use crate::bridge::policy::JobKind;
 
     fn click() -> Delivery {
@@ -1493,8 +1523,20 @@ impl Bridge {
                     );
                     return;
                 };
+                // The tab as the strip has it, for the worker to lay over
+                // Chromium's own object. The hub's borrow ends here, before
+                // the evaluation below.
+                let strip = self
+                    .delegate
+                    .hub()
+                    .and_then(|hub| hub.strip_of(extension, *tab));
+                if strip.is_none() {
+                    log::debug!(
+                        "bridge: {tab:?} is not in the published strip; the click on {extension} carries no strip"
+                    );
+                }
                 (
-                    json!({"id": id, "event": "action.onClicked", "tabId": chromium}),
+                    click_message(id, chromium, strip),
                     format!(
                         "bridge: {extension}: delivery {id} (action.onClicked, tab {chromium}) sent"
                     ),

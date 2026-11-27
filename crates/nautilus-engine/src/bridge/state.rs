@@ -190,6 +190,16 @@ impl BridgeState {
         }
     }
 
+    /// The strip's fields of `tab` (`View::strip_json`), as `extension`
+    /// is given them: what a click on its action carries for the worker
+    /// to lay over Chromium's own tab object. `None` for a tab the
+    /// published strip does not hold.
+    pub(crate) fn strip_of(&self, extension: &str, tab: TabId) -> Option<Value> {
+        let view = self.view(extension);
+        let (window, index) = view.snapshot.locate(tab)?;
+        Some(view.strip_json(window, index))
+    }
+
     /// What the router reads of each served extension beyond its grants.
     /// No effects.
     pub(crate) fn set_facts(&mut self, facts: Vec<(String, ExtensionFacts)>) {
@@ -1448,6 +1458,26 @@ mod tests {
             state.page_call(from_page.clone(), now),
             vec![Effect::SidePanel(from_page)]
         );
+    }
+
+    #[test]
+    fn the_strip_of_a_tab_is_what_a_click_on_it_carries() {
+        let (state, _) = started(vec![tab(1, "a"), tab(2, "b*")]);
+        // The same seven fields `sender.tab` and a forwarded tab get.
+        let view = state.view(EXT);
+        assert_eq!(
+            state.strip_of(EXT, TabId(2)),
+            Some(view.strip_json(&view.snapshot.windows[0], 1))
+        );
+        let strip = state
+            .strip_of(EXT, TabId(2))
+            .expect("the tab is in the strip");
+        assert_eq!(strip["windowId"], json!(1));
+        assert_eq!(strip["index"], json!(1));
+        assert_eq!(strip["active"], json!(true));
+        assert_eq!(strip["groupId"], json!(-1));
+        // A tab the published strip does not hold has none.
+        assert_eq!(state.strip_of(EXT, TabId(9)), None);
     }
 
     #[test]

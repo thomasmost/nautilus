@@ -1052,6 +1052,58 @@ function loadWorker(runtime) {
   assert.deepEqual(w.served, ['tabs.query']);
 }
 {
+  // The action click (bridge.js): the listener's tab is Chromium's own
+  // object with the strip's fields laid over it, so its windowId and index
+  // are the browser's, which an extension passes on to sidePanel.open and
+  // tabs.group. A click that came without a strip asks the engine for it.
+  const w = workerWorld();
+  const clicked = [];
+  const sandbox = {
+    chrome: { runtime: w.runtime, action: { onClicked: { dispatch: (tab) => clicked.push(JSON.parse(JSON.stringify(tab))) } } },
+    console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Date, setTimeout, clearTimeout,
+  };
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read('bridge.js'), sandbox);
+  // Chromium's own tabs.get, as core.js keeps it: no window, no index.
+  const asked = [];
+  sandbox.__nautilusBridge = { native: { tabs: { get: (id, callback) => {
+    asked.push(id);
+    callback({ id, index: -1, windowId: -1, active: false, highlighted: false, selected: false, pinned: false, groupId: -1, url: 'https://x.example/', title: 'X' });
+  } } } };
+  // The relay page's end of the port, connected to the worker.
+  const worker = portEnd('nautilus-bridge-1');
+  const relay = portEnd('nautilus-bridge-1');
+  worker.peer = relay;
+  relay.peer = worker;
+  worker.sender = { id: 'x', url: 'chrome-extension://x/nautilus-bridge/relay.html' };
+  const done = [];
+  const calls = [];
+  relay.onMessage.addListener((message) => {
+    if (message.done) done.push(message.done);
+    if (message.call) {
+      calls.push([message.call.method, message.call.args]);
+      const result = message.call.method === 'tabs.stripOf' ? { index: 0, windowId: 3, groupId: -1, active: false, highlighted: false, selected: false, pinned: false } : null;
+      relay.postMessage({ reply: { id: message.call.id, instance: message.call.instance, result } });
+    }
+  });
+  w.runtime.onConnect.fire(worker);
+  const strip = { index: 2, windowId: 1, groupId: 5, active: true, highlighted: true, selected: true, pinned: false };
+  relay.postMessage({ deliver: { id: 1, event: 'action.onClicked', tabId: 433, strip } });
+  await wait(30);
+  assert.deepEqual(asked, [433]);
+  assert.deepEqual(clicked, [{ id: 433, index: 2, windowId: 1, active: true, highlighted: true, selected: true, pinned: false, groupId: 5, url: 'https://x.example/', title: 'X' }]);
+  assert.deepEqual(done, [{ id: 1, ok: true }]);
+  assert.deepEqual(calls, [], 'a click with its strip asked the engine');
+  // Without a strip (a tab the published strip did not hold when the click
+  // was sent): the worker asks the engine for it before the dispatch.
+  relay.postMessage({ deliver: { id: 2, event: 'action.onClicked', tabId: 434 } });
+  await wait(60);
+  assert.deepEqual(calls, [['tabs.stripOf', [434]]]);
+  assert.equal(clicked.length, 2);
+  assert.deepEqual([clicked[1].id, clicked[1].windowId, clicked[1].index], [434, 3, 0]);
+}
+{
   // A page's tab is reported before any of its calls, and the calls wait for
   // the report: the browser handles the report first, so a call is answered
   // with the Chromium id the report named.

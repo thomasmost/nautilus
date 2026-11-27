@@ -214,6 +214,14 @@ impl Hub {
         self.run(effects);
     }
 
+    /// The strip's fields of `tab` for `extension` (`BridgeState::strip_of`),
+    /// for the relay's click. `None` for a tab the published strip does not
+    /// hold, and when the state is in use (the relay sends a click on its
+    /// own turn, never from inside a call the hub is routing).
+    pub(crate) fn strip_of(&self, extension: &str, tab: TabId) -> Option<Value> {
+        self.state.try_borrow().ok()?.strip_of(extension, tab)
+    }
+
     /// Give the state the open side panels' windows, from the registry:
     /// the router answers "the current window" of a panel's page from
     /// them (`View::current_window`), and a held call is routed inside the
