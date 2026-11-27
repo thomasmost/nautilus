@@ -440,6 +440,80 @@ environment hook's four list switches go through it. Never
 or the two `blink` lists. Re-check on a CEF bump by running with
 `NAUTILUS_CHROMIUM_SWITCHES=disable-features=NoSuchFeature`.
 
+### C19: a namespace the bridge pins stops Chromium's update of that context's APIs at the pin
+
+The bridge replaces `chrome.tabs`, `chrome.windows`, `chrome.tabGroups`,
+`chrome.commands` and `chrome.sidePanel` in every context of a bridged
+extension and makes each property non-configurable (`define` in
+`bridge/js/core.js`, `js/side_panel.js`), because Chromium defines every
+API on `chrome` again in each live context whenever the set of
+extensions or an extension's permissions change, and a configurable
+property would be Chromium's own once more.
+
+**Read in Chromium's source** (tag `156.0.8078.100`, the milestone of
+the `cef` pin; `extensions/renderer/native_extension_bindings_system.cc`,
+`NativeExtensionBindingsSystem::UpdateBindingsForContext`, and
+`extensions/renderer/feature_cache.cc`): for an extension context the
+function walks `feature_cache_.GetAvailableFeatures(...)`, which
+`FeatureCache` keeps sorted by feature name (`std::ranges::sort(
+features.available_features, std::ranges::less{}, &Feature::name)`),
+and for each calls `chrome->SetLazyDataProperty(...)`; at the first one
+that fails it logs and **returns**:
+
+```
+if (!set_accessor(accessor_name)) {
+  LOG(ERROR) << "Failed to create API on Chrome object.";
+  return;
+}
+```
+
+(line 769, the line the browser's log names). `SetLazyDataProperty`
+fails on an own property that is not configurable. So in a context the
+bridge has been put into, every later update redefines the APIs whose
+names sort before the first pinned one and stops there: with the
+`commands` namespace replaced that is `commands` (after `action`,
+`alarms`, `bookmarks`, ...), else `sidePanel`, `tabGroups` or `tabs`.
+The loop over the developer-mode-restricted features and the
+`browser.devtools` accessor, both after it in the function, are not
+reached either. What a context already had is untouched: the lazy
+properties set when the context was created stay.
+
+**Inferred, not seen:** an API that becomes available to a live context
+later (an optional permission granted through `permissions.request`,
+whose name sorts at or after the first pinned namespace, which is nearly
+all of them: `cookies`, `debugger`, `downloads`, `history`, `scripting`,
+`storage`, `webNavigation`, ...) does not appear on `chrome` in that
+context until the context is made again (the worker restarts, the page
+reloads). No run here granted a permission to a live context. The log
+line itself is in the scripted runs' browser logs
+(`native_extension_bindings_system.cc:769`).
+
+Also read there and not yet acted on: the same function defines every
+API a second time on a global `browser` object in an extension context
+(`set_accessor_on_browser`, the same `BindingAccessor`, so
+`browser.tabs` is Chromium's own namespace object, the one `chrome.tabs`
+was before the bridge replaced the property). The bridge replaces only
+`chrome.<name>`. Whether CEF 156's build exposes `browser` to
+extensions was not checked in a run when this was written; if it does,
+`browser.tabs.group(...)` reaches Chromium (C11).
+
+**Blocks:** optional permissions taking effect in a live bridged
+context without a restart of that context (inferred). **Workaround:**
+none in place. A different pin was looked for in the source and there
+is none on `chrome` itself: only a non-configurable own property makes
+`SetLazyDataProperty` leave a property alone, and exactly that is the
+failure the function returns on. What the source does allow: leave
+`chrome.<name>` configurable and replace the members of Chromium's own
+namespace object in place (what `define` already does where the
+property cannot be redefined). `BindingAccessor` answers the context's
+cached object (`GetAPIHelper`, `data->api_object`) on every redefinition,
+so the replaced members would survive an update, no `SetLazyDataProperty`
+would fail, and `browser.<name>`, the same object, would be covered too.
+Not implemented and not tried: it rests on Chromium's namespace objects
+accepting `Object.defineProperty` on their members, which the fallback
+path has only ever met in `ci/side-panel/bridge_check.mjs`'s stand-in.
+Re-check on a CEF bump: the early `return` and the sort.
+
 ### C4: Chromium's extension dialogs crash a windowless browser
 
 `chrome.webstorePrivate.beginInstallWithManifest3` (the store's "Add to
