@@ -554,10 +554,11 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   in a worker-less test extension, `typeof` is `undefined` for both. If an
   extension page's bridge cannot be put in, its native `tabs` and `windows`,
   and its `tabGroups` and `commands` where it has them, are replaced with
-  namespaces that refuse every call (`page_transport.js`,
+  namespaces that refuse every call (`js/refuse.js`,
   `__nautilusRefuseNative`), so a native `tabs.group` or `tabGroups.update`
   is never called; its `sidePanel` too, and all of them on `browser` as on
-  `chrome`.
+  `chrome`. The same holds for one namespace whose install fails, in a
+  page and in a worker ("Fail closed", below).
 - A message from a tab (`sender.tab`) is delivered synchronously, so Chromium gets
   the answer to its keep-open question at once: the wrapper returns true only when a
   listener of this context kept the channel open (returned true or a promise). A
@@ -1226,7 +1227,29 @@ scripts leave no function of Chromium's in a replaced namespace
 bridge cannot be put in has its `tabGroups`, `commands` and `sidePanel` refused with
 its `tabs` and `windows` (`__nautilusRefuseNative`), on `chrome` and on
 `browser`: every replacement goes through `pin` (below), which covers
-both globals. The tests are
+both globals.
+
+The refusal is `js/refuse.js`, the first script of every bridged context,
+a worker's as a page's. Each namespace is installed in a guard of its own,
+twice over: the core's `install` (what `define` and `sidePanel` call)
+catches a `pin` that throws, and `namespaces_script` (`bridge/mod.rs`)
+wraps each script in a `try` whose `catch` refuses that script's
+namespace (the core's: all five). So one namespace that cannot be put in
+is refused on both globals and the ones after it are installed all the
+same; before 2026-11-27 they ran in one `try` and a failure left every
+later namespace Chromium's. The refusal takes what it finds: a property
+that can be redefined is; one that can only be assigned is; where neither,
+every function and event of the object it holds is replaced in place
+(which also finishes an object `pin` left half replaced); and where a
+member cannot be replaced either (a frozen object), the global itself,
+`chrome` or `browser`, is replaced by a stand-in that answers the refusal
+under that name and Chromium's object for every other. That last resort
+is not seen in Chromium, whose API properties can be redefined; a context
+it happens in gains no API afterwards, since Chromium defines nothing on
+a stand-in. A refused namespace's events take listeners and never fire,
+so an extension's first evaluation does not throw on
+`onUpdated.addListener`. The worker's transport is guarded too: if it
+throws, the core finds no transport and refuses all five. The tests are
 `every_function_of_a_replaced_namespace_is_ours` and
 `tab_groups_and_commands_are_replaced_whole_and_refused_when_they_cannot_be`
 (`bridge/mod.rs`), `group_calls_and_the_command_listing_are_routed`
@@ -1256,9 +1279,9 @@ So `browser.tabs === chrome.tabs` in a bridged context, and likewise
 `runtime.onConnect`, `debugger.attach` and `detach`) it wraps on
 Chromium's own object, which is one object for both globals;
 `core.js`'s `same` gives `browser` `chrome`'s object should the two
-ever differ. The fail-closed refusal (`__nautilusRefuseNative`) covers
-both globals and `sidePanel`, with one refusing object per namespace,
-pinned.
+ever differ. The fail-closed refusal (`__nautilusRefuseNative`,
+`js/refuse.js`) covers both globals and `sidePanel`, with one refusing
+object per namespace, pinned.
 
 1. A file under `bridge/js/` calls `__nautilusBridge.define('<name>', { bridged, optional, direct, events, nativeEvents })` (the comment on `define` in `js/core.js` says what each list does; `js/tabs.js` and `js/windows.js` are the examples). `bridged` names the functions the engine answers, `optional` the same where Chromium defines them, `direct` Chromium's own functions, called bound, `events` the events the engine fires, `nativeEvents` Chromium's events, kept.
 2. Its name is added to `namespaces_script()` in `bridge/mod.rs`, so the file's text follows the others in a worker's and a page's script.

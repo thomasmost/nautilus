@@ -32,7 +32,22 @@ const RELAY_CONTEXT = { contextType: 'TAB', documentUrl: 'chrome-extension://x/n
 // and context). 'separate': objects of its own, whose functions record
 // themselves as `browser.<name>.<function>`. `pinnedBrowser`: its
 // properties cannot be redefined.
-function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null, panels = null, browser = null, pinnedBrowser = false, runtimeApart = false, debuggerApi = false }) {
+// The namespaces as the engine composes them (`namespaces_script` in
+// bridge/mod.rs, whose `NAMESPACES` is this list): each script in a guard of
+// its own, with what its failure refuses (null: every replaced namespace;
+// false: nothing).
+const NAMESPACES = [['core.js', null], ['tabs.js', 'tabs'], ['windows.js', 'windows'], ['runtime.js', false], ['tab_groups.js', 'tabGroups'], ['commands.js', 'commands'], ['debugger.js', false], ['side_panel.js', 'sidePanel']];
+function guarded(script, refuses) {
+  const refusal = refuses === false ? '' : ` if (typeof self.__nautilusRefuseNative === 'function') { self.__nautilusRefuseNative(${refuses === null ? '' : `['${refuses}']`}); }`;
+  return `try {\n${script}\n} catch (e) { console.error('nautilus-bridge: ' + e);${refusal} }`;
+}
+const namespacesScript = () => NAMESPACES.map(([file, refuses]) => guarded(read(file), refuses)).join('\n');
+
+// `frozen`: a namespace whose property `chrome` does not let go of and whose
+// object is frozen. `stuck`: [namespace, member], the same property holding
+// an object one member of which cannot be replaced. `throwing`: a namespace
+// whose property throws when read.
+function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null, panels = null, browser = null, pinnedBrowser = false, runtimeApart = false, debuggerApi = false, frozen = null, stuck = null, throwing = null }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
@@ -169,6 +184,17 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
       }
     }
   }
+  if (frozen) {
+    Object.defineProperty(chrome, frozen, { value: Object.freeze(chrome[frozen]), configurable: false, writable: false, enumerable: true });
+  }
+  if (stuck) {
+    const [name, member] = stuck;
+    Object.defineProperty(chrome[name], member, { value: chrome[name][member], configurable: false, writable: false, enumerable: true });
+    Object.defineProperty(chrome, name, { value: chrome[name], configurable: false, writable: false, enumerable: true });
+  }
+  if (throwing) {
+    Object.defineProperty(chrome, throwing, { get() { throw new Error('this property cannot be read'); }, configurable: true, enumerable: true });
+  }
   const engine = (ns, method, args) => {
     // Through JSON, as on the wire (and so the arrays are this realm's).
     calls.push(JSON.parse(JSON.stringify([ns, method, args])));
@@ -179,6 +205,8 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
   sandbox.self = sandbox;
   if (twin) { sandbox.browser = twin; }
   vm.createContext(sandbox);
+  // The refusal is the first script of every bridged context.
+  vm.runInContext(read('refuse.js'), sandbox);
   if (prime) { answers.set('tabs.query', () => prime); }
   // The Chromium tab ids of the extension's open side panels, as the engine
   // answers a context that asks when it starts.
@@ -200,9 +228,7 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
     // The worker's marker (bridge.js): the worker primes its tab cache.
     sandbox.__nautilusTransport = { protocol: 1, portHidden: true };
   }
-  for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'tab_groups.js', 'commands.js', 'debugger.js', 'side_panel.js']) {
-    vm.runInContext(read(file), sandbox);
-  }
+  vm.runInContext(namespacesScript(), sandbox);
   return { chrome, reached, calls, answers, messages, filters, debuggerState, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
 }
 
@@ -743,6 +769,90 @@ for (const viaPage of [false, true]) {
     assert.ok(w.errors.some((e) => e.includes('browser.runtime is not chrome.runtime')));
   }
 }
+// One namespace whose install fails does not leave the others Chromium's
+// (the reviewer's setup: `chrome.tabGroups` a property that cannot be
+// redefined, holding a frozen object). The namespaces before and after it
+// are the bridge's on both globals, and the one that failed is refused on
+// both: no function of Chromium's own tabGroups, commands or sidePanel is
+// callable through `chrome` or through `browser`.
+const REFUSED = /is not supported in this (page|worker)\./;
+for (const viaPage of [false, true]) {
+  const where = viaPage ? 'page' : 'worker';
+  {
+    const w = world({ viaPage, browser: 'alias', frozen: 'tabGroups' });
+    await tick();
+    w.calls.length = 0;
+    w.reached.length = 0;
+    w.answers.set('tabs.query', () => [{ id: 7 }]);
+    for (const api of [w.sandbox.chrome, w.sandbox.browser]) {
+      assert.deepEqual(await api.tabs.query({}), [{ id: 7 }]);
+      for (const call of [
+        () => api.tabGroups.update(1, { title: 'x' }),
+        () => api.tabGroups.get(1),
+        () => api.tabGroups.query({}),
+        () => api.tabGroups.move(1, { index: 0 }),
+        () => api.tabGroups.frobnicate(),
+      ]) {
+        await assert.rejects(Promise.resolve().then(call), REFUSED, `a tabGroups whose install failed is not refused (${where})`);
+      }
+      // A refused namespace's events take listeners and never fire, so the
+      // extension's first evaluation does not throw on them.
+      api.tabGroups.onCreated.addListener(() => assert.fail('never fires'));
+      assert.equal(api.tabGroups.onCreated.hasListeners(), false);
+      await api.tabs.group({ tabIds: [7] });
+      await api.windows.getAll();
+      await api.commands.getAll();
+      await assert.rejects(Promise.resolve().then(() => api.commands.frobnicate()), /commands\.frobnicate is not supported\./);
+      api.commands.onCommand.addListener(() => {});
+      await api.sidePanel.open({ windowId: 1 });
+      assert.equal(api.sidePanel.frobnicate, undefined);
+    }
+    assert.deepEqual(w.reached, [], `a namespace after the one that failed is Chromium's (${where})`);
+    for (const method of ['getAll']) assert.ok(w.calls.some(([ns, m]) => ns === 'commands' && m === method), 'commands is not the bridge\'s');
+    assert.ok(w.calls.some(([ns, m]) => ns === 'sidePanel' && m === 'open'), 'sidePanel is not the bridge\'s');
+    for (const name of ['tabs', 'windows', 'commands', 'sidePanel']) {
+      assert.equal(w.sandbox.browser[name], w.sandbox.chrome[name], name);
+    }
+    assert.ok(w.errors.some((e) => e.includes('tabGroups')), 'the failed install is not logged');
+    assert.equal(w.sandbox.__nautilusBridge.installed.includes('tabGroups'), false);
+  }
+  {
+    // An object left half replaced: one member cannot be replaced, the
+    // others were. Nothing of Chromium's stays callable in it.
+    const w = world({ viaPage, browser: 'alias', stuck: ['tabGroups', 'update'] });
+    await tick();
+    w.reached.length = 0;
+    for (const api of [w.sandbox.chrome, w.sandbox.browser]) {
+      for (const call of [
+        () => api.tabGroups.update(1, { title: 'x' }),
+        () => api.tabGroups.get(1),
+        () => api.tabGroups.query({}),
+        () => api.tabGroups.move(1, { index: 0 }),
+        () => api.tabGroups.frobnicate(),
+      ]) {
+        await assert.rejects(Promise.resolve().then(call), REFUSED, `a half-replaced tabGroups is not refused (${where})`);
+      }
+      await api.commands.getAll();
+      await api.sidePanel.open({ windowId: 1 });
+    }
+    assert.deepEqual(w.reached, [], `a half-replaced namespace left a function of Chromium's callable (${where})`);
+  }
+  {
+    // A namespace script that throws outside `pin` (the property throws when
+    // read): that namespace is refused and the ones after it are installed.
+    const w = world({ viaPage, browser: 'alias', throwing: 'commands' });
+    await tick();
+    w.calls.length = 0;
+    w.reached.length = 0;
+    for (const api of [w.sandbox.chrome, w.sandbox.browser]) {
+      await assert.rejects(Promise.resolve().then(() => api.commands.getAll()), REFUSED, `a commands whose script threw is not refused (${where})`);
+      await api.tabGroups.query({});
+      await api.sidePanel.open({ windowId: 1 });
+    }
+    assert.deepEqual(w.reached, [], `a namespace after a script that threw is Chromium's (${where})`);
+    assert.ok(w.calls.some(([ns, m]) => ns === 'sidePanel' && m === 'open'));
+  }
+}
 // chrome.debugger in an extension page (debugger.js): an attach and a
 // detach are reported to the engine after Chromium made them, the caller's
 // own call resolves only once the engine has answered (it has shown the tab
@@ -872,10 +982,10 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
     disconnect() { this.connected = false; }
   };
   vm.createContext(sandbox);
+  vm.runInContext(read('refuse.js'), sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
-  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'tab_groups.js', 'commands.js', 'debugger.js', 'side_panel.js', 'page_report.js'].map(read).join('\n');
   vm.runInContext(
-    `(function (root, install) {\n${read('page_defer.js')}\n})(self, function () {\ntry {\n${namespaces}\n} catch (e) { console.error('nautilus-bridge: ' + e); }\n});`,
+    `(function (root, install) {\n${read('page_defer.js')}\n})(self, function () {\n${namespacesScript()}\n${guarded(read('page_report.js'), false)}\n});`,
     sandbox,
   );
   const mutate = () => {
@@ -1249,6 +1359,7 @@ function loadWorker(runtime) {
   sandbox.self = sandbox;
   vm.createContext(sandbox);
   // The page's transport runs first in every extension page (page_script).
+  vm.runInContext(read('refuse.js'), sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
   vm.runInContext(read('core.js'), sandbox);
   await assert.rejects(Promise.resolve().then(() => chrome.tabs.group({ tabIds: [1] })));
@@ -1261,6 +1372,7 @@ function loadWorker(runtime) {
   const sandbox = { chrome, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Proxy };
   sandbox.self = sandbox;
   vm.createContext(sandbox);
+  vm.runInContext(read('refuse.js'), sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
   vm.runInContext(`(function (root, install) {\n${read('page_defer.js')}\n})(self, function () { throw new Error('install ran'); });`, sandbox);
   await assert.rejects(Promise.resolve().then(() => chrome.tabs.group({ tabIds: [1] })));
@@ -1277,6 +1389,7 @@ function loadWorker(runtime) {
   const sandbox = { chrome, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Proxy };
   sandbox.self = sandbox;
   vm.createContext(sandbox);
+  vm.runInContext(read('refuse.js'), sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
   vm.runInContext('self.__nautilusRefuseNative();', sandbox);
   await assert.rejects(Promise.resolve().then(() => chrome.tabs.group({ tabIds: [1] })));
@@ -1301,6 +1414,7 @@ function loadWorker(runtime) {
   const sandbox = { chrome, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Proxy };
   sandbox.self = sandbox;
   vm.createContext(sandbox);
+  vm.runInContext(read('refuse.js'), sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
   // core.js finds no transport and calls the refusal itself.
   vm.runInContext(read('core.js'), sandbox);
@@ -1336,6 +1450,7 @@ function loadWorker(runtime) {
       const sandbox = { chrome, browser, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Proxy };
       sandbox.self = sandbox;
       vm.createContext(sandbox);
+      vm.runInContext(read('refuse.js'), sandbox);
       vm.runInContext(read('page_transport.js'), sandbox);
       if (how === 'core') vm.runInContext(read('core.js'), sandbox);
       if (how === 'defer') vm.runInContext(`(function (root, install) {\n${read('page_defer.js')}\n})(self, function () { throw new Error('install ran'); });`, sandbox);
@@ -1365,6 +1480,7 @@ function loadWorker(runtime) {
   const only = { browser: { tabs: { group() { throw new Error('native'); } } }, console: { error() {}, log() {} }, Promise, Object, Error, String, Proxy };
   only.self = only;
   vm.createContext(only);
+  vm.runInContext(read('refuse.js'), only);
   vm.runInContext(read('page_transport.js'), only);
   vm.runInContext('self.__nautilusRefuseNative();', only);
   await assert.rejects(Promise.resolve().then(() => only.browser.tabs.group({})), /is not supported in this page\./);

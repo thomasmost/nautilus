@@ -40,7 +40,6 @@
   // stay Chromium's own, and the engine is never asked.
   const native = chrome.sidePanel;
   if (native) {
-    bridge.installed.push('sidePanel');
     const call = (method, args) => bridge.call('sidePanel', method, args);
 
     const fail = (method, why) => {
@@ -126,8 +125,9 @@
     // and a configurable property is then its own once more, for good).
     // Where a property cannot be redefined, Chromium's own object stays
     // with every member of it replaced, and a function of Chromium's that
-    // is not one of the engine's rejects.
-    bridge.pin('sidePanel', Object.freeze(api));
+    // is not one of the engine's rejects; where that cannot be done either,
+    // the namespace is refused.
+    if (bridge.pin('sidePanel', Object.freeze(api))) { bridge.installed.push('sidePanel'); }
   }
 
   // chrome.runtime.getContexts. The bridge's own relay page, which Chromium

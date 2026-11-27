@@ -31,7 +31,7 @@ use super::hub::Lane;
 use super::install::HELPER_ID;
 use super::relay::RELAY_PATH;
 use super::transport::{Asker, BridgeCall, CallId};
-use super::{PAGE_TRANSPORT_JS, namespaces_script};
+use super::{PAGE_TRANSPORT_JS, REFUSE_JS, namespaces_script};
 
 /// The deferred install's observer (`js/page_defer.js`), which
 /// `deferred_namespaces` wraps around the namespaces.
@@ -180,14 +180,15 @@ pub(crate) fn parse_call(text: &str) -> Option<PageCall> {
 }
 
 /// What is evaluated in an extension page's context when it is created: the
-/// page transport, then the namespaces, deferred to the first change of the
-/// document (`deferred_namespaces`). A failure is reported through the
-/// console, which the browser process logs.
+/// refusal, the page transport, then the namespaces, deferred to the first
+/// change of the document (`deferred_namespaces`). A failure is reported
+/// through the console, which the browser process logs.
 pub(crate) fn page_script() -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
+        guarded(REFUSE_JS),
         guarded(PAGE_TRANSPORT_JS),
-        deferred_namespaces(&format!("{}\n{REPORT_JS}", namespaces_script()))
+        deferred_namespaces(&format!("{}\n{}", namespaces_script(), guarded(REPORT_JS)))
     )
 }
 
@@ -199,11 +200,11 @@ fn guarded(script: &str) -> String {
 
 /// The namespaces as a function run once, at the first change to the
 /// page's document (`DEFER_JS`): `chrome` does not exist yet when the
-/// context is created, and it does before the page's first script.
+/// context is created, and it does before the page's first script. Each
+/// namespace script carries its own guard (`namespaces_script`).
 pub(crate) fn deferred_namespaces(namespaces: &str) -> String {
     format!(
-        "(function (root, install) {{\n{DEFER_JS}\n}})(self, function () {{\n{}\n}});",
-        guarded(namespaces)
+        "(function (root, install) {{\n{DEFER_JS}\n}})(self, function () {{\n{namespaces}\n}});"
     )
 }
 
@@ -216,13 +217,13 @@ fn delivery(payload: &Value) -> String {
     )
 }
 
-/// What an extension page gets when its bridge cannot be bound: the transport
-/// script, which defines the refusal of the page's native `tabs` and `windows`
-/// and then returns (no send is bound), and the refusal itself. The namespaces
-/// are not put in, so the page's calls stay refused.
+/// What an extension page gets when its bridge cannot be bound: the refusal,
+/// the transport script (which returns: no send is bound), and the refusal's
+/// call. The namespaces are not put in, so the page's calls stay refused.
 pub(crate) fn refusal_script() -> String {
     format!(
-        "{}\n{}",
+        "{}\n{}\n{}",
+        guarded(REFUSE_JS),
         guarded(PAGE_TRANSPORT_JS),
         guarded("self.__nautilusRefuseNative();")
     )
@@ -639,7 +640,7 @@ mod tests {
     #[test]
     fn a_page_whose_bridge_cannot_be_bound_refuses_native_tabs_and_windows() {
         let script = refusal_script();
-        assert!(script.contains(PAGE_TRANSPORT_JS));
+        assert!(script.find(REFUSE_JS).unwrap() < script.find(PAGE_TRANSPORT_JS).unwrap());
         assert!(script.contains("self.__nautilusRefuseNative()"));
         assert!(!script.contains(&namespaces_script()));
     }
@@ -732,7 +733,9 @@ mod tests {
     #[test]
     fn the_page_script_defines_the_transport_then_defers_the_namespaces() {
         let script = page_script();
+        let refusal = script.find("'__nautilusRefuseNative'").unwrap();
         let transport = script.find("__nautilusBridgeSend").unwrap();
+        assert!(refusal < transport);
         // The observer's callback (which calls install) is written before
         // the observe call; the namespaces follow both.
         let install = script.find("install();").unwrap();
@@ -755,9 +758,7 @@ mod tests {
         );
         assert!(script.contains("observer.disconnect();"));
         assert!(script.contains("no document to wait for in this context"));
-        assert!(script.ends_with(
-            "(self, function () {\ntry {\nNAMESPACES\n} catch (e) { console.error('nautilus-bridge: ' + e); }\n});"
-        ));
+        assert!(script.ends_with("(self, function () {\nNAMESPACES\n});"));
     }
 
     #[test]

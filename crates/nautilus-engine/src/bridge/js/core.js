@@ -253,12 +253,12 @@
   }
 
   // Put `replacement` in place of Chromium's `namespace`, on `chrome` and on
-  // `browser`: the one place a namespace is replaced, for `define` and for
-  // the hand-written sidePanel. Each property is redefined so that Chromium
+  // `browser`. Each property is redefined so that Chromium
   // cannot put its own back (it defines every API again on both globals when
   // the set of extensions changes); where a property cannot be redefined,
   // the object it holds has its members replaced one by one instead.
-  // `browser` gets the very object `chrome` ends up with.
+  // `browser` gets the very object `chrome` ends up with. It throws where
+  // neither can be done; `install` is what calls it.
   function pin(namespace, replacement) {
     [chrome, twin].forEach(function (holder) {
       if (!holder) { return; }
@@ -276,7 +276,25 @@
     });
   }
 
-  // Replace the namespace on `chrome` and on `browser` (`pin`), keeping
+  // The one place a namespace is replaced, for `define` and for the
+  // hand-written sidePanel: `pin`, in a guard of its own. A namespace that
+  // cannot be put in is refused on both globals (refuse.js), which also
+  // finishes an object `replaceMembers` left half replaced, and the
+  // namespaces after it are installed all the same. Returns whether the
+  // replacement is in.
+  function install(namespace, replacement) {
+    try {
+      pin(namespace, replacement);
+      return true;
+    } catch (e) {
+      console.error('nautilus-bridge: cannot install ' + namespace + ', which is refused: ' + e);
+      delete native[namespace];
+      if (typeof root.__nautilusRefuseNative === 'function') { root.__nautilusRefuseNative([namespace]); }
+      return false;
+    }
+  }
+
+  // Replace the namespace on `chrome` and on `browser` (`install`), keeping
   // Chromium's own functions, bound, for the calls the engine forwards.
   function define(namespace, spec) {
     var original = chrome[namespace];
@@ -288,8 +306,7 @@
       });
     }
     native[namespace] = source;
-    pin(namespace, build(namespace, spec, source));
-    bridge.installed.push(namespace);
+    if (install(namespace, build(namespace, spec, source))) { bridge.installed.push(namespace); }
   }
 
   // The bridge's own listeners, by event name: run before the extension's,
@@ -311,7 +328,7 @@
     run: run,
     bridged: bridged,
     define: define,
-    pin: pin,
+    pin: install,
     BridgeEvent: BridgeEvent,
     installed: []
   };

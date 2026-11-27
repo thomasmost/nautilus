@@ -207,8 +207,9 @@ document, before its first script runs (`bridge/js/page_defer.js`). Since
 2026-11-27 `tabs.group` and `tabs.ungroup` are answered: a tab group is one
 of the browser's tab folders (`bridge/groups.rs`; `docs/bridge-protocol.md`,
 "Messages Phase 7 adds"). `tabs.discard` is answered without discarding
-anything. A page whose bridge cannot be put in has the five namespaces
-refused rather than left Chromium's (`__nautilusRefuseNative`).
+anything. A context whose bridge cannot be put in has the five namespaces
+refused rather than left Chromium's, and so has any one of them whose
+install fails (`__nautilusRefuseNative`, `bridge/js/refuse.js`).
 **Blocks:** Chromium's own tab groups (their colours, `tabGroups.move`, a
 group across windows); tab groups as folders do not need them.
 
@@ -571,7 +572,7 @@ own `runtime` and `debugger` objects it wraps on the object itself, so
 it holds for `browser` because the object is one; a context where
 `browser.runtime` or `browser.debugger` were another object is given
 `chrome`'s, with a logged error (`same` in `core.js`; not seen). The
-fail-closed path (`__nautilusRefuseNative` in `js/page_transport.js`)
+fail-closed path (`__nautilusRefuseNative` in `js/refuse.js`)
 refuses both globals with one object, pinned. On an update the function
 above sets `chrome` first and returns at the first pinned name, so it
 never reaches `browser`'s property of that name; the scripted runs

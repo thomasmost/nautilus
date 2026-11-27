@@ -514,10 +514,16 @@ Ninja on `PATH`:
   script sets a property of `chrome` or `browser` itself. The rule is
   fail-closed: a function of a replaced namespace the engine does not
   know rejects (`<namespace>.<name> is not supported.`) and is never
-  forwarded, and a page whose bridge cannot be put in has `tabs`,
+  forwarded, and a context whose bridge cannot be put in has `tabs`,
   `windows`, `tabGroups`, `commands` and `sidePanel` refused on both
-  globals (`__nautilusRefuseNative`), because Chromium's own
-  `tabs.group` ends the browser process (C11). Never fix a refused
+  globals (`__nautilusRefuseNative`, `js/refuse.js`, the first script
+  of a page and of a worker), because Chromium's own
+  `tabs.group` ends the browser process (C11). Each namespace is
+  installed in its own guard (`install` in `js/core.js`, and the `try`
+  `namespaces_script` puts around each script): one that fails is
+  refused on both globals and the others are installed. A new
+  namespace script gets a row in `NAMESPACES` (`bridge/mod.rs`) and in
+  `bridge_check.mjs`'s list of the same name. Never fix a refused
   function by letting it through; give it a row in the router. The
   tests are `every_function_of_a_replaced_namespace_is_ours`,
   `tab_groups_and_commands_are_replaced_whole_and_refused_when_they_cannot_be`

@@ -94,30 +94,81 @@ const TAB_GROUPS_JS: &str = include_str!("js/tab_groups.js");
 const COMMANDS_JS: &str = include_str!("js/commands.js");
 const DEBUGGER_JS: &str = include_str!("js/debugger.js");
 const SIDE_PANEL_JS: &str = include_str!("js/side_panel.js");
+// The refusal (`__nautilusRefuseNative`), the first script of every bridged
+// context: what a namespace that cannot be put in is replaced by.
+pub(crate) const REFUSE_JS: &str = include_str!("js/refuse.js");
 // The page lane's transport script, which `pages::page_script` puts first in an
 // extension page's context.
 pub(crate) const PAGE_TRANSPORT_JS: &str = include_str!("js/page_transport.js");
 
+/// What is refused when a namespace script throws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refuses {
+    /// Every replaced namespace: without the core nothing is put in.
+    All,
+    /// The namespace the script replaces.
+    Only(&'static str),
+    /// Nothing: the script replaces no namespace (it wraps members of
+    /// Chromium's own `runtime` and `debugger`, which harm nothing).
+    Nothing,
+}
+
+/// The namespace scripts in the order they run, each with what its failure
+/// refuses. `ci/side-panel/bridge_check.mjs` composes the same list
+/// (`NAMESPACES` there).
+const NAMESPACES: [(&str, Refuses); 8] = [
+    (CORE_JS, Refuses::All),
+    (TABS_JS, Refuses::Only("tabs")),
+    (WINDOWS_JS, Refuses::Only("windows")),
+    (RUNTIME_JS, Refuses::Nothing),
+    (TAB_GROUPS_JS, Refuses::Only("tabGroups")),
+    (COMMANDS_JS, Refuses::Only("commands")),
+    (DEBUGGER_JS, Refuses::Nothing),
+    (SIDE_PANEL_JS, Refuses::Only("sidePanel")),
+];
+
+/// `script` in a guard of its own: a failure is reported through the
+/// console, what it would have replaced is refused (`js/refuse.js`), and the
+/// scripts after it still run.
+fn guarded(script: &str, refuses: Refuses) -> String {
+    let refusal = match refuses {
+        Refuses::All => "()".to_string(),
+        Refuses::Only(name) => format!("(['{name}'])"),
+        Refuses::Nothing => {
+            return format!(
+                "try {{\n{script}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); }}"
+            );
+        }
+    };
+    format!(
+        "try {{\n{script}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e); if (typeof self.__nautilusRefuseNative === 'function') {{ self.__nautilusRefuseNative{refusal}; }} }}"
+    )
+}
+
 /// The replacement of every bridged namespace, for a context whose
-/// transport has already defined `__bridgeCall` and `__bridgeOnEvent`.
+/// transport has already defined `__bridgeCall` and `__bridgeOnEvent` and
+/// which has the refusal (`REFUSE_JS`). Each script runs in its own guard:
+/// one that fails is refused and the others are still installed.
 pub(crate) fn namespaces_script() -> String {
-    [
-        CORE_JS,
-        TABS_JS,
-        WINDOWS_JS,
-        RUNTIME_JS,
-        TAB_GROUPS_JS,
-        COMMANDS_JS,
-        DEBUGGER_JS,
-        SIDE_PANEL_JS,
-    ]
-    .join("\n")
+    NAMESPACES
+        .iter()
+        .map(|(script, refuses)| guarded(script, *refuses))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The whole script of a bridged service worker, as it is written to
-/// `nautilus-bridge/bridge.js`: the transport, then the namespaces.
+/// `nautilus-bridge/bridge.js`: the refusal, the transport, then the
+/// namespaces. The transport is guarded too: without it the core finds no
+/// transport and refuses every replaced namespace, where an unguarded
+/// failure would end the script and leave them all Chromium's.
 pub(crate) fn worker_script() -> String {
-    [install::BRIDGE_JS, &namespaces_script()].join("\n")
+    [
+        guarded(REFUSE_JS, Refuses::Nothing),
+        guarded(install::BRIDGE_JS, Refuses::Nothing),
+        namespaces_script(),
+    ]
+    .join("\n")
 }
 
 /// The value a `Runtime.evaluate` result carries, or why there is
@@ -272,8 +323,8 @@ mod tests {
         // one global and miss the other.
         assert!(CORE_JS.contains("var other = root.browser;"));
         assert!(CORE_JS.contains("[chrome, twin].forEach(function (holder) {"));
-        assert!(CORE_JS.contains("pin(namespace, build(namespace, spec, source));"));
-        assert!(SIDE_PANEL_JS.contains("bridge.pin('sidePanel', Object.freeze(api));"));
+        assert!(CORE_JS.contains("install(namespace, build(namespace, spec, source))"));
+        assert!(SIDE_PANEL_JS.contains("bridge.pin('sidePanel', Object.freeze(api))"));
         for script in [
             TABS_JS,
             WINDOWS_JS,
@@ -363,13 +414,6 @@ mod tests {
         // Each is replaced only where Chromium defines it.
         assert!(TAB_GROUPS_JS.contains("!root.chrome.tabGroups"));
         assert!(COMMANDS_JS.contains("!root.chrome.commands"));
-        // A page whose bridge cannot be put in keeps none of them, the
-        // side panel included, on `chrome` or on `browser`.
-        assert!(
-            PAGE_TRANSPORT_JS
-                .contains("['tabs', 'windows', 'tabGroups', 'commands', 'sidePanel'].forEach")
-        );
-        assert!(PAGE_TRANSPORT_JS.contains("[root.chrome, root.browser].filter"));
         // Both come before the side panel's script, which is last.
         let script = namespaces_script();
         let at = |part: &str| script.find(part).expect("the script is there");
@@ -406,7 +450,7 @@ mod tests {
         // `route` rejects it as unsupported.
         assert!(!side_panel::is_method("frobnicate"));
         assert!(SIDE_PANEL_JS.contains("Object.freeze(api)"));
-        assert!(SIDE_PANEL_JS.contains("bridge.pin('sidePanel', Object.freeze(api));"));
+        assert!(SIDE_PANEL_JS.contains("bridge.pin('sidePanel', Object.freeze(api))"));
         // Its events are the core's, announced and dispatched there: the
         // script registers no event handler of its own.
         for event in list(SIDE_PANEL_JS, "events") {
@@ -419,7 +463,7 @@ mod tests {
         }
         assert!(!SIDE_PANEL_JS.contains("__bridgeOnEvent("));
         // It is the last of the namespaces, after the core it needs.
-        assert!(namespaces_script().ends_with(SIDE_PANEL_JS));
+        assert_eq!(super::NAMESPACES[7].0, SIDE_PANEL_JS);
     }
 
     #[test]
@@ -459,14 +503,68 @@ mod tests {
     }
 
     #[test]
-    fn the_worker_script_is_the_transport_then_the_namespaces() {
+    fn the_worker_script_is_the_refusal_the_transport_then_the_namespaces() {
         let script = worker_script();
-        assert!(script.starts_with(super::install::BRIDGE_JS));
+        let at = |part: &str| script.find(part).expect("the script is there");
+        assert!(at(super::REFUSE_JS) < at(super::install::BRIDGE_JS));
+        assert!(at(super::install::BRIDGE_JS) < at(CORE_JS));
         assert!(script.ends_with(&namespaces_script()));
         // The two globals the namespaces are written against, and no
         // tabs.query of the transport's own.
         assert!(super::install::BRIDGE_JS.contains("self.__bridgeCall = function"));
         assert!(super::install::BRIDGE_JS.contains("self.__bridgeOnEvent = function"));
         assert!(!super::install::BRIDGE_JS.contains("define(chrome.tabs, 'query'"));
+    }
+
+    // A text test, kept: what this composes is what runs in an extension,
+    // and `ci/side-panel/bridge_check.mjs`, which checks the behaviour,
+    // composes the scripts itself from the same list. Only this holds the
+    // two lists together.
+    #[test]
+    fn each_namespace_script_runs_in_its_own_guard_and_its_failure_is_refused() {
+        use super::Refuses;
+
+        let composed = namespaces_script();
+        let mut rest = composed.as_str();
+        for (script, refusal) in [
+            (CORE_JS, Some("self.__nautilusRefuseNative();")),
+            (TABS_JS, Some("self.__nautilusRefuseNative(['tabs']);")),
+            (
+                WINDOWS_JS,
+                Some("self.__nautilusRefuseNative(['windows']);"),
+            ),
+            (RUNTIME_JS, None),
+            (
+                TAB_GROUPS_JS,
+                Some("self.__nautilusRefuseNative(['tabGroups']);"),
+            ),
+            (
+                COMMANDS_JS,
+                Some("self.__nautilusRefuseNative(['commands']);"),
+            ),
+            (DEBUGGER_JS, None),
+            (
+                SIDE_PANEL_JS,
+                Some("self.__nautilusRefuseNative(['sidePanel']);"),
+            ),
+        ] {
+            let opening = format!(
+                "try {{\n{script}\n}} catch (e) {{ console.error('nautilus-bridge: ' + e);"
+            );
+            assert!(rest.starts_with(&opening), "a script is out of its place");
+            rest = &rest[opening.len()..];
+            let end = rest.find(" }\ntry {\n").map_or(rest.len(), |at| at + 3);
+            let (guard, after) = rest.split_at(end);
+            match refusal {
+                Some(call) => assert!(guard.contains(call), "{guard}"),
+                None => assert!(!guard.contains("__nautilusRefuseNative"), "{guard}"),
+            }
+            rest = after;
+        }
+        assert!(rest.is_empty(), "a script nobody listed: {rest}");
+        assert_eq!(
+            super::guarded("x();", Refuses::Nothing),
+            "try {\nx();\n} catch (e) { console.error('nautilus-bridge: ' + e); }"
+        );
     }
 }

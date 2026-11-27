@@ -246,6 +246,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- An extension context in which one of the replaced APIs cannot be
+  put in no longer keeps Chromium's own for the ones after it. Each of
+  `tabs`, `windows`, `tabGroups`, `commands` and `sidePanel` is put in
+  on its own, in an extension's pages and in its service worker, and
+  one that cannot be is refused on `chrome` and on `browser`; before,
+  the first failure left every later one Chromium's, whose
+  `tabs.group` ends the browser. Not seen in a real extension.
+
 - An event for an extension's service worker that the worker did not
   acknowledge is sent once more, as it was meant to be. The second
   try was queued under a name read from memory that closing the
