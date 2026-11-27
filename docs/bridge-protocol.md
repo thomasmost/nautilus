@@ -919,7 +919,7 @@ channel, on both lanes, and no new kind of message. The script is
 | `sidePanel.close` | `[{tabId?, windowId?}]` | `ExtensionRequest::CloseSidePanel` when this extension's panel is open there, else `null` at once |
 | `sidePanel.getLayout` | `[]` | `{side: "right"}` |
 | `sidePanel.closeSelf` | `[]` | internal, and not a `chrome.sidePanel` member: what the script's `window.close` asks. From a side panel's own page it is `CloseSidePanel` for that panel (answered `null` when the model is done); from any other page it is `false`, and the script then calls Chromium's `window.close` (as it does when the call fails). |
-| `runtime.getContexts` | `[filter, originals]` | the contexts: `originals` is Chromium's own answer for `{}`, which the script asks first; the engine retypes or adds each open panel's entry as `SIDE_PANEL` in its window and applies `filter` |
+| `runtime.getContexts` | `[filter, originals]` | the contexts: `originals` is Chromium's own answer for `{}`, which the script asks first; the engine leaves out the bridge's own relay page (Chromium lists it as a `TAB` of the extension's), retypes or adds each open panel's entry as `SIDE_PANEL` in its window and applies `filter` |
 
 Any other `sidePanel` method rejects
 `chrome.sidePanel.<name> is not supported in this browser.`; any other

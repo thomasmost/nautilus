@@ -14,6 +14,7 @@ use osmena_core::{ExtensionRequest, TabId, WindowId};
 use serde_json::{Value, json};
 
 use super::ids::WINDOW_ID_CURRENT;
+use super::relay::RELAY_PATH;
 use super::router::{self, Then};
 use crate::panel::{OpenPanel, PanelNotice, PanelRegistry, normalize_page};
 
@@ -652,7 +653,8 @@ fn context_id(view: TabId) -> String {
 /// other kind of context, or not at all. Each open panel takes over the
 /// entry Chromium has for its document (same URL, no strip tab behind
 /// it, not the worker or an offscreen document) or gets one made; then
-/// the filter is applied.
+/// the filter is applied. The bridge's own relay page, which Chromium
+/// lists as a tab of the extension's, is the browser's and is left out.
 pub(crate) fn get_contexts(
     panels: &PanelRegistry,
     world: &dyn World,
@@ -660,7 +662,11 @@ pub(crate) fn get_contexts(
     filter: &Value,
     originals: Vec<Value>,
 ) -> Vec<Value> {
+    let relay = format!("chrome-extension://{extension}{RELAY_PATH}");
     let mut contexts = originals;
+    contexts.retain(|context| {
+        context.get("documentUrl").and_then(Value::as_str) != Some(relay.as_str())
+    });
     for open in panels.of_extension(extension) {
         let url = format!("chrome-extension://{extension}/{}", open.page);
         let window = world.window_id(open.window);
@@ -1550,6 +1556,70 @@ mod tests {
             vec![worker.clone()],
         );
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn get_contexts_leaves_out_the_bridges_relay_page() {
+        // Chromium lists the relay page, which the bridge keeps in a
+        // hidden browser, as a tab of the extension's. It is the
+        // browser's, not the extension's: no filter finds it, with a panel
+        // open or without.
+        let world = Fake::default();
+        let worker = json!({
+            "contextId": "712f4315-10fb-4d66-83dc-032ae525dc64",
+            "contextType": "BACKGROUND",
+            "frameId": -1, "incognito": false, "tabId": -1, "windowId": -1
+        });
+        let relay = json!({
+            "contextId": "cccccccc-0000-4000-8000-000000000003",
+            "contextType": "TAB", "documentId": "D9",
+            "documentOrigin": format!("chrome-extension://{EXT}"),
+            "documentUrl": format!("chrome-extension://{EXT}/nautilus-bridge/relay.html"),
+            "frameId": 0, "incognito": false, "tabId": 777, "windowId": -1
+        });
+        let originals = vec![worker.clone(), relay];
+        for filter in [json!({}), json!({ "contextTypes": ["TAB"] })] {
+            let wanted: Vec<Value> = if filter == json!({}) {
+                vec![worker.clone()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                get_contexts(
+                    &PanelRegistry::default(),
+                    &world,
+                    EXT,
+                    &filter,
+                    originals.clone()
+                ),
+                wanted,
+                "{filter}"
+            );
+        }
+        let mut panels = PanelRegistry::default();
+        open_panel(&mut panels, 20, 1, None, "panel.html");
+        let kinds: Vec<Value> = get_contexts(&panels, &world, EXT, &json!({}), originals)
+            .iter()
+            .map(|context| context["contextType"].clone())
+            .collect();
+        assert_eq!(kinds, [json!("BACKGROUND"), json!("SIDE_PANEL")]);
+        // Another extension's page of the same name is not this one's relay.
+        let other = json!({
+            "contextId": "dddddddd-0000-4000-8000-000000000004",
+            "contextType": "TAB",
+            "documentUrl": "chrome-extension://ponmlkjihgfedcbaponmlkjihgfedcba/nautilus-bridge/relay.html",
+            "frameId": 0, "incognito": false, "tabId": 778, "windowId": -1
+        });
+        assert_eq!(
+            get_contexts(
+                &PanelRegistry::default(),
+                &world,
+                EXT,
+                &json!({}),
+                vec![other.clone()]
+            ),
+            [other]
+        );
     }
 
     #[test]
