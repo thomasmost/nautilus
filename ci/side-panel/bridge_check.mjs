@@ -23,7 +23,7 @@ function nativeEvent() {
   };
 }
 
-function world({ viaPage, prime = null, sidePanel = true, pinned = false }) {
+function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
@@ -72,6 +72,15 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false }) {
     },
   };
   if (!sidePanel) { delete chrome.sidePanel; }
+  if (commands) {
+    // Chromium's own commands, none of which may be reached, with one
+    // function the bridge does not name.
+    chrome.commands = {
+      getAll: chromium('commands.getAll', () => []),
+      frobnicate: chromium('commands.frobnicate', () => undefined),
+      onCommand: nativeEvent(),
+    };
+  }
   if (pinned) {
     // A namespace property Chromium does not let go of.
     Object.defineProperty(chrome, 'sidePanel', { value: chrome.sidePanel, configurable: false, writable: false, enumerable: true });
@@ -103,7 +112,7 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false }) {
     // The worker's marker (bridge.js): the worker primes its tab cache.
     sandbox.__nautilusTransport = { protocol: 1, portHidden: true };
   }
-  for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'side_panel.js']) {
+  for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'commands.js', 'side_panel.js']) {
     vm.runInContext(read(file), sandbox);
   }
   return { chrome, reached, calls, answers, messages, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
@@ -280,6 +289,27 @@ for (const viaPage of [false, true]) {
   assert.throws(() => chrome.runtime.getContexts('all'), /runtime\.getContexts: No matching signature\./);
   w.reached.length = 0;
 
+  // chrome.commands is replaced whole: getAll is the engine's, and
+  // onCommand is announced once and fired by the engine with the command
+  // and the tab.
+  w.calls.length = 0;
+  w.reached.length = 0;
+  w.answers.set('commands.getAll', () => [{ name: 'toggle-side-panel', description: 'Toggle', shortcut: '\u2318E' }]);
+  assert.deepEqual(await chrome.commands.getAll(), [{ name: 'toggle-side-panel', description: 'Toggle', shortcut: '\u2318E' }]);
+  assert.equal((await new Promise((resolve) => chrome.commands.getAll(resolve))).length, 1);
+  await assert.rejects(chrome.commands.frobnicate(), /commands\.frobnicate is not supported\./);
+  const pressed = [];
+  chrome.commands.onCommand.addListener((command, tab) => pressed.push([command, tab && tab.id]));
+  chrome.commands.onCommand.addListener((command) => pressed.push('second ' + command));
+  await tick();
+  assert.deepEqual(w.calls, [['commands', 'getAll', []], ['commands', 'getAll', []], ['bridge', 'listen', ['commands.onCommand']]]);
+  w.emit('commands.onCommand', ['toggle-side-panel', { id: 7, index: 0, windowId: 1 }]);
+  assert.deepEqual(pressed, [['toggle-side-panel', 7], 'second toggle-side-panel']);
+  assert.deepEqual(w.reached, [], 'a commands call reached Chromium');
+  assert.throws(() => Object.defineProperty(chrome, 'commands', { value: { chromium: true }, writable: true, enumerable: true, configurable: true }), TypeError);
+  // An extension that declares no commands has no chrome.commands.
+  assert.equal(world({ viaPage, commands: false }).chrome.commands, undefined);
+
   // An extension without the "sidePanel" permission has no chrome.sidePanel.
   assert.equal(world({ viaPage, sidePanel: false }).chrome.sidePanel, undefined);
   // Where Chromium does not let go of the property, its own object is
@@ -411,7 +441,7 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
   };
   vm.createContext(sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
-  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'side_panel.js', 'page_report.js'].map(read).join('\n');
+  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'commands.js', 'side_panel.js', 'page_report.js'].map(read).join('\n');
   vm.runInContext(
     `(function (root, install) {\n${read('page_defer.js')}\n})(self, function () {\ntry {\n${namespaces}\n} catch (e) { console.error('nautilus-bridge: ' + e); }\n});`,
     sandbox,

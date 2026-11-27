@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use osmena_core::{LoadState, TabId, WindowId};
 use serde_json::{Value, json};
 
+use super::ExtensionFacts;
 use super::ids::{IdSpace, TAB_ID_NONE, group_id, window_id};
 use super::pattern::Grants;
 use super::snapshot::{SnapTab, SnapWindow, Snapshot};
@@ -22,7 +23,7 @@ pub(crate) fn status(tab: &SnapTab) -> &'static str {
 }
 
 /// Everything an answer is made from: the published strip, the ids, what
-/// the asking extension may see, and the window focused last.
+/// the asking extension may see and declares, and the window focused last.
 pub(crate) struct View<'a> {
     pub snapshot: &'a Snapshot,
     pub ids: &'a IdSpace,
@@ -32,6 +33,8 @@ pub(crate) struct View<'a> {
     /// it (`panel::PanelRegistry`). The strip names only the panel a
     /// window shows, and only once the shell has described it.
     pub panels: &'a HashMap<TabId, WindowId>,
+    /// What the engine knows of the asking extension beyond its grants.
+    pub facts: &'a ExtensionFacts,
 }
 
 impl<'a> View<'a> {

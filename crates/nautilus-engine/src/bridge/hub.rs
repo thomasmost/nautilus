@@ -399,6 +399,28 @@ impl Hub {
         self.run(effects);
     }
 
+    /// What the router reads of each served extension, called beside
+    /// `set_extensions` with the same extensions.
+    pub(crate) fn set_facts(&self, facts: Vec<(String, super::ExtensionFacts)>) {
+        self.state.borrow_mut().set_facts(facts);
+    }
+
+    /// `extension`'s keyboard command `name` for `tab`: its
+    /// `commands.onCommand` listeners, in the worker (started if it was
+    /// stopped) and in each page that listens.
+    pub(crate) fn command(self: &Rc<Self>, extension: &str, name: &str, tab: TabId) {
+        let effects = self.state.borrow().command(extension, name, tab);
+        log::info!(
+            "extension {extension}: command {name:?} for {tab:?}{}",
+            if effects.is_empty() {
+                ": no context listens for it"
+            } else {
+                ""
+            }
+        );
+        self.run(effects);
+    }
+
     /// Called on every spin of the engine.
     pub(crate) fn tick(self: &Rc<Self>) {
         // Taken out before they are dropped: letting go of a registration

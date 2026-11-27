@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
 use osmena_core::{ExtensionReply, ExtensionRequest, TabId, WindowId};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::differ;
 use super::ids::IdSpace;
@@ -16,6 +16,7 @@ use super::router::{self, Outcome, Settled, Then};
 use super::shape::View;
 use super::snapshot::Snapshot;
 use super::transport::{Asker, BridgeCall, CallId};
+use super::{ExtensionFacts, NO_FACTS};
 
 /// How long a strip waits for Chromium's id of a new live tab before it
 /// is published with a synthetic one. A page's call waits for the same
@@ -133,6 +134,8 @@ pub(crate) struct BridgeState {
     held: Option<(Snapshot, Instant)>,
     pub(super) ids: IdSpace,
     grants: HashMap<String, Grants>,
+    /// What the router reads of each served extension (`set_facts`).
+    facts: HashMap<String, ExtensionFacts>,
     /// The served extensions that have a service worker.
     workers: BTreeSet<String>,
     /// The events each extension's service worker has listened for this run.
@@ -162,7 +165,14 @@ impl BridgeState {
             grants: self.grants.get(extension).unwrap_or(&NO_GRANTS),
             last_focused: self.last_focused,
             panels: &self.panel_windows,
+            facts: self.facts.get(extension).unwrap_or(&NO_FACTS),
         }
+    }
+
+    /// What the router reads of each served extension beyond its grants.
+    /// No effects.
+    pub(crate) fn set_facts(&mut self, facts: Vec<(String, ExtensionFacts)>) {
+        self.facts = facts.into_iter().collect();
     }
 
     /// The open side panels' views and their windows, from the engine's
@@ -320,6 +330,21 @@ impl BridgeState {
             }
         }
         effects
+    }
+
+    /// The shell resolved a shortcut to `extension`'s command `name`, with
+    /// `tab` the active tab of the window it was pressed in:
+    /// `commands.onCommand(name, tab)` for every context of the extension
+    /// that listens, the tab as that extension may see it. A stopped
+    /// worker that listens is started by the delivery; one that does not
+    /// is left alone.
+    pub(super) fn command(&self, extension: &str, name: &str, tab: TabId) -> Vec<Effect> {
+        let view = self.view(extension);
+        let mut args = vec![json!(name)];
+        if let Some((window, index)) = view.snapshot.locate(tab) {
+            args.push(view.tab_json(window, index));
+        }
+        self.emit(extension, "commands.onCommand", args)
     }
 
     /// A call from an extension page (the page lane). It is held while its
@@ -591,7 +616,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use osmena_core::{ExtensionReply, ExtensionRequest, TabId};
-    use serde_json::{Value, json};
+    use serde_json::json;
     use url::Url;
 
     use super::*;
@@ -1507,5 +1532,96 @@ mod tests {
         // An extension the bridge does not serve hears nothing.
         state.set_extensions(vec![]);
         assert_eq!(state.emit(EXT, OPENED, info()), vec![]);
+    }
+
+    #[test]
+    fn a_command_goes_to_the_contexts_that_listen_with_the_tab_as_they_know_it() {
+        const COMMAND: &str = "commands.onCommand";
+        let (mut state, _) = started(vec![tab(1, "a*"), tab(2, "b")]);
+        // Nobody listens: nothing is sent, so a stopped worker stays stopped.
+        assert_eq!(state.command(EXT, "toggle-side-panel", TabId(1)), vec![]);
+        listen(&mut state, EXT, COMMAND);
+        page_listen(&mut state, EXT, 5, COMMAND);
+        listen(&mut state, OTHER, COMMAND);
+        let effects = state.command(EXT, "toggle-side-panel", TabId(2));
+        let [
+            Effect::Emit {
+                extension,
+                event: COMMAND,
+                args,
+            },
+            Effect::EmitPage {
+                page: 5,
+                event: COMMAND,
+                args: page_args,
+                ..
+            },
+        ] = &effects[..]
+        else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(extension, EXT);
+        assert_eq!(args[0], json!("toggle-side-panel"));
+        // The tab is the extension's: Chromium's id, the strip's place.
+        assert_eq!(args[1]["id"], json!(102));
+        assert_eq!(args[1]["index"], json!(1));
+        assert_eq!(args[1]["windowId"], json!(1));
+        assert_eq!(args[1]["url"], json!("https://b.example/"));
+        assert_eq!(page_args, args);
+        // An extension without the tabs permission is not told the address.
+        let effects = state.command(OTHER, "toggle", TabId(2));
+        let [Effect::Emit { args, .. }] = &effects[..] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(args[1]["id"], json!(102));
+        assert_eq!(args[1].get("url"), None);
+        // A tab the strip does not hold: the command alone.
+        let effects = state.command(EXT, "toggle-side-panel", TabId(99));
+        let [Effect::Emit { args, .. }, Effect::EmitPage { .. }] = &effects[..] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(args, &[json!("toggle-side-panel")]);
+    }
+
+    #[test]
+    fn commands_get_all_answers_the_extensions_own_commands() {
+        use keyboard_types::{Code, Modifiers};
+        use osmena_core::{ExtensionCommand, KeyChord};
+
+        use crate::bridge::ExtensionFacts;
+        use crate::extensions::KeyPlatform;
+
+        let (mut state, _) = started(vec![tab(1, "a*")]);
+        let commands = vec![ExtensionCommand {
+            name: "toggle-side-panel".to_string(),
+            description: "Toggle the panel".to_string(),
+            chord: Some(KeyChord::new(Modifiers::ALT, Code::KeyE)),
+        }];
+        state.set_facts(vec![(
+            EXT.to_string(),
+            ExtensionFacts {
+                commands: commands.clone(),
+            },
+        )]);
+        assert_eq!(
+            state.call(call(1, EXT, "commands", "getAll", json!([]))),
+            vec![Effect::Reply(
+                1,
+                Ok(crate::commands::get_all(&commands, KeyPlatform::CURRENT))
+            )]
+        );
+        // Another extension has none of them.
+        assert_eq!(
+            state.call(call(2, OTHER, "commands", "getAll", json!([]))),
+            vec![Effect::Reply(2, Ok(json!([])))]
+        );
+        // Nothing else of the namespace is served.
+        assert_eq!(
+            state.call(call(3, EXT, "commands", "reset", json!(["toggle"]))),
+            vec![Effect::Reply(
+                3,
+                Err("commands.reset is not supported.".to_string())
+            )]
+        );
     }
 }

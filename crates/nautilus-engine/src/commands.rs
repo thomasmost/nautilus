@@ -4,8 +4,8 @@
 //! Chromium. The shell matches the chords (after its own keymap);
 //! `chrome.commands.getAll` reports them back in Chrome's notation.
 
-// Until the bridge answers `commands.getAll` and delivers a command.
-#![allow(dead_code)]
+// The callers are the extension manager's native half and the bridge.
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
 use keyboard_types::{Code, Modifiers};
 use osmena_core::{ExtensionCommand, KeyChord};

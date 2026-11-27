@@ -746,6 +746,7 @@ mod tests {
             grants: &all,
             last_focused: None,
             panels: &std::collections::HashMap::new(),
+            facts: &crate::bridge::NO_FACTS,
         };
         let rendered: Vec<(&str, serde_json::Value)> = events
             .iter()
@@ -846,6 +847,7 @@ mod tests {
             grants: &none,
             last_focused: None,
             panels: &std::collections::HashMap::new(),
+            facts: &crate::bridge::NO_FACTS,
         };
         let update = TabUpdated {
             tab: TabId(2),

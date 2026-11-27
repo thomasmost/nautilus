@@ -315,6 +315,8 @@ mod stub {
         pub(crate) fn action_clicked(&self, _id: &str, _tab: osmena_core::TabId) -> Option<String> {
             None
         }
+
+        pub(crate) fn command(&self, _id: &str, _name: &str, _tab: osmena_core::TabId) {}
     }
 }
 
@@ -524,6 +526,54 @@ mod native {
             // Neither new phrase can be taken for one of the old two.
             for other in [Clicked::Panel, popup] {
                 assert!(!click_report(Some(&other)).contains("sent"));
+            }
+        }
+    }
+
+    /// The test control's `extension_command`: the extension and the
+    /// command a scripted run wants pressed, as
+    /// `{"extension_command": {"extension": "<id>", "name": "<command>"}}`.
+    #[cfg(feature = "test-hooks")]
+    fn control_extension_command(command: &serde_json::Value) -> Option<(&str, &str)> {
+        let body = command.get("extension_command")?;
+        let extension = body.get("extension")?.as_str()?;
+        let name = body.get("name")?.as_str()?;
+        (crx::is_extension_id(extension) && !name.is_empty() && !name.contains(char::is_whitespace))
+            .then_some((extension, name))
+    }
+
+    #[cfg(all(test, feature = "test-hooks"))]
+    mod command_tests {
+        use serde_json::json;
+
+        use super::control_extension_command;
+
+        #[test]
+        fn the_test_hook_command_names_an_extension_and_a_command() {
+            let id = "cjpalhdlnbpafiamejdnhcphjbkeiagm";
+            assert_eq!(
+                control_extension_command(
+                    &json!({"extension_command": {"extension": id, "name": "toggle-panel"}})
+                ),
+                Some((id, "toggle-panel"))
+            );
+            assert_eq!(
+                control_extension_command(
+                    &json!({"extension_command": {"extension": id, "name": "_execute_action"}})
+                ),
+                Some((id, "_execute_action"))
+            );
+            for command in [
+                json!({"click": id}),
+                json!({"extension_command": id}),
+                json!({"extension_command": {"extension": id}}),
+                json!({"extension_command": {"name": "toggle"}}),
+                json!({"extension_command": {"extension": id, "name": ""}}),
+                json!({"extension_command": {"extension": id, "name": "two words"}}),
+                json!({"extension_command": {"extension": "not-an-id", "name": "toggle"}}),
+                json!({"extension_command": {"extension": id, "name": 3}}),
+            ] {
+                assert_eq!(control_extension_command(&command), None, "{command}");
             }
         }
     }
@@ -914,6 +964,13 @@ mod native {
             }
         }
 
+        /// `id`'s keyboard command `name`, for `tab`: its
+        /// `commands.onCommand` listeners. An action command is a click
+        /// (`action_clicked`) and never comes here.
+        pub(crate) fn command(&self, id: &str, name: &str, tab: TabId) {
+            self.hub.command(id, name, tab);
+        }
+
         /// The one decision for a click on `id`'s toolbar action at `tab`
         /// (`decide_action_click`), carried out but for the popup, which
         /// only a caller with the button's place can open. The toolbar
@@ -1157,6 +1214,28 @@ mod native {
                     .unwrap_or_default();
                 log::info!("TEST HOOK: command {number}: relay_eval {label} on {extension}");
                 self.bridge.inspect_relay(extension, label, expression);
+            } else if let Some((extension, name)) = control_extension_command(&command) {
+                // A shortcut cannot be pressed from a script. An action
+                // command is the toolbar's click, decided as the `click`
+                // command decides it; any other goes to the extension's
+                // `commands.onCommand` listeners.
+                let tab = self
+                    .delegate
+                    .last_focused()
+                    .or_else(|| self.bridge.any_tab());
+                let outcome = match tab {
+                    None => "not sent (no tab to command for)",
+                    Some(tab) if crate::commands::is_action_command(name) => {
+                        click_report(Some(&self.click(extension, tab)))
+                    }
+                    Some(tab) => {
+                        self.command(extension, name, tab);
+                        "handed to the bridge"
+                    }
+                };
+                log::info!(
+                    "TEST HOOK: command {number}: extension_command {name:?} of {extension} for {tab:?}: {outcome}"
+                );
             } else {
                 log::warn!("TEST HOOK: command {number} is not understood: {command}");
             }
@@ -1365,6 +1444,7 @@ mod native {
             let mut extensions = Vec::new();
             let mut helper_loaded = false;
             let mut granted: Vec<(String, Grants, bool)> = Vec::new();
+            let mut facts = Vec::new();
             for item in items {
                 let text = |key: &str| {
                     item.get(key)
@@ -1459,6 +1539,12 @@ mod native {
                 // worker (the loader) is the only thing woken.
                 if enabled {
                     granted.push((id.clone(), manifest.grants.clone(), bridged));
+                    facts.push((
+                        id.clone(),
+                        bridge::ExtensionFacts {
+                            commands: manifest.commands.clone(),
+                        },
+                    ));
                 }
                 for command in &manifest.commands {
                     log::debug!(
@@ -1494,7 +1580,9 @@ mod native {
                     // popup: the host decides what a click does.
                     action_title: action.map(|a| a.title.clone().unwrap_or(name)),
                     side_panel: manifest.facts.declares_side_panel,
-                    commands: Vec::new(),
+                    // As the manifest has them; the shell words a command
+                    // that has no description.
+                    commands: manifest.commands,
                 });
             }
             log::info!(
@@ -1541,6 +1629,7 @@ mod native {
             self.bridge.sync(helper_loaded, &bridged);
             if let Some(hub) = self.delegate.hub() {
                 hub.set_extensions(granted);
+                hub.set_facts(facts);
             }
             self.delegate
                 .push(EngineEvent::ExtensionsChanged(extensions));

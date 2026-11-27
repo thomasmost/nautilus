@@ -131,6 +131,19 @@ impl TabHost {
         Some(f(&mut entry.view.frame.borrow_mut()))
     }
 
+    /// Where a popup opened from the keyboard hangs: there is no button
+    /// rectangle, so the top right corner of `tab`'s page area, where
+    /// the toolbar's actions are. Worked out now, from the origin the
+    /// shell keeps current; a remembered button rectangle would be
+    /// stale after the window moved.
+    fn keyboard_anchor(&self, tab: TabId) -> ScreenRect {
+        let width = self
+            .tabs
+            .get(&tab)
+            .map_or(0, |entry| entry.view.dip_size.get().0);
+        keyboard_anchor(self.origin.get(), width, self.scale.get())
+    }
+
     /// The click count CEF expects for a press in `view`: 1, or one more
     /// than the previous click's if it continues it (`continues_click`).
     fn click_count(&self, view: TabId, button: MouseButton, x: f32, y: f32) -> i32 {
@@ -814,6 +827,20 @@ impl TabHostApi for TabHost {
         self.popups.close_all();
     }
 
+    /// A shortcut an extension declared, which the shell resolved after
+    /// its own keymap. The action commands are a click on the toolbar
+    /// button, whatever that does for this extension (popup, side
+    /// panel, `action.onClicked`); any other reaches the extension's
+    /// `chrome.commands.onCommand` listeners with the active tab.
+    fn extension_command(&mut self, tab: TabId, extension: &str, name: &str) {
+        if crate::commands::is_action_command(name) {
+            let anchor = self.keyboard_anchor(tab);
+            self.open_extension_action(tab, extension, anchor);
+        } else {
+            self.extensions.command(extension, name, tab);
+        }
+    }
+
     /// Carry out a choice from the page's context menu. The editing
     /// commands go to the frame the menu was opened in; the rest are the
     /// browser host's tools, at the point the menu was opened.
@@ -1032,9 +1059,52 @@ fn native_handle(_handle: RawWindowHandle) -> Result<cef::sys::cef_window_handle
     ))
 }
 
+/// The side of the square the keyboard's popup anchor stands for,
+/// logical pixels: a toolbar button's.
+const KEYBOARD_ANCHOR: i32 = 32;
+
+/// A zero-height rectangle on the top edge of a page area, at its right
+/// end, in physical screen pixels: `origin` is the area's top left on
+/// screen and `width` its width, both logical.
+fn keyboard_anchor(origin: (i32, i32), width: i32, scale: f32) -> ScreenRect {
+    let px = |v: i32| (v as f32 * scale).round() as i32;
+    let side = KEYBOARD_ANCHOR.min(width.max(0));
+    ScreenRect {
+        x: px(origin.0 + width - side),
+        y: px(origin.1),
+        width: px(side),
+        height: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_keyboards_popup_anchor_is_the_page_areas_top_right_corner() {
+        // A page area 1000 points wide whose top left is at (100, 80)
+        // on a 2x display.
+        assert_eq!(
+            keyboard_anchor((100, 80), 1000, 2.0),
+            ScreenRect {
+                x: 2136,
+                y: 160,
+                width: 64,
+                height: 0
+            }
+        );
+        // A view narrower than a button: the whole width.
+        assert_eq!(
+            keyboard_anchor((0, 0), 20, 1.0),
+            ScreenRect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 0
+            }
+        );
+    }
 
     fn press(view: u64, at: Instant, x: f32, y: f32) -> LastClick {
         LastClick {

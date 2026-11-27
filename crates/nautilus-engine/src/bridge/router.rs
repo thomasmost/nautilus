@@ -186,6 +186,13 @@ pub(crate) fn route(call: &BridgeCall, view: &View) -> Outcome {
     let result = match call.namespace.as_str() {
         "tabs" => tabs(call, view),
         "windows" => windows(call, view),
+        "commands" => match call.method.as_str() {
+            "getAll" => Ok(Outcome::Answer(crate::commands::get_all(
+                &view.facts.commands,
+                crate::extensions::KeyPlatform::CURRENT,
+            ))),
+            other => Err(unsupported("commands", other)),
+        },
         other => Err(unsupported(other, &call.method)),
     };
     result.unwrap_or_else(Outcome::Reject)
@@ -935,6 +942,7 @@ mod tests {
             grants: &Grants::default(),
             last_focused: None,
             panels: &HashMap::new(),
+            facts: &crate::bridge::NO_FACTS,
         };
         assert_eq!(
             settle(
@@ -1013,6 +1021,7 @@ mod tests {
                 grants: &self.grants,
                 last_focused: self.last_focused,
                 panels: &self.panels,
+                facts: &crate::bridge::NO_FACTS,
             }
         }
 

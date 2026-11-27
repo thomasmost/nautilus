@@ -36,10 +36,23 @@ pub(crate) mod relay;
 
 pub(crate) use relay::Bridge;
 
+/// What the router reads about the extension a call comes from: its
+/// commands as the manifest declares them.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ExtensionFacts {
+    pub commands: Vec<osmena_core::ExtensionCommand>,
+}
+
+/// The facts of an extension the engine does not list: no commands.
+pub(crate) static NO_FACTS: ExtensionFacts = ExtensionFacts {
+    commands: Vec::new(),
+};
+
 const CORE_JS: &str = include_str!("js/core.js");
 const TABS_JS: &str = include_str!("js/tabs.js");
 const WINDOWS_JS: &str = include_str!("js/windows.js");
 const RUNTIME_JS: &str = include_str!("js/runtime.js");
+const COMMANDS_JS: &str = include_str!("js/commands.js");
 const SIDE_PANEL_JS: &str = include_str!("js/side_panel.js");
 // The page lane's transport script, which `pages::page_script` puts first in an
 // extension page's context.
@@ -48,7 +61,15 @@ pub(crate) const PAGE_TRANSPORT_JS: &str = include_str!("js/page_transport.js");
 /// The replacement of every bridged namespace, for a context whose
 /// transport has already defined `__bridgeCall` and `__bridgeOnEvent`.
 pub(crate) fn namespaces_script() -> String {
-    [CORE_JS, TABS_JS, WINDOWS_JS, RUNTIME_JS, SIDE_PANEL_JS].join("\n")
+    [
+        CORE_JS,
+        TABS_JS,
+        WINDOWS_JS,
+        RUNTIME_JS,
+        COMMANDS_JS,
+        SIDE_PANEL_JS,
+    ]
+    .join("\n")
 }
 
 /// The whole script of a bridged service worker, as it is written to
@@ -134,8 +155,8 @@ mod tests {
     use super::snapshot::Snapshot;
     use super::transport::{Asker, BridgeCall};
     use super::{
-        CORE_JS, PAGE_TRANSPORT_JS, RUNTIME_JS, SIDE_PANEL_JS, TABS_JS, WINDOWS_JS,
-        namespaces_script, worker_script,
+        COMMANDS_JS, CORE_JS, NO_FACTS, PAGE_TRANSPORT_JS, RUNTIME_JS, SIDE_PANEL_JS, TABS_JS,
+        WINDOWS_JS, namespaces_script, worker_script,
     };
 
     /// The names in `key: ['a', 'b']` of a namespace script.
@@ -161,11 +182,16 @@ mod tests {
             grants: &grants,
             last_focused: None,
             panels: &std::collections::HashMap::new(),
+            facts: &NO_FACTS,
         };
         // Names the script sends to the engine that the router does not
         // serve yet: the tab-groups change empties this list.
         let later = ["group", "ungroup"];
-        for (namespace, script) in [("tabs", TABS_JS), ("windows", WINDOWS_JS)] {
+        for (namespace, script) in [
+            ("tabs", TABS_JS),
+            ("windows", WINDOWS_JS),
+            ("commands", COMMANDS_JS),
+        ] {
             for method in list(script, "bridged")
                 .into_iter()
                 .chain(list(script, "optional"))
@@ -202,6 +228,7 @@ mod tests {
             TABS_JS,
             WINDOWS_JS,
             RUNTIME_JS,
+            COMMANDS_JS,
             SIDE_PANEL_JS,
             PAGE_TRANSPORT_JS,
         ] {
@@ -276,6 +303,7 @@ mod tests {
             grants: &grants,
             last_focused: None,
             panels: &std::collections::HashMap::new(),
+            facts: &NO_FACTS,
         };
         let strip = view.strip_json(&snapshot.windows[0], 0);
         let mut sent: Vec<String> = strip
