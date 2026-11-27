@@ -104,9 +104,6 @@ pub(crate) fn report_of(text: &str) -> Option<i64> {
     (0 < tab && tab <= i32::MAX as i64).then_some(tab)
 }
 
-/// Whether a report may come from a frame, and for which view and extension:
-/// the main frame of a bridged extension's page that is shown as a tab. The
-/// view is the browser's own (`Asker::View`), never something the page named.
 /// Whether a report comes from a side panel's view. A panel's page runs the
 /// report script like every bridged page and Chromium may answer it with an
 /// id, but a panel is no tab: it has no row in the tab table, and its report
@@ -116,6 +113,9 @@ pub(crate) fn from_panel(panels: &PanelRegistry, view: Option<TabId>) -> bool {
     view.is_some_and(|view| panels.get(view).is_some())
 }
 
+/// Whether a report may come from a frame, and for which view and extension:
+/// the main frame of a bridged extension's page that is shown as a tab. The
+/// view is the browser's own (`Asker::View`), never something the page named.
 pub(crate) fn report_source(main: bool, url: &str, view: Option<TabId>) -> Option<(String, TabId)> {
     if !main {
         return None;
