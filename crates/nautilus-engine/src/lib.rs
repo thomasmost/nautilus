@@ -13,6 +13,7 @@
 //!   (off-screen) browser that paints into a [`Frame`] the shell uploads
 //!   as a texture under the toolbar (`PagePaint::Frame`).
 
+mod commands;
 // The CRX parser serves the store installs on Windows and macOS; it is
 // kept (and tested) everywhere, so its lints are quiet elsewhere.
 #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]

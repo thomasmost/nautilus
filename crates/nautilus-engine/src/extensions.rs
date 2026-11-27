@@ -51,20 +51,26 @@ pub fn web_store_item_id(url: &Url) -> Option<String> {
 pub(crate) enum KeyPlatform {
     Mac,
     Windows,
+    /// No build runs extensions there yet; the manifest's `linux` entry
+    /// and its meaning of `Ctrl` are read all the same.
+    Linux,
 }
 
 impl KeyPlatform {
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     pub(crate) const CURRENT: KeyPlatform = if cfg!(target_os = "macos") {
         KeyPlatform::Mac
-    } else {
+    } else if cfg!(windows) {
         KeyPlatform::Windows
+    } else {
+        KeyPlatform::Linux
     };
 
     fn key(self) -> &'static str {
         match self {
             KeyPlatform::Mac => "mac",
             KeyPlatform::Windows => "windows",
+            KeyPlatform::Linux => "linux",
         }
     }
 }
@@ -107,9 +113,8 @@ pub(crate) struct ManifestFacts {
     /// default page, or holds the `sidePanel` permission and may set a
     /// page later with `chrome.sidePanel.setOptions`.
     pub declares_side_panel: bool,
-    /// `commands`, by name. Nothing reads it yet; the first reader removes
-    /// the `allow` below.
-    #[allow(dead_code)]
+    /// `commands`, by name, each with this platform's key as written
+    /// (`commands::commands_from` parses it).
     pub commands: Vec<CommandFacts>,
 }
 
@@ -140,7 +145,9 @@ pub(crate) fn manifest_facts(manifest: &serde_json::Value, platform: KeyPlatform
                     CommandFacts {
                         name: name.clone(),
                         description: string(command.get("description")).unwrap_or_default(),
-                        suggested_key: string(keys.and_then(|k| k.get(platform.key())))
+                        // A bare string is the key on every platform.
+                        suggested_key: string(keys)
+                            .or_else(|| string(keys.and_then(|k| k.get(platform.key()))))
                             .or_else(|| string(keys.and_then(|k| k.get("default")))),
                     }
                 })
@@ -337,7 +344,7 @@ mod native {
         wrap_display_handler, wrap_life_span_handler, wrap_load_handler,
         wrap_run_file_dialog_callback, wrap_urlrequest_client, wrap_window_delegate,
     };
-    use osmena_core::{EngineEvent, Extension, ExtensionSource, Favicon, TabId};
+    use osmena_core::{EngineEvent, Extension, ExtensionCommand, ExtensionSource, Favicon, TabId};
 
     use super::UnpackQueue;
     use crate::bridge::pattern::Grants;
@@ -1453,6 +1460,16 @@ mod native {
                 if enabled {
                     granted.push((id.clone(), manifest.grants.clone(), bridged));
                 }
+                for command in &manifest.commands {
+                    log::debug!(
+                        "extension {id}: command {:?} on {}",
+                        command.name,
+                        command
+                            .chord
+                            .map(|chord| chord.to_string())
+                            .unwrap_or_else(|| "no key".to_string())
+                    );
+                }
                 let action = manifest.facts.action.as_ref();
                 listing.push(crate::bridge::side_panel::Listed {
                     id: id.clone(),
@@ -1598,6 +1615,8 @@ mod native {
         icon: Option<Favicon>,
         /// What the bridge lets the extension's contexts see.
         grants: Grants,
+        /// The commands it declares, with this platform's chords.
+        commands: Vec<ExtensionCommand>,
     }
 
     /// The manifest's facts and the decoded icon of the extension in
@@ -1614,10 +1633,29 @@ mod native {
             .icon_path
             .as_deref()
             .and_then(|p| decode_png(&dir.join(p.trim_start_matches('/'))));
+        // A localised description is a key into the default locale's
+        // messages; the extension's name needs none of this, Chromium
+        // lists it localised already.
+        let locale = manifest
+            .get("default_locale")
+            .and_then(|locale| locale.as_str())
+            .map(str::trim)
+            .filter(|locale| !locale.is_empty());
+        let messages = locale.and_then(|locale| {
+            let path = dir.join("_locales").join(locale).join("messages.json");
+            let text = std::fs::read_to_string(path).ok()?;
+            serde_json::from_str::<serde_json::Value>(&text).ok()
+        });
+        let commands = crate::commands::commands_from(
+            &facts.commands,
+            messages.as_ref(),
+            super::KeyPlatform::CURRENT,
+        );
         ManifestInfo {
             facts,
             icon,
             grants: Grants::from_manifest(&manifest),
+            commands,
         }
     }
 
@@ -2043,6 +2081,17 @@ mod tests {
         );
         let windows = facts(json, KeyPlatform::Windows);
         assert_eq!(windows.commands[2].suggested_key.as_deref(), Some("Ctrl+E"));
+        // A bare string is the key on every platform.
+        assert_eq!(
+            facts(
+                r#"{"commands": {"p": {"suggested_key": "Alt+Shift+P"}}}"#,
+                KeyPlatform::Mac
+            )
+            .commands[0]
+                .suggested_key
+                .as_deref(),
+            Some("Alt+Shift+P")
+        );
     }
 
     #[test]
