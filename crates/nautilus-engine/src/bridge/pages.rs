@@ -45,6 +45,7 @@ const REPORT_JS: &str = include_str!("js/page_report.js");
 const REPORT_FUNCTION: &str = "__nautilusBridgeReport";
 use crate::crx;
 use crate::delegate::DelegateState;
+use crate::panel::PanelRegistry;
 
 /// The process message a page's call travels in: one argument, the call
 /// as JSON (`{"id", "ns", "method", "args"}`).
@@ -106,6 +107,15 @@ pub(crate) fn report_of(text: &str) -> Option<i64> {
 /// Whether a report may come from a frame, and for which view and extension:
 /// the main frame of a bridged extension's page that is shown as a tab. The
 /// view is the browser's own (`Asker::View`), never something the page named.
+/// Whether a report comes from a side panel's view. A panel's page runs the
+/// report script like every bridged page and Chromium may answer it with an
+/// id, but a panel is no tab: it has no row in the tab table, and its report
+/// is dropped without a word (it would otherwise be refused, with a warning
+/// in the log, at every load of a panel).
+pub(crate) fn from_panel(panels: &PanelRegistry, view: Option<TabId>) -> bool {
+    view.is_some_and(|view| panels.get(view).is_some())
+}
+
 pub(crate) fn report_source(main: bool, url: &str, view: Option<TabId>) -> Option<(String, TabId)> {
     if !main {
         return None;
@@ -389,7 +399,8 @@ impl PageLane {
     /// A page reported its own Chromium tab id. The view is the browser's: the
     /// frame must be the main frame of a bridged extension's page, and the
     /// browser's view for its browser must be a tab (`report_source`). A
-    /// report that is not accepted is logged once and ignored.
+    /// report that is not accepted is logged once and ignored; one from a
+    /// side panel's view is ignored without the log line (`from_panel`).
     fn report(
         &self,
         delegate: &DelegateState,
@@ -402,6 +413,9 @@ impl PageLane {
             Asker::View(tab) => Some(tab),
             Asker::Worker | Asker::Popup { .. } => None,
         };
+        if from_panel(&delegate.panels.borrow(), view) {
+            return true;
+        }
         let text = message_text(message);
         let Some(chromium) = text.as_deref().and_then(report_of) else {
             log::warn!("a tab report from {url} was dropped: it is not a tab id");
@@ -741,6 +755,29 @@ mod report_tests {
         assert_eq!(report_of("{}"), None);
         assert_eq!(report_of("5"), None);
         assert_eq!(report_of("not json"), None);
+    }
+
+    #[test]
+    fn a_side_panels_view_reports_no_tab() {
+        use osmena_core::{ExtensionRequest, WindowId};
+
+        let mut panels = PanelRegistry::default();
+        let request = ExtensionRequest::OpenSidePanel {
+            window: WindowId(1),
+            tab: None,
+            page: "panel.html".to_string(),
+        };
+        panels.expect(1, ID, &request);
+        // Asked for, with no view yet: nothing is a panel.
+        assert!(!from_panel(&panels, Some(TabId(9))));
+        panels.bind(TabId(9), ID, "panel.html").unwrap();
+        assert!(from_panel(&panels, Some(TabId(9))));
+        // A tab's view, and a browser that is no view at all.
+        assert!(!from_panel(&panels, Some(TabId(5))));
+        assert!(!from_panel(&panels, None));
+        // The panel closed: its id is no panel's any more.
+        panels.remove(TabId(9));
+        assert!(!from_panel(&panels, Some(TabId(9))));
     }
 
     #[test]
