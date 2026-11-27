@@ -40,6 +40,14 @@
 #            SECS     --exit-after seconds. Default: 600.
 #            URLS     the tabs to open, space separated. Default:
 #                     https://example.com/ https://example.org/
+#            DATA_DIR a data directory to use and to keep, for a check that
+#                     launches twice on the same one (what a profile keeps
+#                     across a restart). It is the caller's: made if missing,
+#                     never removed here. Default: none, the scratch directory
+#                     above. Never the user's own.
+#            LOAD     0 loads no extension: no cmd-1.json is written, and the
+#                     caller's commands start at cmd-1.json (a second launch
+#                     on a DATA_DIR that has the extension already). Default: 1.
 #          The launch is judged as every launch is (next paragraph): exit 0
 #          only when the browser exited 0 by itself, in time, with no crash
 #          or leak in its log; otherwise the browser's own status, or 1,
@@ -97,8 +105,19 @@ if [ "${1:-}" = serve ]; then
   case "$secs" in
     ''|*[!0-9]*) echo "serve: SECS is not a number of seconds: $secs" >&2; exit 2 ;;
   esac
-  [ -f "$ext/manifest.json" ] || { echo "serve: no extension at $ext (EXT_DIR)" >&2; exit 2; }
-  ext=$(cd "$ext" && pwd)
+  load=${LOAD:-1}
+  case "$load" in
+    0|1) ;;
+    *) echo "serve: LOAD is 0 or 1: $load" >&2; exit 2 ;;
+  esac
+  if [ "$load" = 1 ]; then
+    [ -f "$ext/manifest.json" ] || { echo "serve: no extension at $ext (EXT_DIR)" >&2; exit 2; }
+    ext=$(cd "$ext" && pwd)
+  fi
+  # A kept data directory is the caller's scratch one, never the user's.
+  case "${DATA_DIR:-}" in
+    *"Library/Application Support"*) echo "serve: DATA_DIR must be a scratch directory: $DATA_DIR" >&2; exit 2 ;;
+  esac
   # The engine refuses a control directory that another user owns or that
   # group or others can write, with a warning in its log and the hook off:
   # the extension would never load. Said here instead.
@@ -137,11 +156,18 @@ if [ "${1:-}" = serve ]; then
   # the same reason: without it the launch is handed to the Nautilus the user
   # has open, or starts their default profile's Chromium under the test.
   data="$work/data"
+  if [ -n "${DATA_DIR:-}" ]; then
+    # The caller's, kept: it is outside $work, which is all cleanup removes.
+    mkdir -p "$DATA_DIR"
+    data=$(cd "$DATA_DIR" && pwd)
+  fi
 
-  # The first command, written whole: the engine never reads half of one.
-  python3 -I -c 'import json, sys; sys.stdout.write(json.dumps({"load": sys.argv[1]}))' "$ext" \
-    > "$CONTROL/cmd-1.json.tmp"
-  mv "$CONTROL/cmd-1.json.tmp" "$CONTROL/cmd-1.json"
+  if [ "$load" = 1 ]; then
+    # The first command, written whole: the engine never reads half of one.
+    python3 -I -c 'import json, sys; sys.stdout.write(json.dumps({"load": sys.argv[1]}))' "$ext" \
+      > "$CONTROL/cmd-1.json.tmp"
+    mv "$CONTROL/cmd-1.json.tmp" "$CONTROL/cmd-1.json"
+  fi
 
   # The browser's output goes to the caller and to a copy this script reads
   # afterwards, through a named pipe: a pipeline would hide the browser's exit

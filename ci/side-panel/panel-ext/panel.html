@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Side panel test</title>
+<style>
+  body { font: 13px system-ui, sans-serif; margin: 12px; }
+  #pointer, #keys { font: 12px ui-monospace, monospace; white-space: pre-wrap; }
+  input, select { font: inherit; width: 100%; box-sizing: border-box; margin: 6px 0; }
+</style>
+<h1 id="which">Window panel</h1>
+<p>Pointer: <span id="pointer">(not over the panel)</span></p>
+<input id="field" placeholder="Type here">
+<select id="choice"><option>one</option><option>two</option><option>three</option></select>
+<p>Keys: <span id="keys"></span></p>
+<p><a id="link" href="https://example.net/" target="_blank">A link with a target</a></p>
+<button id="close">window.close()</button>
+<script src="panel-probe.js"></script>
+<script src="panel.js"></script>

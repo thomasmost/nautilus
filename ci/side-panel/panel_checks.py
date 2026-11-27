@@ -1,0 +1,671 @@
+#!/usr/bin/env python3
+"""Side panel checks for a Nautilus built from this checkout (macOS).
+
+    export CEF_PATH=~/.local/share/cef-156
+    cargo xtask bundle-mac --features test-hooks
+    ci/side-panel/panel.sh panel
+    ci/side-panel/panel.sh behavior
+    ci/side-panel/panel.sh sample-global <cookbook dir>
+    ci/side-panel/panel.sh sample-site <cookbook dir>
+
+No DevTools and no remote debugging port. The browser is started by
+run.sh serve on a scratch data directory; the test extension
+(ci/side-panel/panel-ext) is loaded, and the browser is driven, through
+NAUTILUS_TEST_CONTROL (cmd-N.json: `load`, `click`). What it did is read
+from the reports its pages and worker post to this script's server on
+127.0.0.1:47616. The server starts first, because the test extension's
+worker asks it for its suite as it starts.
+
+  panel          chrome.sidePanel in the real window: open for a window and
+                 for a tab, the rejections, getContexts, the widths, a
+                 tab's panel showing only with its tab, setOptions and
+                 window.close() closing a panel, the action click through
+                 the test control. Window captures in <out>/shots-panel.
+  behavior       two launches on one kept data directory: the first sets
+                 setPanelBehavior({openPanelOnActionClick: true}) and checks
+                 side-panel-behavior.json; the second calls nothing and a
+                 click must still open the panel.
+  sample-global, sample-site
+                 a chrome-extensions-samples side panel cookbook, copied
+                 with panel-probe.js added to its page.
+
+Prints PASS or FAIL per check and exits 1 on any FAIL. Judge it by its
+exit status, never through a pipe. The browser stays open for HOLD seconds
+(default 180) after the time the checks are allowed (BUDGET), for the steps
+by hand, and then exits by itself: this script never kills a browser that
+is in time (run.sh serve does, 120 s after that). The owner's own Nautilus
+may run beside it: the window that is captured is found by the launched
+browser's process id.
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+APP = REPO / "target/release/Nautilus.app/Contents/MacOS/Nautilus"
+EXT = HERE / "panel-ext"
+RUN_SH = HERE / "run.sh"
+PORT = 47616
+PANEL_WIDTH = 360  # osmena-chrome theme::SIDE_PANEL_WIDTH, in points
+# A page's reports come every half second, a hidden page's once a second
+# (Chromium throttles its timers): a page silent for this long has closed.
+FRESH = 3.0
+# As run.sh's and phase5.py's: what a launch's log must not hold.
+MARKERS = ("panicked at", "fatal runtime error", "already borrowed",
+           "already mutably borrowed", "browser(s) still open at shutdown")
+CHROMIUM_API_ERROR = "Failed to create API on Chrome object"
+BEHAVIOR_FILE = "side-panel-behavior.json"
+SAMPLE_NAMES = {"sample-global": "Global side panel", "sample-site": "Site-specific side panel"}
+SAMPLE_URLS = {
+    "sample-global": "https://example.com/ https://example.org/",
+    "sample-site": "https://www.google.com/ https://example.org/",
+}
+
+lock = threading.Lock()
+records = []  # {"kind", "data", "at"}, in arrival order
+released = set()  # checkpoint names the harness has finished with
+suite = {"name": None}  # handed out once, to the first worker that asks
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _send(self, body=b"ok", content_type="text/plain"):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.send_header("Access-Control-Allow-Private-Network", "true")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self._send()
+
+    def do_GET(self):
+        url = urlparse(self.path)
+        if url.path == "/suite":
+            with lock:
+                name, suite["name"] = suite["name"], None
+            return self._send(json.dumps({"suite": name}).encode(), "application/json")
+        if url.path == "/go":
+            name = parse_qs(url.query).get("name", [""])[0]
+            with lock:
+                go = name in released
+            return self._send(b"go" if go else b"wait")
+        self._send()
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        try:
+            parsed = json.loads(body)
+        except ValueError:
+            parsed = {"kind": "bad", "data": body.decode("utf-8", "replace")}
+        if not isinstance(parsed, dict):
+            parsed = {"kind": "bad", "data": parsed}
+        with lock:
+            records.append({"kind": parsed.get("kind"), "data": parsed.get("data") or {}, "at": time.time()})
+        self._send()
+
+
+def latest(kind, test=lambda data: True):
+    with lock:
+        for record in reversed(records):
+            if record["kind"] == kind and isinstance(record["data"], dict) and test(record["data"]):
+                return record
+    return None
+
+
+def fresh(record, within=FRESH):
+    return record is not None and time.time() - record["at"] < within
+
+
+def wait(test, secs=15.0):
+    end = time.time() + secs
+    while time.time() < end:
+        value = test()
+        if value:
+            return value
+        time.sleep(0.2)
+    return None
+
+
+def ps_children(parent):
+    """The (pid, command line) of each process whose parent is `parent`."""
+    out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,command="], capture_output=True, text=True).stdout
+    found = []
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit() and int(parts[1]) == parent:
+            found.append((int(parts[0]), parts[2]))
+    return found
+
+
+class Harness:
+    def __init__(self, mode, args):
+        self.mode = mode
+        self.args = args
+        self.out = Path(args.out)
+        self.failed = 0
+        self.launches = 0
+        self.control = None
+        self.commands = 0
+        self.log_path = None
+        self.ext_id = None
+        self.active_url = None
+        self.other_url = None
+        self.active_id = None
+        self.full = None
+        self.proc = None
+        self.logfile = None
+        self.started = None
+        self.secs = None
+        self.pid = None  # the launched browser's, for its window
+        self.window = None  # the CGWindowID of the browser's window, for captures
+        self.window_tool = None
+
+    # --- results ---------------------------------------------------------
+
+    def check(self, name, ok, detail=""):
+        ok = bool(ok)
+        suffix = "" if ok or detail == "" else "  " + json.dumps(detail, default=str)[:600]
+        print(("PASS  " if ok else "FAIL  ") + name + suffix, flush=True)
+        if not ok:
+            self.failed += 1
+        return ok
+
+    def note(self, text):
+        print("NOTE  " + text, flush=True)
+
+    # --- the browser -----------------------------------------------------
+
+    def launch(self, ext, urls, budget, suite_name=None, data_dir=None, load=True, hold=None):
+        """One launch through run.sh serve. `budget` is the time the checks
+        may take; the browser exits by itself `hold` seconds after it."""
+        self.launches += 1
+        name = self.mode if self.launches == 1 else "%s-%d" % (self.mode, self.launches)
+        with lock:
+            records.clear()
+            released.clear()
+            suite["name"] = suite_name
+        # Private to this user, as the engine requires, and empty.
+        self.control = Path(tempfile.mkdtemp(prefix="nautilus-panel-ctl-"))
+        os.chmod(self.control, 0o700)
+        self.commands = 1 if load else 0  # run.sh serve wrote cmd-1.json (the load)
+        self.log_path = self.out / (name + ".log")
+        self.secs = budget + (self.args.hold if hold is None else hold)
+        env = dict(
+            os.environ,
+            CONTROL=str(self.control),
+            PROFILE="side-panel-" + self.mode,
+            SECS=str(self.secs),
+            URLS=urls,
+            LOAD="1" if load else "0",
+        )
+        if load:
+            env["EXT_DIR"] = str(ext)
+        else:
+            env.pop("EXT_DIR", None)
+        if data_dir is not None:
+            env["DATA_DIR"] = str(data_dir)
+        else:
+            env.pop("DATA_DIR", None)
+        self.pid = None
+        self.window = None
+        self.logfile = open(self.log_path, "wb")
+        self.started = time.time()
+        self.proc = subprocess.Popen([str(RUN_SH), "serve"], env=env, stdout=self.logfile, stderr=subprocess.STDOUT)
+        self.note(f"launch {self.launches}: its log is {self.log_path}")
+
+    def send(self, command):
+        self.commands += 1
+        tmp = self.control / ("cmd-%d.json.tmp" % self.commands)
+        tmp.write_text(json.dumps(command))
+        tmp.rename(self.control / ("cmd-%d.json" % self.commands))
+
+    def log_text(self):
+        try:
+            return self.log_path.read_text(errors="replace")
+        except (FileNotFoundError, TypeError):
+            return ""
+
+    def installed_id(self, name):
+        found = re.findall(re.escape(name) + r" \(([a-p]{32}), on\)", self.log_text())
+        return found[-1] if found else None
+
+    def browser_pid(self):
+        """The browser run.sh serve started: its child whose command line is
+        the bundle's executable. Never any other Nautilus."""
+        if self.pid is None and self.proc is not None:
+            for pid, command in ps_children(self.proc.pid):
+                if command.startswith(str(APP)):
+                    self.pid = pid
+        return self.pid
+
+    def window_id(self):
+        pid = self.browser_pid()
+        if pid is None:
+            return None
+        if self.window_tool is None:
+            tool = self.out / "window-id"
+            built = subprocess.run(["swiftc", "-O", str(HERE / "window_id.swift"), "-o", str(tool)],
+                                   capture_output=True, text=True)
+            if built.returncode != 0:
+                self.note("swiftc could not build window_id.swift: no captures")
+                self.window_tool = False
+            else:
+                self.window_tool = tool
+        if not self.window_tool:
+            return None
+        done = subprocess.run([str(self.window_tool), str(pid)], capture_output=True, text=True)
+        text = done.stdout.strip()
+        return int(text) if text.isdigit() else None
+
+    def find_window(self):
+        self.window = wait(self.window_id, 40)
+        if self.window is None:
+            self.note("the launched browser's window was not found: no captures")
+
+    def shot(self, name):
+        if not self.window:
+            self.note(f"no window id: {name}.png not captured")
+            return
+        shots = self.out / ("shots-" + self.mode)
+        shots.mkdir(parents=True, exist_ok=True)
+        time.sleep(1.0)  # let the frame with the new layout be painted
+        path = shots / (name + ".png")
+        done = subprocess.run(["screencapture", "-x", "-o", "-l", str(self.window), str(path)])
+        ok = done.returncode == 0 and path.is_file() and path.stat().st_size > 0
+        self.note(f"captured {path}" if ok else f"screencapture failed: {name}")
+
+    # --- what the reports say -------------------------------------------
+
+    def alive(self, page):
+        return fresh(latest("panel", lambda d: d.get("page") == page))
+
+    def shown(self, page):
+        record = latest("panel", lambda d: d.get("page") == page)
+        return fresh(record) and record["data"].get("visibility") == "visible"
+
+    def hidden(self, page):
+        """The page reports, and says it is hidden."""
+        record = latest("panel", lambda d: d.get("page") == page)
+        return fresh(record) and record["data"].get("visibility") == "hidden"
+
+    def panel(self, page):
+        record = latest("panel", lambda d: d.get("page") == page)
+        return record["data"] if fresh(record) else None
+
+    def width(self, url, since=0.0):
+        record = latest("tab", lambda d: d.get("url", "").startswith(url))
+        return record["data"].get("width") if record and record["at"] >= since else None
+
+    def narrower(self):
+        width = self.width(self.active_url)
+        if width is not None and self.full is not None and width < self.full - 100:
+            return width
+        return None
+
+    # --- the records, in order -------------------------------------------
+
+    def take(self, index):
+        with lock:
+            return list(records[index:])
+
+    def pump(self, handlers, secs):
+        """Answer the suite's records in the order they arrive, until its
+        `done` or `secs` from now."""
+        index = 0
+        end = time.time() + secs
+        while time.time() < end:
+            if self.proc.poll() is not None:
+                self.check("the suite finished", False, "the browser exited first")
+                return False
+            batch = self.take(index)
+            index += len(batch)
+            for record in batch:
+                kind, data = record["kind"], record["data"]
+                if kind == "tabs":
+                    self.ext_id = data.get("id")
+                    self.active_id = data.get("active")
+                    self.active_url = data.get("activeUrl")
+                    self.other_url = data.get("otherUrl")
+                    self.note("the extension is " + str(self.ext_id))
+                elif kind == "step":
+                    self.check(data["name"], data["ok"], data.get("detail"))
+                elif kind == "contexts":
+                    self.note("getContexts({}) as the worker got it: " + json.dumps(data))
+                elif kind == "sidepanel-info":
+                    self.note("chrome.sidePanel in %s: %s" % (data.get("context"), json.dumps(data.get("info"))))
+                elif kind == "checkpoint":
+                    handler = handlers.get(data["name"])
+                    if handler is None:
+                        self.check("checkpoint " + data["name"] + " is known", False)
+                    else:
+                        handler()
+                    with lock:
+                        released.add(data["name"])
+                elif kind == "done":
+                    return True
+            time.sleep(0.2)
+        self.check("the suite finished", False, "timed out")
+        return False
+
+    def finish(self):
+        """Wait for the browser to end by itself and judge the launch."""
+        left = max(0, int(self.started + self.secs - time.time()))
+        self.note(f"launch {self.launches}: the browser exits by itself in about {left} s")
+        try:
+            # run.sh serve kills a browser still up 120 s after its --exit-after.
+            status = self.proc.wait(timeout=left + 120 + 60)
+        except subprocess.TimeoutExpired:
+            self.proc.terminate()  # run.sh's own cleanup ends the browser it started
+            status = self.proc.wait()
+            self.check(f"launch {self.launches}: run.sh serve ended in time", False)
+        self.logfile.close()
+        shutil.rmtree(self.control, ignore_errors=True)
+        text = self.log_text()
+        self.check(f"launch {self.launches}: the browser exited with status 0", status == 0, status)
+        for marker in MARKERS:
+            self.check(f"launch {self.launches}: its log has no '{marker}'", marker not in text,
+                       [line for line in text.splitlines() if marker in line][:2])
+        self.check(f"launch {self.launches}: run.sh serve printed no FAIL line", "FAIL serve:" not in text,
+                   [line for line in text.splitlines() if "FAIL serve:" in line][:3])
+        self.note(f"launch {self.launches}: Chromium's '{CHROMIUM_API_ERROR}' is in the log "
+                  f"{text.count(CHROMIUM_API_ERROR)} time(s)")
+        self.note(f"launch {self.launches}: 'nautilus-bridge:' error lines: {text.count('nautilus-bridge:')}")
+
+
+# --- the panel suite's checkpoints ------------------------------------------
+
+def panel_checks(h):
+    handlers = {
+        "start": lambda: start(h),
+        "window-panel": lambda: window_panel(h),
+        "tab-panel-hidden": lambda: tab_panel_hidden(h),
+        "tab-panel-shown": lambda: tab_panel_shown(h),
+        "window-panel-again": lambda: window_panel_again(h),
+        "tab-panel-closed": lambda: tab_panel_closed(h),
+        "window-closed-by-page": lambda: window_closed_by_page(h),
+        "window-panel-reopened": lambda: h.check("the window panel is open again", wait(lambda: h.alive("panel.html"))),
+        "click-open": lambda: click_open(h),
+        "click-close": lambda: click_close(h),
+        "closer": lambda: closer(h),
+        "left-open": lambda: left_open(h),
+    }
+    h.launch(EXT, "https://example.com/ https://example.org/", h.args.budget, suite_name="panel")
+    h.find_window()
+    h.pump(handlers, h.args.budget - 10)
+    gone = latest("closer-gone")
+    if gone is not None:
+        asked = latest("closer")
+        took = None
+        if asked and gone["data"].get("at") and asked["data"].get("closing"):
+            took = gone["data"]["at"] - asked["data"]["closing"]
+        h.check("window.close() in an extension page that is no panel closes its tab", gone["data"].get("gone"), gone["data"])
+        h.note(f"that close took {took} ms from the page's call to tabs.onRemoved in the worker")
+    log = h.log_text()
+    h.check("the log has a 'side panel TabId(..): chrome-extension://' line for each open",
+            len(re.findall(r"side panel TabId\(\d+\): chrome-extension://", log)) >= 5,
+            re.findall(r"side panel TabId\(\d+\): \S+", log))
+    clicks = re.findall(r"TEST HOOK: command \d+: click on \S+ for .*", log)
+    h.check("both clicks of the control opened or closed the side panel",
+            len(clicks) == 2 and all("opened or closed its side panel" in line for line in clicks), clicks)
+    views = set(re.findall(r"side panel (TabId\(\d+\)): chrome-extension://", log))
+    titled = [line for line in log.splitlines() if any(f"tab {view}: title" in line for view in views)]
+    h.check("no panel's view reported a title", not titled, titled[:3])
+    h.finish()
+
+
+def start(h):
+    since = time.time()
+    h.full = wait(lambda: h.width(h.active_url, since), 30) if h.active_url else None
+    h.check("the content script reports the tab's width", h.full is not None, h.active_url)
+    h.note(f"the tab's page is {h.full} wide with no panel")
+    h.shot("1-no-panel")
+
+
+def window_panel(h):
+    panel = wait(lambda: h.panel("panel.html"), 20)
+    h.check("AC5.1 the default panel page exists", panel is not None)
+    if panel is None:
+        return
+    shown = wait(lambda: h.shown("panel.html"), 10)
+    h.check("the panel's page is visible", shown, h.panel("panel.html"))
+    sized = wait(lambda: (h.panel("panel.html") or {}).get("width") == PANEL_WIDTH, 10)
+    panel = h.panel("panel.html") or panel
+    h.check(f"AC1.1 the panel's page is {PANEL_WIDTH} wide", sized, panel)
+    narrow = wait(h.narrower, 10)
+    h.check(
+        "AC1.1 the tab's page is narrower by the panel",
+        narrow is not None and h.full - narrow == PANEL_WIDTH,
+        [h.full, narrow if narrow is not None else h.width(h.active_url)],
+    )
+    h.note(f"widths: the tab's page {h.full} -> {narrow}, the panel's page {panel.get('width')} x {panel.get('height')}")
+    query = wait(lambda: latest("panel-query", lambda d: d.get("page") == "panel.html"), 10)
+    data = query["data"] if query else {}
+    h.check(
+        "the panel's active tab of the current window is the window's",
+        data.get("currentTabs") == [h.active_id],
+        data,
+    )
+    h.check("tabs.getCurrent() in the panel is undefined", data.get("getCurrent") is True, data)
+    h.check("getContexts({windowIds}) from the panel finds itself", data.get("windowContexts") == 1, data)
+    h.shot("2-window-panel")
+
+
+def tab_panel_hidden(h):
+    tab = wait(lambda: h.panel("panel-tab.html"), 20)
+    h.check("AC5.1 the tab's panel page exists", tab is not None)
+    if tab is None:
+        return
+    ok = wait(lambda: h.hidden("panel-tab.html") and h.shown("panel.html"), 10)
+    h.check(
+        "AC1.4 the other tab's panel is hidden while its tab is not active",
+        ok,
+        [h.panel("panel-tab.html"), h.panel("panel.html")],
+    )
+
+
+def tab_panel_shown(h):
+    ok = wait(lambda: h.shown("panel-tab.html") and h.hidden("panel.html"), 10)
+    h.check("AC1.4 with its tab active the tab's panel shows and the window's hides", ok,
+            [h.panel("panel-tab.html"), h.panel("panel.html")])
+    sized = wait(lambda: (h.panel("panel-tab.html") or {}).get("width") == PANEL_WIDTH, 10)
+    h.check(f"AC1.4 the tab's panel is {PANEL_WIDTH} wide when shown", sized, h.panel("panel-tab.html"))
+    h.shot("3-tab-panel")
+
+
+def window_panel_again(h):
+    ok = wait(lambda: h.shown("panel.html") and h.hidden("panel-tab.html"), 10)
+    h.check("AC1.4 back on the first tab the window's panel shows again", ok,
+            [h.panel("panel.html"), h.panel("panel-tab.html")])
+    h.shot("4-window-panel-again")
+
+
+def tab_panel_closed(h):
+    h.check("AC5.2 setOptions({enabled: false}) closed the tab panel's page",
+            wait(lambda: not h.alive("panel-tab.html"), 10), h.panel("panel-tab.html"))
+    h.check("the window's panel is still open", h.alive("panel.html"))
+
+
+def window_closed_by_page(h):
+    h.check("AC5.2 window.close() in the panel closed its page", wait(lambda: not h.alive("panel.html"), 10))
+    if h.full is None:
+        h.check("the page has its full width again", False, "no width was reported before the panel")
+    else:
+        full = wait(lambda: h.width(h.active_url) == h.full, 10)
+        h.check("the page has its full width again", full, [h.full, h.width(h.active_url)])
+    h.shot("5-closed")
+
+
+def click_open(h):
+    h.send({"click": h.ext_id})
+    h.check("a click on the action opens the window panel", wait(lambda: h.alive("panel.html"), 15))
+
+
+def click_close(h):
+    h.send({"click": h.ext_id})
+    h.check("a second click closes it", wait(lambda: not h.alive("panel.html"), 15))
+
+
+def closer(h):
+    asked = wait(lambda: latest("closer"), 15)
+    h.check("the page that is no panel reported before it closed itself", asked is not None)
+    if asked:
+        h.note("window.close() in a page that is no panel: " + json.dumps(asked["data"]))
+        asks = asked["data"].get("asks") or []
+        h.check("sidePanel.closeSelf answers false for a page that is no panel",
+                bool(asks) and all(a.get("value") is False for a in asks), asks)
+
+
+def left_open(h):
+    h.check("the window panel is left open for the steps by hand", wait(lambda: h.alive("panel.html"), 10))
+    h.shot("6-left-open")
+
+
+# --- the behaviour file, across two launches ----------------------------------
+
+def behavior_checks(h):
+    data = Path(tempfile.mkdtemp(prefix="nautilus-panel-data-"))
+    try:
+        h.launch(EXT, "https://example.com/ https://example.org/", 60, suite_name="behavior", data_dir=data, hold=0)
+        h.find_window()
+
+        def behavior_set():
+            files = wait(lambda: list(data.rglob(BEHAVIOR_FILE)), 10) or []
+            h.check(f"{BEHAVIOR_FILE} is written under the profile's engine directory", len(files) == 1,
+                    [str(f) for f in files])
+            for file in files:
+                text = file.read_text()
+                h.note(f"{file.relative_to(data)}: {text.strip()}")
+                h.check("it names the extension", bool(h.ext_id) and h.ext_id in text, text)
+
+        h.pump({"behavior-set": behavior_set}, 45)
+        first_id = h.ext_id
+        h.finish()
+        kept = list(data.rglob(BEHAVIOR_FILE))
+        h.check("the file is still there after the browser exited", len(kept) == 1, [str(f) for f in kept])
+
+        # The second launch: nothing is loaded and the worker calls nothing.
+        h.launch(None, "https://example.com/ https://example.org/", 60, suite_name=None, data_dir=data, load=False, hold=0)
+        h.find_window()
+        again = wait(lambda: h.installed_id("Nautilus Panel Test"), 40)
+        h.check("the second launch lists the same extension, on", again is not None and again == first_id, [first_id, again])
+        h.check("its content script reports again", wait(lambda: latest("tab"), 30) is not None)
+        if again:
+            h.send({"click": again})
+            opened = wait(lambda: h.alive("panel.html"), 15)
+            h.check("after a restart a click on the action still opens the panel", opened)
+            h.shot("behavior-second-launch")
+            clicks = re.findall(r"TEST HOOK: command \d+: click on \S+ for .*", h.log_text())
+            h.check("the control says the click opened the side panel",
+                    len(clicks) == 1 and "opened or closed its side panel" in clicks[0], clicks)
+        h.finish()
+    finally:
+        shutil.rmtree(data, ignore_errors=True)
+
+
+# --- the two samples ----------------------------------------------------------
+
+def prepare_sample(source, dest):
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(source, dest, symlinks=False)
+    page = dest / "sidepanel.html"
+    if not page.is_file():
+        raise SystemExit(f"{page} is missing: the sample has no sidepanel.html")
+    shutil.copy(EXT / "panel-probe.js", dest / "panel-probe.js")
+    page.write_text(page.read_text() + '\n<script src="panel-probe.js"></script>\n')
+
+
+def sample_checks(h, source):
+    dest = h.out / h.mode
+    prepare_sample(source, dest)
+    h.launch(dest, SAMPLE_URLS[h.mode], 90, hold=h.args.hold)
+    h.find_window()
+    name = SAMPLE_NAMES[h.mode]
+    ext_id = wait(lambda: h.installed_id(name), 60)
+    h.check("the sample is installed and bridged", ext_id is not None and "bridged: Yes" in h.log_text(), name)
+    if ext_id is None:
+        h.finish()
+        return
+    if h.mode == "sample-site":
+        urls = wait(lambda: re.findall(r"https://www\.google\.com/\S*", h.log_text()), 60)
+        h.check("a tab on www.google.com loaded", bool(urls))
+    time.sleep(8)  # the sample's worker sets its behaviour, and its options after the load
+    h.shot("0-before")
+    h.send({"click": ext_id})
+    opened = wait(lambda: h.alive("sidepanel.html"), 20)
+    h.check("a click on the action opens the sample's panel", opened)
+    if opened:
+        wait(lambda: h.shown("sidepanel.html"), 10)
+        h.note("the sample's panel page: " + json.dumps(h.panel("sidepanel.html")))
+    h.shot("1-open")
+    h.send({"click": ext_id})
+    closed = wait(lambda: not h.alive("sidepanel.html"), 15)
+    h.check("a second click closes the sample's panel", closed)
+    h.send({"click": ext_id})
+    h.check("a third click opens it again", wait(lambda: h.alive("sidepanel.html"), 20))
+    clicks = re.findall(r"TEST HOOK: command \d+: click on \S+ for .*", h.log_text())
+    h.note("the control's click lines: " + json.dumps(clicks))
+    if h.mode == "sample-site":
+        h.note("by hand: switch to the example.org tab and click the action: nothing opens")
+    h.finish()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", choices=["panel", "behavior", "sample-global", "sample-site"])
+    parser.add_argument("source", nargs="?", help="the cookbook directory (sample modes)")
+    parser.add_argument("--hold", type=int, default=int(os.environ.get("HOLD", "180")),
+                        help="seconds the browser stays open after the checks' time, for the steps by hand")
+    parser.add_argument("--budget", type=int, default=int(os.environ.get("BUDGET", "150")),
+                        help="seconds the panel suite may take")
+    parser.add_argument("--out", default=str(HERE / "out"))
+    args = parser.parse_args()
+    if args.mode.startswith("sample-") and not args.source:
+        parser.error("the sample modes need the cookbook directory")
+    if not APP.exists():
+        sys.exit(f"{APP} is missing: cargo xtask bundle-mac --features test-hooks")
+    Path(args.out).mkdir(parents=True, exist_ok=True)
+
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    h = Harness(args.mode, args)
+    try:
+        if args.mode == "panel":
+            panel_checks(h)
+        elif args.mode == "behavior":
+            behavior_checks(h)
+        else:
+            sample_checks(h, Path(args.source))
+    finally:
+        # A launch still running here means this script is ending early (an
+        # error, or an interrupt): run.sh serve's own cleanup ends the
+        # browser it started, by pid.
+        if h.proc is not None and h.proc.poll() is None:
+            h.proc.terminate()
+            h.proc.wait()
+        if h.control is not None:
+            shutil.rmtree(h.control, ignore_errors=True)
+        server.shutdown()
+    print("FAILED: %d check(s)" % h.failed if h.failed else "ALL PASSED", flush=True)
+    sys.exit(1 if h.failed else 0)
+
+
+if __name__ == "__main__":
+    main()
