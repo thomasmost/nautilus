@@ -69,8 +69,12 @@
   const closed = [];
   const removed = {}; // tab id -> when tabs.onRemoved fired (ms)
 
-  chrome.runtime.onMessage.addListener((message) => {
+  chrome.runtime.onMessage.addListener((message, sender) => {
     if (message && message.report) post(message.report.kind, message.report.data);
+    // A panel page says who it is: what the worker sees as its sender.
+    if (message && message.whoami) {
+      post('sender', { page: message.whoami, tab: sender.tab || null, url: sender.url || null, frameId: sender.frameId });
+    }
   });
   chrome.tabs.onRemoved.addListener((id) => {
     removed[id] = Date.now();
@@ -79,7 +83,20 @@
   async function panelSuite() {
     const sp = chrome.sidePanel;
     const self_ = chrome.runtime.id;
-    const tabs = await chrome.tabs.query({});
+    // A worker that asks as it is installed asks before the engine has
+    // published its first strip, and is answered with no tabs: wait for
+    // the two.
+    let tabs = await chrome.tabs.query({});
+    const firstCount = tabs.length;
+    for (let i = 0; i < 100 && tabs.length < 2; i += 1) {
+      await sleep(200);
+      tabs = await chrome.tabs.query({});
+    }
+    post('note', `the first tabs.query answered ${firstCount} tab(s)`);
+    // The tabs loaded before the extension was installed, so they have no
+    // content script: reloaded, they do. Its reports also keep this
+    // worker running through the checkpoints.
+    for (const tab of tabs) await chrome.tabs.reload(tab.id);
     const active = tabs.find((t) => t.active) || tabs[0];
     const other = tabs.find((t) => t.id !== active.id);
     const window = active.windowId;
@@ -132,7 +149,13 @@
         contexts[0].tabId === -1,
       contexts
     );
-    post('contexts', await chrome.runtime.getContexts({}).then((all) => all.map((c) => [c.contextType, c.tabId, c.windowId, c.documentUrl])));
+    step(
+      "getContexts({}) lists the worker and the panel, and not the bridge's relay page",
+      await chrome.runtime.getContexts({}).then(
+        (all) => same(all.map((c) => c.contextType).sort(), ['BACKGROUND', 'SIDE_PANEL']) && !all.some((c) => (c.documentUrl || '').includes('nautilus-bridge'))
+      )
+    );
+    post('contexts', await chrome.runtime.getContexts({}).then((all) => all.map((c) => [c.contextType, c.tabId, c.windowId, c.documentUrl, c.contextId])));
 
     // side-panel.AC5.1 (tab) and AC1.4
     await sp.setOptions({ tabId: other.id, path: 'panel-tab.html', enabled: true });
@@ -199,6 +222,8 @@
       { opened: opened.length, closed: closed.length }
     );
 
+    await extras(sp, window, active, other);
+
     // window.close() in an extension page that is no panel: the script
     // asks the engine first (sidePanel.closeSelf), then closes natively.
     // closer.html times the question and then closes itself.
@@ -212,6 +237,133 @@
     // Left open for the steps by hand (side-panel.AC1.2, AC1.3).
     await sp.open({ windowId: window });
     await checkpoint('left-open');
+  }
+
+  // Beyond the acceptance lines: a new page for an open panel, what a
+  // panel opens, a tab closed with its panel, a second window's panel and
+  // that window closed with it. It starts and ends with no panel open.
+  async function extras(sp, window, active, other) {
+    const seen = () => ({ opened: opened.length, closed: closed.length });
+    const types = { contextTypes: ['SIDE_PANEL'] };
+
+    // setOptions({path}) on an open panel shows the new page.
+    await sp.open({ windowId: window });
+    await checkpoint('extra-open');
+
+    // Another extension is installed while this worker and the panel's
+    // page are alive (the harness loads one at this checkpoint). Chromium
+    // then defines every API on `chrome` again in each live context; the
+    // engine's chrome.sidePanel must stay. Chromium's own open() wants a
+    // user gesture; the engine's says what is wrong with the call.
+    await checkpoint('bystander');
+    const still = await rejection(chrome.sidePanel.open({}));
+    post('sidepanel-info', { context: 'worker, after another extension was installed', info: describeSidePanel() });
+    step(
+      "after another extension is installed chrome.sidePanel is still the engine's in the worker",
+      Object.isFrozen(chrome.sidePanel) && still === 'At least one of `tabId` and `windowId` must be provided',
+      still
+    );
+    chrome.runtime.sendMessage({ command: 'describe' }).catch(() => {});
+    await checkpoint('bystander-page');
+    let before = seen();
+    await sp.setOptions({ path: 'panel-tab.html' });
+    step(
+      'setOptions({path}) on the open window panel closes the old page and opens the new',
+      await until(
+        () =>
+          closed.length === before.closed + 1 &&
+          opened.length === before.opened + 1 &&
+          closed[closed.length - 1].path === 'panel.html' &&
+          opened[opened.length - 1].path === 'panel-tab.html' &&
+          opened[opened.length - 1].tabId === undefined,
+        10
+      ),
+      { opened: opened.slice(before.opened), closed: closed.slice(before.closed) }
+    );
+    await checkpoint('path-changed');
+    await sp.setOptions({ path: 'panel.html' });
+    await checkpoint('path-restored');
+
+    // window.open in a panel's page is a tab of the window, and the panel stays.
+    const created = [];
+    const onCreated = (tab) => created.push(tab);
+    chrome.tabs.onCreated.addListener(onCreated);
+    chrome.runtime.sendMessage({ command: 'window.open' }).catch(() => {});
+    // The tab is announced blank and loads the address after.
+    let listed = [];
+    const fromPanel = () => listed.find((t) => (t.url || '').includes('from-panel'));
+    for (let i = 0; i < 50 && !fromPanel(); i += 1) {
+      await sleep(200);
+      listed = await chrome.tabs.query({});
+    }
+    const opener = listed.find((t) => t.id === active.id);
+    step(
+      'window.open in the panel opens one tab, beside the tab the window shows',
+      created.length === 1 && !!fromPanel() && fromPanel().id === created[0].id && !!opener && fromPanel().index === opener.index + 1,
+      { created: created.map((t) => [t.id, t.index, t.url]), listed: listed.map((t) => [t.id, t.index, t.active, t.url]) }
+    );
+    await checkpoint('panel-opened-tab');
+    chrome.tabs.onCreated.removeListener(onCreated);
+    for (const tab of listed) {
+      if (tab.id !== active.id && tab.id !== other.id) await chrome.tabs.remove(tab.id).catch(() => {});
+    }
+    await chrome.tabs.update(active.id, { active: true });
+
+    // A tab closed with its own panel open.
+    const extra = await chrome.tabs.create({ url: 'https://example.net/?own-panel', active: false });
+    await sp.setOptions({ tabId: extra.id, path: 'panel-tab.html', enabled: true });
+    before = seen();
+    const ownOpen = await rejection(sp.open({ tabId: extra.id }));
+    step(
+      "a new tab's own panel opens",
+      ownOpen === null && (await until(() => opened.length === before.opened + 1 && opened[opened.length - 1].tabId === extra.id, 10)),
+      { ownOpen, opened: opened.slice(before.opened) }
+    );
+    await chrome.tabs.remove(extra.id);
+    step(
+      'closing a tab closes its own panel, and onClosed names the tab',
+      await until(() => closed.length === before.closed + 1, 10) &&
+        closed[closed.length - 1].tabId === extra.id &&
+        closed[closed.length - 1].path === 'panel-tab.html',
+      closed.slice(before.closed)
+    );
+    await checkpoint('tab-closed-with-panel');
+    const afterTab = await chrome.runtime.getContexts(types);
+    step('getContexts reports only the window panel after it', afterTab.length === 1 && afterTab[0].windowId === window, afterTab);
+
+    // A second window: its own panel, and the window closed with it open.
+    const second = await chrome.windows.create({ url: 'https://example.net/?second-window' });
+    const secondTab = second.tabs && second.tabs[0];
+    await post('second-window', { window: second.id, tab: secondTab && secondTab.id });
+    before = seen();
+    const secondOpen = await rejection(sp.open({ windowId: second.id }));
+    step(
+      "open({windowId}) for a second window opens that window's panel",
+      secondOpen === null &&
+        (await until(() => opened.length === before.opened + 1 && opened[opened.length - 1].windowId === second.id, 10)),
+      { secondOpen, opened: opened.slice(before.opened) }
+    );
+    await checkpoint('second-window');
+    const two = await chrome.runtime.getContexts(types);
+    step(
+      'getContexts reports a panel in each window',
+      two.length === 2 && same(two.map((c) => c.windowId).sort(), [window, second.id].sort()),
+      two
+    );
+    const inSecond = await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL'], windowIds: [second.id] });
+    step('getContexts({windowIds}) narrows to the second window', inSecond.length === 1 && inSecond[0].windowId === second.id, inSecond);
+    await chrome.windows.remove(second.id);
+    step(
+      'closing a window closes its panel, and onClosed names the window',
+      await until(() => closed.length === before.closed + 1, 10) && closed[closed.length - 1].windowId === second.id,
+      closed.slice(before.closed)
+    );
+    const one = await chrome.runtime.getContexts(types);
+    step('getContexts reports the first window panel alone again', one.length === 1 && one[0].windowId === window, one);
+    await checkpoint('second-window-closed');
+
+    await sp.close({ windowId: window });
+    step('no panel is left open', await until(() => opened.length === closed.length, 10), seen());
   }
 
   // The first launch of the behaviour check: only what the cookbook's

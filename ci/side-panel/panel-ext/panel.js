@@ -22,6 +22,12 @@ document.getElementById('close').addEventListener('click', () => window.close())
 
 chrome.runtime.onMessage.addListener((message) => {
   if (message && message.command === 'window.close') window.close();
+  // What a panel opens is a tab of its window, and the panel gets no
+  // handle to it.
+  if (message && message.command === 'window.open') {
+    const opened = window.open('https://example.net/?from-panel');
+    record('panel-opened', { page: location.pathname.slice(1), handle: opened === null ? 'null' : typeof opened });
+  }
 });
 
 function record(kind, data) {
@@ -32,12 +38,13 @@ function record(kind, data) {
   }).catch(() => {});
 }
 
-(async () => {
-  const page = location.pathname.slice(1);
+// What this page's chrome.sidePanel is: the engine's object (frozen, a
+// property of `chrome` that cannot be redefined) or Chromium's own.
+function describe(context) {
   const sp = chrome.sidePanel;
   const descriptor = Object.getOwnPropertyDescriptor(chrome, 'sidePanel') || {};
   record('sidepanel-info', {
-    context: page,
+    context,
     info: {
       present: !!sp,
       frozen: !!sp && Object.isFrozen(sp),
@@ -52,6 +59,16 @@ function record(kind, data) {
       installed: self.__nautilusBridge ? self.__nautilusBridge.installed : null,
     },
   });
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message && message.command === 'describe') describe(location.pathname.slice(1) + ', after another extension was installed');
+});
+
+(async () => {
+  const page = location.pathname.slice(1);
+  describe(page);
+  chrome.runtime.sendMessage({ whoami: page }).catch(() => {});
   try {
     const current = await chrome.tabs.query({ active: true, currentWindow: true });
     const self_ = await chrome.tabs.getCurrent();

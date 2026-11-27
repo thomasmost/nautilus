@@ -69,8 +69,13 @@ BEHAVIOR_FILE = "side-panel-behavior.json"
 SAMPLE_NAMES = {"sample-global": "Global side panel", "sample-site": "Site-specific side panel"}
 SAMPLE_URLS = {
     "sample-global": "https://example.com/ https://example.org/",
-    "sample-site": "https://www.google.com/ https://example.org/",
+    # The last address is the tab the window shows, which is the tab the
+    # control's click is for.
+    "sample-site": "https://example.org/ https://www.google.com/",
 }
+# The site sample's other half: with example.org showing, a click is an
+# ordinary action.onClicked and opens nothing.
+SAMPLE_SITE_ELSEWHERE = "https://www.google.com/ https://example.org/"
 
 lock = threading.Lock()
 records = []  # {"kind", "data", "at"}, in arrival order
@@ -279,15 +284,18 @@ class Harness:
         if self.window is None:
             self.note("the launched browser's window was not found: no captures")
 
-    def shot(self, name):
-        if not self.window:
+    def shot(self, name, front=False):
+        """Capture the launched browser's first window, or with `front` the
+        one of its windows that is in front now."""
+        window = (self.window_id() if front else None) or self.window
+        if not window:
             self.note(f"no window id: {name}.png not captured")
             return
         shots = self.out / ("shots-" + self.mode)
         shots.mkdir(parents=True, exist_ok=True)
         time.sleep(1.0)  # let the frame with the new layout be painted
         path = shots / (name + ".png")
-        done = subprocess.run(["screencapture", "-x", "-o", "-l", str(self.window), str(path)])
+        done = subprocess.run(["screencapture", "-x", "-o", "-l", str(window), str(path)])
         ok = done.returncode == 0 and path.is_file() and path.stat().st_size > 0
         self.note(f"captured {path}" if ok else f"screencapture failed: {name}")
 
@@ -346,6 +354,8 @@ class Harness:
                     self.note("the extension is " + str(self.ext_id))
                 elif kind == "step":
                     self.check(data["name"], data["ok"], data.get("detail"))
+                elif kind == "note":
+                    self.note(str(data))
                 elif kind == "contexts":
                     self.note("getContexts({}) as the worker got it: " + json.dumps(data))
                 elif kind == "sidepanel-info":
@@ -403,6 +413,23 @@ def panel_checks(h):
         "window-panel-reopened": lambda: h.check("the window panel is open again", wait(lambda: h.alive("panel.html"))),
         "click-open": lambda: click_open(h),
         "click-close": lambda: click_close(h),
+        "extra-open": lambda: h.check("the window panel is open for the further checks", wait(lambda: h.shown("panel.html"))),
+        "bystander": lambda: bystander(h),
+        "bystander-page": lambda: bystander_page(h),
+        "path-changed": lambda: path_changed(h),
+        "path-restored": lambda: h.check(
+            "setOptions({path}) back shows the first page again",
+            wait(lambda: h.shown("panel.html") and not h.alive("panel-tab.html"), 10),
+            [h.panel("panel.html"), h.panel("panel-tab.html")]),
+        "panel-opened-tab": lambda: panel_opened_tab(h),
+        "tab-closed-with-panel": lambda: h.check(
+            "the closed tab's panel page is gone and the window's is still shown",
+            wait(lambda: h.shown("panel.html") and not h.alive("panel-tab.html"), 10),
+            [h.panel("panel.html"), h.panel("panel-tab.html")]),
+        "second-window": lambda: second_window(h),
+        "second-window-closed": lambda: h.check(
+            "with the second window closed the first window's panel is still shown",
+            wait(lambda: h.shown("panel.html"), 10), h.panel("panel.html")),
         "closer": lambda: closer(h),
         "left-open": lambda: left_open(h),
     }
@@ -419,14 +446,14 @@ def panel_checks(h):
         h.note(f"that close took {took} ms from the page's call to tabs.onRemoved in the worker")
     log = h.log_text()
     h.check("the log has a 'side panel TabId(..): chrome-extension://' line for each open",
-            len(re.findall(r"side panel TabId\(\d+\): chrome-extension://", log)) >= 5,
-            re.findall(r"side panel TabId\(\d+\): \S+", log))
+            len(re.findall(r"side panel TabId\(\d+\): chrome-extension://", log)) == 10,
+            re.findall(r"side panel TabId\(\d+\): chrome-extension://\S+", log))
     clicks = re.findall(r"TEST HOOK: command \d+: click on \S+ for .*", log)
     h.check("both clicks of the control opened or closed the side panel",
             len(clicks) == 2 and all("opened or closed its side panel" in line for line in clicks), clicks)
     views = set(re.findall(r"side panel (TabId\(\d+\)): chrome-extension://", log))
-    titled = [line for line in log.splitlines() if any(f"tab {view}: title" in line for view in views)]
-    h.check("no panel's view reported a title", not titled, titled[:3])
+    stray = [line for line in log.splitlines() if "no engine tab for" in line and any(view in line for view in views)]
+    h.check("no input or command went to a panel's view after it closed", not stray, stray[:3])
     h.finish()
 
 
@@ -464,6 +491,14 @@ def window_panel(h):
     )
     h.check("tabs.getCurrent() in the panel is undefined", data.get("getCurrent") is True, data)
     h.check("getContexts({windowIds}) from the panel finds itself", data.get("windowContexts") == 1, data)
+    sender = wait(lambda: latest("sender", lambda d: d.get("page") == "panel.html"), 10)
+    # In Chrome a side panel's sender has no tab. Here Chromium takes the
+    # panel's browser for a tab of its own, so the worker sees one, with
+    # index -1 and windowId -1: recorded, not judged (a known difference).
+    tab = sender["data"].get("tab") if sender else "no message arrived"
+    h.note("sender.tab of a message from the panel's page: " + (
+        "none" if tab is None else json.dumps(tab if not isinstance(tab, dict) else
+                                              {key: tab.get(key) for key in ("id", "index", "windowId", "url")})))
     h.shot("2-window-panel")
 
 
@@ -520,6 +555,58 @@ def click_open(h):
 def click_close(h):
     h.send({"click": h.ext_id})
     h.check("a second click closes it", wait(lambda: not h.alive("panel.html"), 15))
+
+
+def bystander(h):
+    """Install a second extension while the test extension's worker and its
+    panel's page are alive: Chromium then defines every API on `chrome`
+    again in each of them."""
+    other = h.out / "bystander"
+    shutil.rmtree(other, ignore_errors=True)
+    other.mkdir(parents=True)
+    (other / "manifest.json").write_text(json.dumps({
+        "manifest_version": 3,
+        "name": "Nautilus Panel Test Bystander",
+        "version": "1.0",
+        "description": "Installed in the middle of the side panel run. It does nothing.",
+    }, indent=2) + "\n")
+    h.send({"load": str(other)})
+    listed = wait(lambda: h.installed_id("Nautilus Panel Test Bystander"), 30)
+    h.check("a second extension is installed while the panel is open", listed is not None)
+    time.sleep(2)  # the renderers hear of it after the browser does
+
+
+def bystander_page(h):
+    said = wait(lambda: latest("sidepanel-info", lambda d: "after another" in str(d.get("context"))
+                               and str(d.get("context")).startswith("panel.html")), 10)
+    info = (said["data"].get("info") or {}) if said else {}
+    h.check("after another extension is installed chrome.sidePanel is still the engine's in the panel's page",
+            info.get("frozen") is True and info.get("property", {}).get("configurable") is False, info or None)
+
+
+def path_changed(h):
+    ok = wait(lambda: h.shown("panel-tab.html") and not h.alive("panel.html"), 10)
+    h.check("setOptions({path}) on the open window panel shows the new page", ok,
+            [h.panel("panel-tab.html"), h.panel("panel.html")])
+    h.shot("7-new-path")
+
+
+def panel_opened_tab(h):
+    said = wait(lambda: latest("panel-opened"), 10)
+    h.check("the panel got no handle to what it opened", said is not None and said["data"].get("handle") == "null",
+            said["data"] if said else None)
+    h.check("the panel stays when it opens a tab", wait(lambda: h.alive("panel.html"), 10))
+    h.shot("8-panel-opened-a-tab")
+
+
+def second_window(h):
+    told = latest("second-window")
+    tab = told["data"].get("tab") if told else None
+    asked = wait(lambda: latest("panel-query", lambda d: d.get("currentTabs") == [tab]), 15)
+    h.check("the second window's panel page says its current window is the second window",
+            asked is not None and asked["data"].get("windowContexts") == 1,
+            asked["data"] if asked else [tab, (latest("panel-query") or {}).get("data")])
+    h.shot("9-second-window", front=True)
 
 
 def closer(h):
@@ -622,8 +709,23 @@ def sample_checks(h, source):
     h.check("a third click opens it again", wait(lambda: h.alive("sidepanel.html"), 20))
     clicks = re.findall(r"TEST HOOK: command \d+: click on \S+ for .*", h.log_text())
     h.note("the control's click lines: " + json.dumps(clicks))
-    if h.mode == "sample-site":
-        h.note("by hand: switch to the example.org tab and click the action: nothing opens")
+    h.finish()
+    if h.mode != "sample-site":
+        return
+    # Again, with the tab that is not on the site showing.
+    h.launch(dest, SAMPLE_SITE_ELSEWHERE, 60, hold=0)
+    h.find_window()
+    ext_id = wait(lambda: h.installed_id(name), 60)
+    h.check("the sample is installed again", ext_id is not None)
+    if ext_id is not None:
+        time.sleep(12)
+        h.send({"click": ext_id})
+        line = wait(lambda: re.findall(r"TEST HOOK: command \d+: click on \S+ for .*", h.log_text()), 15) or []
+        h.check("on the tab that is not on the site a click is an ordinary action click",
+                len(line) == 1 and "sent to the bridge" in line[0], line)
+        time.sleep(4)
+        h.check("and no panel opens", not h.alive("sidepanel.html"), h.panel("sidepanel.html"))
+        h.shot("2-elsewhere")
     h.finish()
 
 
