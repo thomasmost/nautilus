@@ -98,20 +98,111 @@ impl ViewSizes {
         self.panels.get(&view).copied().unwrap_or(self.page)
     }
 
-    pub(crate) fn resize(&mut self, view: TabId, size: (u32, u32)) -> Resized {
+    /// `view`, which the host holds as `kind`, is to be `size`. A view the
+    /// host does not hold (`None`: a panel whose browser was never made,
+    /// or has gone) and a panel without a size of its own change nothing:
+    /// only a tab's size is the page area's.
+    pub(crate) fn resize(
+        &mut self,
+        view: TabId,
+        kind: Option<ViewKind>,
+        size: (u32, u32),
+    ) -> Resized {
         let size = (size.0.max(1), size.1.max(1));
-        match self.panels.get_mut(&view) {
-            Some(own) if *own == size => Resized::Unchanged,
-            Some(own) => {
-                *own = size;
-                Resized::Panel
-            }
-            None if self.page == size => Resized::Unchanged,
-            None => {
+        match kind {
+            None => Resized::Unchanged,
+            Some(ViewKind::Panel) => match self.panels.get_mut(&view) {
+                Some(own) if *own != size => {
+                    *own = size;
+                    Resized::Panel
+                }
+                _ => Resized::Unchanged,
+            },
+            Some(ViewKind::Tab) if self.page == size => Resized::Unchanged,
+            Some(ViewKind::Tab) => {
                 self.page = size;
                 Resized::Page
             }
         }
+    }
+}
+
+/// What a view of the host is, for its size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewKind {
+    Tab,
+    Panel,
+}
+
+/// An entry of the host that can die before the host lets go of it: a
+/// side panel whose browser closed without the host asking.
+pub(crate) trait Retires {
+    /// The entry's browser is closing or closed; nothing may call into it.
+    fn gone(&self) -> bool;
+}
+
+/// The host's views by id. An entry that is gone (`Retires::gone`) stays
+/// in the map until the next `sweep`, but nothing here hands it out: the
+/// host reaches a browser only through `get`, `ids`, `values` and `take`,
+/// so it cannot call into one that Chromium has closed.
+#[derive(Debug)]
+pub(crate) struct Views<E> {
+    entries: HashMap<TabId, E>,
+}
+
+impl<E: Retires> Views<E> {
+    pub(crate) fn new() -> Views<E> {
+        Views {
+            entries: HashMap::new(),
+        }
+    }
+
+    /// No live view is left.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.values().next().is_none()
+    }
+
+    pub(crate) fn insert(&mut self, view: TabId, entry: E) {
+        self.entries.insert(view, entry);
+    }
+
+    /// The live entry of `view`.
+    pub(crate) fn get(&self, view: TabId) -> Option<&E> {
+        self.entries.get(&view).filter(|entry| !entry.gone())
+    }
+
+    /// The live entries.
+    pub(crate) fn values(&self) -> impl Iterator<Item = &E> {
+        self.entries.values().filter(|entry| !entry.gone())
+    }
+
+    /// The ids of the live entries.
+    pub(crate) fn ids(&self) -> Vec<TabId> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| !entry.gone())
+            .map(|(view, _)| *view)
+            .collect()
+    }
+
+    /// Take `view` out. `None` when it is not there or is gone (a gone
+    /// entry is dropped all the same).
+    pub(crate) fn take(&mut self, view: TabId) -> Option<E> {
+        self.entries.remove(&view).filter(|entry| !entry.gone())
+    }
+
+    /// Drop the entries that are gone; their ids.
+    pub(crate) fn sweep(&mut self) -> Vec<TabId> {
+        let gone: Vec<TabId> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.gone())
+            .map(|(view, _)| *view)
+            .collect();
+        for view in &gone {
+            self.entries.remove(view);
+        }
+        gone
     }
 }
 
@@ -304,25 +395,131 @@ mod tests {
 
         // The page narrows for the panel: every tab has the new size,
         // the hidden one included, and the panel is untouched.
-        assert_eq!(sizes.resize(tab, (1200, 1400)), Resized::Page);
+        assert_eq!(
+            sizes.resize(tab, Some(ViewKind::Tab), (1200, 1400)),
+            Resized::Page
+        );
         assert_eq!(sizes.of(tab), (1200, 1400));
         assert_eq!(sizes.of(other), (1200, 1400));
         assert_eq!(sizes.of(panel), (720, 768));
 
         // The panel's own size leaves the page alone.
-        assert_eq!(sizes.resize(panel, (720, 1328)), Resized::Panel);
+        assert_eq!(
+            sizes.resize(panel, Some(ViewKind::Panel), (720, 1328)),
+            Resized::Panel
+        );
         assert_eq!(sizes.of(panel), (720, 1328));
         assert_eq!(sizes.page(), (1200, 1400));
 
         // The shell says both every frame; an unchanged size is nothing.
-        assert_eq!(sizes.resize(tab, (1200, 1400)), Resized::Unchanged);
-        assert_eq!(sizes.resize(panel, (720, 1328)), Resized::Unchanged);
-        assert_eq!(sizes.resize(panel, (0, 0)), Resized::Panel);
+        assert_eq!(
+            sizes.resize(tab, Some(ViewKind::Tab), (1200, 1400)),
+            Resized::Unchanged
+        );
+        assert_eq!(
+            sizes.resize(panel, Some(ViewKind::Panel), (720, 1328)),
+            Resized::Unchanged
+        );
+        assert_eq!(
+            sizes.resize(panel, Some(ViewKind::Panel), (0, 0)),
+            Resized::Panel
+        );
         assert_eq!(sizes.of(panel), (1, 1));
 
         // Once the panel is gone its id is sized like a tab's.
         sizes.remove_panel(panel);
         assert_eq!(sizes.of(panel), (1200, 1400));
+    }
+
+    #[test]
+    fn a_view_the_host_does_not_hold_never_sizes_the_page() {
+        let (tab, refused) = (TabId(1), TabId(9));
+        let mut sizes = ViewSizes::new((1024, 768));
+        // `create_view` refused the page, or Chromium made no browser:
+        // the host has no entry and no size for the id, and the shell
+        // still sizes it for a frame. The page area keeps its size.
+        assert_eq!(sizes.resize(refused, None, (720, 700)), Resized::Unchanged);
+        assert_eq!(sizes.page(), (1024, 768));
+        assert_eq!(sizes.of(tab), (1024, 768));
+        // A panel the host holds whose size went (its `close_view` ran)
+        // is not the page either.
+        assert_eq!(
+            sizes.resize(refused, Some(ViewKind::Panel), (720, 700)),
+            Resized::Unchanged
+        );
+        assert_eq!(sizes.page(), (1024, 768));
+        // A tab's id is the page area, as before, and a panel that has a
+        // size keeps its own.
+        assert_eq!(
+            sizes.resize(tab, Some(ViewKind::Tab), (1200, 700)),
+            Resized::Page
+        );
+        sizes.add_panel(refused, 1.0);
+        assert_eq!(
+            sizes.resize(refused, Some(ViewKind::Panel), (720, 700)),
+            Resized::Panel
+        );
+        assert_eq!(sizes.page(), (1200, 700));
+    }
+
+    struct Entry {
+        name: &'static str,
+        gone: std::cell::Cell<bool>,
+    }
+
+    impl Retires for Entry {
+        fn gone(&self) -> bool {
+            self.gone.get()
+        }
+    }
+
+    fn entry(name: &'static str) -> Entry {
+        Entry {
+            name,
+            gone: std::cell::Cell::new(false),
+        }
+    }
+
+    #[test]
+    fn a_retired_view_is_out_of_the_hosts_reach_before_it_is_swept() {
+        let (tab, panel, other) = (TabId(1), TabId(9), TabId(10));
+        let mut views = Views::new();
+        views.insert(tab, entry("tab"));
+        views.insert(panel, entry("panel"));
+        views.insert(other, entry("other panel"));
+        assert_eq!(views.get(panel).map(|e| e.name), Some("panel"));
+
+        // The panel's page closed itself, or its renderer died: its
+        // browser is closing, and no method of the host may find it.
+        views.get(panel).unwrap().gone.set(true);
+        assert!(views.get(panel).is_none());
+        let mut names: Vec<_> = views.values().map(|e| e.name).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["other panel", "tab"]);
+        let mut ids = views.ids();
+        ids.sort_unstable();
+        assert_eq!(ids, [tab, other]);
+        assert!(!views.is_empty());
+
+        // The sweep drops it and says which, once.
+        assert_eq!(views.sweep(), [panel]);
+        assert_eq!(views.sweep(), []);
+
+        // A close that names a gone view takes nothing, and leaves
+        // nothing behind; a live one is handed over.
+        views.get(other).unwrap().gone.set(true);
+        assert!(views.take(other).is_none());
+        assert_eq!(views.sweep(), []);
+        assert_eq!(views.take(tab).map(|e| e.name), Some("tab"));
+        assert!(views.is_empty());
+    }
+
+    #[test]
+    fn a_host_with_only_retired_views_is_empty() {
+        let mut views = Views::new();
+        views.insert(TabId(9), entry("panel"));
+        views.get(TabId(9)).unwrap().gone.set(true);
+        assert!(views.is_empty());
     }
 
     #[test]

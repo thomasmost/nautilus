@@ -2,7 +2,6 @@
 //! into a [`Frame`] the window uploads under its toolbar.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -28,7 +27,7 @@ use crate::engine::Engine;
 use crate::extensions::ExtensionManager;
 use crate::frame::Frame;
 use crate::input::{self, KeyEventKind};
-use crate::panel::{self, Resized, ViewSizes, dip_size};
+use crate::panel::{self, Resized, Retires, ViewKind, ViewSizes, Views, dip_size};
 use crate::popup::Popups;
 
 /// Two clicks closer than this in time and space count as a double click
@@ -41,9 +40,18 @@ struct TabEntry {
     view: Rc<ViewState>,
 }
 
+impl Retires for TabEntry {
+    fn gone(&self) -> bool {
+        self.view.gone.get()
+    }
+}
+
 /// The engine side of one browser window: its tabs and their frames.
 pub struct TabHost {
-    tabs: HashMap<TabId, TabEntry>,
+    /// The views by id. A side panel whose browser went without the host
+    /// asking stays in it until the next `sweep`, out of every method's
+    /// reach (`panel::Views`).
+    tabs: Views<TabEntry>,
     delegate: Rc<DelegateState>,
     extensions: Rc<ExtensionManager>,
     /// The extension action popups over this window.
@@ -91,7 +99,7 @@ impl TabHost {
     ) -> Result<TabHost, EngineError> {
         let parent = native_handle(parent)?;
         Ok(TabHost {
-            tabs: HashMap::new(),
+            tabs: Views::new(),
             delegate: engine.delegate().clone(),
             extensions: engine.extensions().clone(),
             popups: Popups::new(engine.delegate().clone(), parent),
@@ -111,7 +119,7 @@ impl TabHost {
     }
 
     fn with(&self, tab: TabId, f: impl FnOnce(&TabEntry)) {
-        match self.tabs.get(&tab) {
+        match self.tabs.get(tab) {
             Some(entry) => f(entry),
             None => log::warn!("no engine tab for {tab:?}"),
         }
@@ -127,7 +135,7 @@ impl TabHost {
 
     /// Borrow the tab's latest pixels.
     pub fn with_frame<R>(&self, tab: TabId, f: impl FnOnce(&mut Frame) -> R) -> Option<R> {
-        let entry = self.tabs.get(&tab)?;
+        let entry = self.tabs.get(tab)?;
         Some(f(&mut entry.view.frame.borrow_mut()))
     }
 
@@ -139,7 +147,7 @@ impl TabHost {
     fn keyboard_anchor(&self, tab: TabId) -> ScreenRect {
         let width = self
             .tabs
-            .get(&tab)
+            .get(tab)
             .map_or(0, |entry| entry.view.dip_size.get().0);
         keyboard_anchor(self.origin.get(), width, self.scale.get())
     }
@@ -168,14 +176,7 @@ impl TabHost {
     /// host asking (`ViewState::retire`): the model already closed those
     /// panels and sends no `CloseView` for them.
     fn sweep(&mut self) {
-        let gone: Vec<TabId> = self
-            .tabs
-            .iter()
-            .filter(|(_, entry)| entry.view.gone.get())
-            .map(|(view, _)| *view)
-            .collect();
-        for view in gone {
-            self.tabs.remove(&view);
+        for view in self.tabs.sweep() {
             self.sizes.borrow_mut().remove_panel(view);
         }
     }
@@ -417,7 +418,7 @@ impl TabHostApi for TabHost {
     /// Close the tab's browser, and its developer tools if they are
     /// open. It finishes closing on the message loop.
     fn close_tab(&mut self, tab: TabId) {
-        if let Some(entry) = self.tabs.remove(&tab) {
+        if let Some(entry) = self.tabs.take(tab) {
             // A closed tab is no longer the one a panel opens beside;
             // `show` sets the next one when the window shows a tab.
             if self.shown_tab.get() == Some(tab) {
@@ -523,7 +524,7 @@ impl TabHostApi for TabHost {
     /// `set_content_origin`), so its `<select>` lists and `screenX` are
     /// the panel's and not the page's.
     fn set_view_origin(&mut self, view: TabId, x: i32, y: i32) {
-        if let Some(entry) = self.tabs.get(&view)
+        if let Some(entry) = self.tabs.get(view)
             && entry.view.is_panel()
         {
             entry.view.origin.set((x, y));
@@ -531,9 +532,7 @@ impl TabHostApi for TabHost {
     }
 
     fn has_tab(&self, tab: TabId) -> bool {
-        self.tabs
-            .get(&tab)
-            .is_some_and(|entry| !entry.view.gone.get())
+        self.tabs.get(tab).is_some()
     }
 
     fn navigate(&self, tab: TabId, url: Url) {
@@ -586,7 +585,7 @@ impl TabHostApi for TabHost {
     /// tab's popup widget is holding the others (`popup_pause`), which
     /// lets it go when the widget closes.
     fn show(&self, tab: TabId) {
-        let Some(entry) = self.tabs.get(&tab) else {
+        let Some(entry) = self.tabs.get(tab) else {
             return;
         };
         // A tab that is shown is the window's tab, which is what a side
@@ -609,7 +608,7 @@ impl TabHostApi for TabHost {
     /// debugging it (a hidden renderer answers no input, and the debugger
     /// waits on that answer; `bridge::debugger` decides).
     fn hide(&self, tab: TabId) {
-        let Some(entry) = self.tabs.get(&tab) else {
+        let Some(entry) = self.tabs.get(tab) else {
             return;
         };
         entry.view.hidden.set(true);
@@ -620,7 +619,7 @@ impl TabHostApi for TabHost {
 
     fn set_focused(&self, tab: TabId, focused: bool) {
         log::debug!("tab {tab:?}: focus = {focused}");
-        if let Some(entry) = self.tabs.get(&tab) {
+        if let Some(entry) = self.tabs.get(tab) {
             entry.view.focused.set(focused);
             // The last focused *tab* stands as the opener of tabs Chromium
             // opens on its own; a side panel is none.
@@ -634,10 +633,19 @@ impl TabHostApi for TabHost {
     /// Resize a view, if its size changed. A tab's size is the page area's,
     /// which all tabs of the window share; a side panel's view has its own.
     fn resize_content(&self, tab: TabId, size: PhysicalSize<u32>) {
+        // A view the host does not hold is sized nowhere: the shell sizes
+        // a panel's view for a frame after `create_view` refused it.
+        let kind = self.tabs.get(tab).map(|entry| {
+            if entry.view.is_panel() {
+                ViewKind::Panel
+            } else {
+                ViewKind::Tab
+            }
+        });
         let resized = self
             .sizes
             .borrow_mut()
-            .resize(tab, (size.width, size.height));
+            .resize(tab, kind, (size.width, size.height));
         let scale = self.scale.get();
         let (width, height) = self.sizes.borrow().of(tab);
         let dip = dip_size(width, height, scale);
@@ -651,7 +659,7 @@ impl TabHostApi for TabHost {
                 }
             }
             Resized::Panel => {
-                if let Some(entry) = self.tabs.get(&tab) {
+                if let Some(entry) = self.tabs.get(tab) {
                     entry.view.dip_size.set(dip);
                 }
             }
@@ -672,10 +680,14 @@ impl TabHostApi for TabHost {
         // the two calls below, and nothing of the host's is borrowed then.
         let sizes: Vec<(TabId, (u32, u32))> = {
             let sizes = self.sizes.borrow();
-            self.tabs.keys().map(|id| (*id, sizes.of(*id))).collect()
+            self.tabs
+                .ids()
+                .into_iter()
+                .map(|id| (id, sizes.of(id)))
+                .collect()
         };
         for (id, (width, height)) in sizes {
-            let Some(entry) = self.tabs.get(&id) else {
+            let Some(entry) = self.tabs.get(id) else {
                 continue;
             };
             entry.view.scale.set(scale);
@@ -688,7 +700,7 @@ impl TabHostApi for TabHost {
     }
 
     fn input(&self, tab: TabId, input: EngineInput) {
-        let Some(entry) = self.tabs.get(&tab) else {
+        let Some(entry) = self.tabs.get(tab) else {
             log::warn!("no engine tab for {tab:?}");
             return;
         };
@@ -845,7 +857,7 @@ impl TabHostApi for TabHost {
     /// commands go to the frame the menu was opened in; the rest are the
     /// browser host's tools, at the point the menu was opened.
     fn page_command(&self, tab: TabId, command: PageCommand) {
-        let Some(entry) = self.tabs.get(&tab) else {
+        let Some(entry) = self.tabs.get(tab) else {
             log::warn!("no engine tab for {tab:?}");
             return;
         };
@@ -901,7 +913,7 @@ impl TabHostApi for TabHost {
     }
 
     fn context_menu_closed(&self, tab: TabId) {
-        if let Some(entry) = self.tabs.get(&tab) {
+        if let Some(entry) = self.tabs.get(tab) {
             entry.view.context_menu.borrow_mut().take();
         }
     }
@@ -910,7 +922,7 @@ impl TabHostApi for TabHost {
     /// camera: all that was asked for, or nothing. Chromium ignores an
     /// answer to a request the page has since abandoned.
     fn answer_media_access(&self, tab: TabId, request: u64, allow: bool) {
-        let Some(entry) = self.tabs.get(&tab) else {
+        let Some(entry) = self.tabs.get(tab) else {
             return;
         };
         let held = entry.view.media_requests.borrow_mut().remove(&request);
@@ -957,7 +969,7 @@ impl TabHostApi for TabHost {
 
     /// The tab's latest frame, if it painted one yet.
     fn paint_page(&self, tab: TabId, sink: &mut dyn FnMut(PagePaint<'_>)) {
-        let Some(entry) = self.tabs.get(&tab) else {
+        let Some(entry) = self.tabs.get(tab) else {
             return;
         };
         let mut frame = entry.view.frame.borrow_mut();
@@ -979,10 +991,12 @@ impl TabHostApi for TabHost {
 }
 
 impl Drop for TabHost {
-    /// A window that closes takes its panels with it.
+    /// A window that closes takes its panels with it. A panel that is
+    /// gone already (`sweep`) is dropped without a call: its browser is
+    /// past `on_before_close`, or on its way there.
     fn drop(&mut self) {
-        let views: Vec<TabId> = self.tabs.keys().copied().collect();
-        for view in views {
+        self.sweep();
+        for view in self.tabs.ids() {
             self.delegate.panel_gone(view);
             self.close_tab(view);
         }
