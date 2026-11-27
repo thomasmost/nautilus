@@ -1182,6 +1182,23 @@ impl Bridge {
         }
     }
 
+    /// A page of `extension` (a side panel's, a popup's, a page in a tab)
+    /// attached its `chrome.debugger` to `debuggee`, or detached it: the
+    /// same set and the same show and hide as a worker's report
+    /// (`debugger_report`). The page lane answers the call when this
+    /// returns, so the page's `attach` resolves with the tab shown. A
+    /// debuggee the table cannot name is not queued: it is logged and not
+    /// tracked.
+    pub(crate) fn page_debugger(&self, extension: &str, debuggee: Debuggee, attach: bool) {
+        let known = self.inner.borrow().table.resolve(&debuggee);
+        match known {
+            Some(tab) => self.set_debugged(extension, tab, attach),
+            None => log::warn!(
+                "bridge: {extension}: {debuggee:?} is no Nautilus tab in the table; its debugger is not tracked"
+            ),
+        }
+    }
+
     /// Apply one attach or detach to the set of debuggers, and show or
     /// hide the tab when its debugged state changed.
     fn set_debugged(&self, extension: &str, tab: TabId, attach: bool) {

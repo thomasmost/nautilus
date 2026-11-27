@@ -700,6 +700,12 @@ mod native {
                         bridge.report_tab(tab, chromium, extension)
                     })
                 };
+                let debugger: bridge::hub::DebuggerReports = {
+                    let bridge = bridge.clone();
+                    Box::new(move |extension, debuggee, attach| {
+                        bridge.page_debugger(extension, debuggee, attach)
+                    })
+                };
                 let page_lane = Rc::new(bridge::pages::PageLane::default());
                 delegate.set_page_lane(&page_lane);
                 let hub = bridge::hub::Hub::new(
@@ -708,6 +714,7 @@ mod native {
                     Some(page_lane),
                     table,
                     reporter,
+                    debugger,
                     nudge,
                 );
                 delegate.set_hub(&hub);

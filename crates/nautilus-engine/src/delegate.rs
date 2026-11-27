@@ -693,6 +693,18 @@ impl ViewState {
         self.paused.get() || (self.hidden.get() && !self.debugged.get())
     }
 
+    /// The view's frame has new pixels (`on_paint`). The shell is told
+    /// only for a view it is showing: a tab painted behind another, which
+    /// is one an extension's debugger keeps painted, would otherwise have
+    /// its window redrawn for every frame nobody sees. The frame is kept
+    /// all the same, and showing the view invalidates it (`show_view`), so
+    /// the first frame after that is announced.
+    pub(crate) fn frame_painted(&self) {
+        if !self.hidden.get() {
+            self.report(EngineEvent::FrameReady);
+        }
+    }
+
     /// Report an event that names no tab.
     fn push(&self, event: EngineEvent) {
         self.delegate.push(event);
@@ -1234,7 +1246,7 @@ wrap_render_handler! {
                 frame.paint_view(width as u32, height as u32, pixels, &rects);
             }
             drop(frame);
-            self.view.report(EngineEvent::FrameReady);
+            self.view.frame_painted();
         }
 
         // The page started a drag (`dragstart` on a draggable element,
@@ -2546,6 +2558,25 @@ mod tests {
         let delegate = Rc::new(DelegateState::default());
         let view = view(&delegate, TabId(4));
         view.report(EngineEvent::FrameReady);
+        assert_eq!(delegate.drain(), [EngineEvent::FrameReady(TabId(4))]);
+    }
+
+    #[test]
+    fn a_painted_frame_is_announced_only_for_a_view_the_shell_shows() {
+        let delegate = Rc::new(DelegateState::default());
+        let view = view(&delegate, TabId(4));
+        view.frame_painted();
+        assert_eq!(delegate.drain(), [EngineEvent::FrameReady(TabId(4))]);
+        // Behind another tab, painted only because a debugger is on it:
+        // its frames redraw no window.
+        view.hidden.set(true);
+        view.debugged.set(true);
+        assert!(!view.wants_hidden());
+        view.frame_painted();
+        assert_eq!(delegate.drain(), []);
+        // Shown again, its next frame is announced.
+        view.hidden.set(false);
+        view.frame_painted();
         assert_eq!(delegate.drain(), [EngineEvent::FrameReady(TabId(4))]);
     }
 

@@ -92,6 +92,7 @@ const WINDOWS_JS: &str = include_str!("js/windows.js");
 const RUNTIME_JS: &str = include_str!("js/runtime.js");
 const TAB_GROUPS_JS: &str = include_str!("js/tab_groups.js");
 const COMMANDS_JS: &str = include_str!("js/commands.js");
+const DEBUGGER_JS: &str = include_str!("js/debugger.js");
 const SIDE_PANEL_JS: &str = include_str!("js/side_panel.js");
 // The page lane's transport script, which `pages::page_script` puts first in an
 // extension page's context.
@@ -107,6 +108,7 @@ pub(crate) fn namespaces_script() -> String {
         RUNTIME_JS,
         TAB_GROUPS_JS,
         COMMANDS_JS,
+        DEBUGGER_JS,
         SIDE_PANEL_JS,
     ]
     .join("\n")
@@ -195,7 +197,7 @@ mod tests {
     use super::snapshot::Snapshot;
     use super::transport::{Asker, BridgeCall};
     use super::{
-        COMMANDS_JS, CORE_JS, NO_FACTS, PAGE_TRANSPORT_JS, RUNTIME_JS, SIDE_PANEL_JS,
+        COMMANDS_JS, CORE_JS, DEBUGGER_JS, NO_FACTS, PAGE_TRANSPORT_JS, RUNTIME_JS, SIDE_PANEL_JS,
         TAB_GROUPS_JS, TABS_JS, WINDOWS_JS, namespaces_script, worker_script,
     };
 
@@ -301,11 +303,39 @@ mod tests {
             RUNTIME_JS,
             TAB_GROUPS_JS,
             COMMANDS_JS,
+            DEBUGGER_JS,
             SIDE_PANEL_JS,
             PAGE_TRANSPORT_JS,
         ] {
             assert!(script.contains("'use strict';"));
         }
+    }
+
+    #[test]
+    fn a_pages_debugger_is_reported_by_its_own_script_and_a_workers_by_the_transport() {
+        // The page's script is one of the namespaces, so every bridged
+        // page gets it; it stands aside in a worker, whose transport made
+        // the same wrap over its own port.
+        let script = namespaces_script();
+        let at = |part: &str| script.find(part).expect("the script is there");
+        assert!(at(COMMANDS_JS) < at(DEBUGGER_JS));
+        assert!(at(DEBUGGER_JS) < at(SIDE_PANEL_JS));
+        assert!(DEBUGGER_JS.contains("root.__nautilusTransport ||"));
+        assert!(DEBUGGER_JS.contains("bridge.installed.push('debugger.reports');"));
+        // Its two reports are the calls the state hands to the hub
+        // (`Effect::Debugger`), under the names the worker's transport
+        // uses for its own.
+        for (method, worker) in [
+            ("attached", "'debugger.attached'"),
+            ("detached", "'debugger.detached'"),
+        ] {
+            assert!(
+                DEBUGGER_JS.contains(&format!("Detach, '{method}')"))
+                    || DEBUGGER_JS.contains(&format!("Attach, '{method}')"))
+            );
+            assert!(super::install::BRIDGE_JS.contains(worker));
+        }
+        assert!(DEBUGGER_JS.contains("bridge.call('debugger', method, [debuggee])"));
     }
 
     #[test]

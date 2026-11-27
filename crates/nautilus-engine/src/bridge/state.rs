@@ -93,6 +93,13 @@ pub(crate) enum Effect {
     /// them. It comes out of `call` like any other effect, so a page's
     /// call is held, ordered and refused as the rest are.
     SidePanel(BridgeCall),
+    /// A page's report that its `chrome.debugger` attached to a tab or
+    /// detached from one (`debugger.attached`, `debugger.detached`,
+    /// `js/debugger.js`): the hub hands it to the relay's set of debuggers
+    /// (`Bridge::page_debugger`), which shows or hides the tab, and then
+    /// answers the call. A worker's report never comes here: its relay
+    /// takes it first (`Bridge::worker_call`).
+    Debugger(BridgeCall),
     /// A request the engine makes for itself (a side panel that an action
     /// click or a `setOptions` closes or opens): `Hub::run` gives it to
     /// `DelegateState::request_of_engine`, which takes an engine token.
@@ -109,6 +116,12 @@ pub(crate) const PANELS_EVENT: &str = "bridge.panels";
 /// Whether `call` is one the side panel's stores answer, not the router.
 fn side_panel_call(call: &BridgeCall) -> bool {
     call.namespace == "sidePanel" || (call.namespace == "runtime" && call.method == "getContexts")
+}
+
+/// Whether `call` is a report of an extension's own debugger, which the
+/// relay's set of debuggers takes, not the router.
+fn debugger_report(call: &BridgeCall) -> bool {
+    call.namespace == "debugger" && matches!(call.method.as_str(), "attached" | "detached")
 }
 
 /// A request the model has not answered.
@@ -318,6 +331,9 @@ impl BridgeState {
         }
         if side_panel_call(&call) {
             return vec![Effect::SidePanel(call)];
+        }
+        if debugger_report(&call) {
+            return vec![Effect::Debugger(call)];
         }
         let outcome = router::route(&call, &self.view(&call.extension));
         self.outcome_effects(call.id, &call.extension, outcome)
@@ -1431,6 +1447,66 @@ mod tests {
         assert_eq!(
             state.page_call(from_page.clone(), now),
             vec![Effect::SidePanel(from_page)]
+        );
+    }
+
+    #[test]
+    fn a_debugger_report_is_handed_to_the_hub_from_either_lane() {
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        // A page's report (the worker's own is taken by its relay before
+        // the hub; one that reached here would be handed over the same).
+        let attached = BridgeCall {
+            page: Some(7),
+            asker: Asker::View(TabId(1)),
+            ..call(1, EXT, "debugger", "attached", json!([42]))
+        };
+        assert_eq!(
+            state.page_call(attached.clone(), now),
+            vec![Effect::Debugger(attached)]
+        );
+        let detached = call(2, EXT, "debugger", "detached", json!([{ "targetId": "T" }]));
+        assert_eq!(
+            state.call(detached.clone()),
+            vec![Effect::Debugger(detached)]
+        );
+        // Nothing else of `debugger` is the engine's: Chromium's own
+        // functions are not bridged, and a name nobody knows is refused.
+        assert_eq!(
+            state.call(call(3, EXT, "debugger", "frobnicate", json!([]))),
+            vec![Effect::Reply(
+                3,
+                Err(router::unsupported("debugger", "frobnicate"))
+            )]
+        );
+        assert_eq!(
+            state.call(call(4, EXT, "debugger", "sendCommand", json!([]))),
+            vec![Effect::Reply(
+                4,
+                Err(router::unsupported("debugger", "sendCommand"))
+            )]
+        );
+    }
+
+    #[test]
+    fn a_held_debugger_report_is_handed_to_the_hub_when_its_hold_ends() {
+        // A report from a panel's page (a view in no strip) made while a
+        // strip is pending waits for the strip, like the page's other
+        // calls, and is handed over then.
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a*"), tab(2, "b")])]),
+            &unknown,
+            now,
+        );
+        let report = BridgeCall {
+            page: Some(3),
+            asker: Asker::View(TabId(9)),
+            ..call(3, EXT, "debugger", "attached", json!([42]))
+        };
+        assert!(state.page_call(report.clone(), now).is_empty());
+        assert_eq!(
+            state.table_changed(&live, now),
+            vec![Effect::Debugger(report)]
         );
     }
 

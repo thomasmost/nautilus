@@ -361,8 +361,8 @@ reopen, three to four seconds after the change). Cycle 6 asks the relay instead.
 | `method` | `args` | `result` | Since |
 |----------|--------|----------|-------|
 | any `tabs.*` or `windows.*` function the script bridges, by name (`tabs.query`, `tabs.update`, `windows.get`, …) | the arguments as the extension passed them | the router's answer (`router.rs`): an answer from the engine's strip, a forward to Chromium, a request to the model, or a rejection | 5 |
-| `debugger.attached` | `[debuggee]` | `null` | 1 |
-| `debugger.detached` | `[debuggee]` | `null` | 1 |
+| `debugger.attached` | `[debuggee]` | `null` | 1 (a worker); 7 (a page) |
+| `debugger.detached` | `[debuggee]` | `null` | 1 (a worker); 7 (a page) |
 
 `debuggee` is Chromium's tab id (a number) for an attach or detach by
 `tabId`, or `{"targetId": "<id>"}` for one by `targetId` (the id
@@ -387,6 +387,37 @@ names (`tabId` or `targetId`), and is reported the same way. The bridge
 treats any failure or timeout of a report as no answer and lets the
 extension's own call go on, so a report never blocks a debugger it
 cannot track.
+
+**A page's debugger.** An extension page (a side panel's page, a popup,
+a page in a tab) makes the same two reports through the page lane:
+`js/debugger.js`, one of the namespace scripts, wraps `chrome.debugger`'s
+`attach` and `detach` on Chromium's own object (which is `browser`'s
+too) and listens to `onDetach`, exactly as the worker's transport does,
+and calls `debugger.attached` / `debugger.detached` with the same
+`debuggee`. It does nothing in a worker (`__nautilusTransport` is the
+mark) and nothing where the page has no `chrome.debugger`. The state
+hands the call over as `Effect::Debugger` (after the page's holds, like
+every page call), and `Hub::run` gives the debuggee to
+`Bridge::page_debugger`, which applies it to the same set
+(`bridge/debugger.rs`) with the same show and hide, and only then
+answers the call: so a page's `attach` also resolves with its tab
+shown. Any other `debugger.<name>` call is refused as unsupported
+(Chromium's own functions are never bridged). The set is keyed by
+extension, not by context: Chromium keeps one debugger session per
+extension and tab (measured in `panel.sh panel`: while a panel's page
+holds a session, the worker's `sendCommand` on that tab is answered
+through it and the worker's own `attach` is refused as already
+attached), so a worker's hello that probes the tab finds the page's
+session attached and forgets nothing, and a detach by either context
+ends it for both. Both contexts hear `onDetach` and both report it;
+the second report changes nothing.
+
+**A painted tab the window does not show redraws nothing.** A tab kept
+painted for a debugger paints behind the active one. `on_paint` keeps
+its frame and raises `FrameReady` only for a view the shell is showing
+(`ViewState::frame_painted`, by `ViewState::hidden`); showing the view
+invalidates it (`show_view`), so the first frame after that is
+announced.
 
 The call's `method` is split at its first dot into the namespace and the
 function, and the hub routes it (`hub.rs`, `router.rs`). `tabs.query`, the
@@ -549,9 +580,10 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   page script does not hide it, so a page with its own `runtime.onConnect`
   listener sees the port.
 - `chrome.debugger` called from an extension page (a popup, the options
-  page, the side panel) is not reported: the reports are made by the
-  worker's bridge only, and the page lane makes none. Such a debugger's tab
-  is not kept painted.
+  page, the side panel) is reported as a worker's is, by the page's own
+  script (`js/debugger.js`) over the page lane ("A page's debugger",
+  under "Calls"). A page's report for a debuggee the table cannot name
+  yet is logged and not tracked (a worker's is queued for the next join).
 - An unbridged extension's debugger is not reported. From Phase 5 on every
   installed extension is bridged when it is loaded: a store install
   (`unpack_crx`), "Load unpacked…" and the test control's `load` all go

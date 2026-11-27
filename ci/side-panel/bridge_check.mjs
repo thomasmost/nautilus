@@ -32,7 +32,7 @@ const RELAY_CONTEXT = { contextType: 'TAB', documentUrl: 'chrome-extension://x/n
 // and context). 'separate': objects of its own, whose functions record
 // themselves as `browser.<name>.<function>`. `pinnedBrowser`: its
 // properties cannot be redefined.
-function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null, panels = null, browser = null, pinnedBrowser = false, runtimeApart = false }) {
+function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null, panels = null, browser = null, pinnedBrowser = false, runtimeApart = false, debuggerApi = false }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
@@ -88,6 +88,25 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
     },
   };
   if (!sidePanel) { delete chrome.sidePanel; }
+  // Chromium's own chrome.debugger, in both calling styles. `debuggerState.fail`
+  // makes the next call fail as Chromium fails one (a rejection, or
+  // runtime.lastError in the callback).
+  const debuggerState = { fail: null };
+  if (debuggerApi) {
+    const own = (name) => (...args) => {
+      reached.push(name);
+      const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+      const fail = debuggerState.fail;
+      debuggerState.fail = null;
+      if (callback) {
+        if (fail) { runtime.lastError = { message: fail }; }
+        try { callback(); } finally { delete runtime.lastError; }
+        return undefined;
+      }
+      return fail ? Promise.reject(new Error(fail)) : Promise.resolve();
+    };
+    chrome.debugger = { attach: own('debugger.attach'), detach: own('debugger.detach'), sendCommand: own('debugger.sendCommand'), onDetach: nativeEvent() };
+  }
   if (tabGroups) {
     // Chromium's own tabGroups, none of which may be reached, with its
     // constants and one function the bridge does not name.
@@ -181,10 +200,10 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
     // The worker's marker (bridge.js): the worker primes its tab cache.
     sandbox.__nautilusTransport = { protocol: 1, portHidden: true };
   }
-  for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'tab_groups.js', 'commands.js', 'side_panel.js']) {
+  for (const file of ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'tab_groups.js', 'commands.js', 'debugger.js', 'side_panel.js']) {
     vm.runInContext(read(file), sandbox);
   }
-  return { chrome, reached, calls, answers, messages, filters, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
+  return { chrome, reached, calls, answers, messages, filters, debuggerState, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -724,6 +743,80 @@ for (const viaPage of [false, true]) {
     assert.ok(w.errors.some((e) => e.includes('browser.runtime is not chrome.runtime')));
   }
 }
+// chrome.debugger in an extension page (debugger.js): an attach and a
+// detach are reported to the engine after Chromium made them, the caller's
+// own call resolves only once the engine has answered (it has shown the tab
+// by then), and a report never fails the call. In a worker the transport
+// has made the same wrap, and this script does nothing.
+for (const twin of [null, 'alias']) {
+  const w = world({ viaPage: true, debuggerApi: true, browser: twin });
+  const api = w.chrome.debugger;
+  assert.ok(w.sandbox.__nautilusBridge.installed.includes('debugger.reports'));
+  if (twin) {
+    // `browser.debugger` is the same object, so the wrap is its too.
+    assert.equal(w.sandbox.browser.debugger, api);
+    assert.equal(w.sandbox.browser.debugger.attach, api.attach);
+  }
+  await tick();
+  w.calls.length = 0;
+  w.reached.length = 0;
+  // The promise style, by tab id: the engine's answer is waited for.
+  let shown = false;
+  w.answers.set('debugger.attached', () => new Promise((resolve) => setTimeout(() => { shown = true; resolve(null); }, 20)));
+  await api.attach({ tabId: 7 }, '1.3');
+  assert.equal(shown, true, 'attach resolved before the engine had shown the tab');
+  assert.deepEqual(w.reached, ['debugger.attach']);
+  assert.deepEqual(w.calls, [['debugger', 'attached', [7]]]);
+  // The callback style, by target id.
+  w.calls.length = 0;
+  shown = false;
+  await new Promise((resolve) => api.attach({ targetId: 'T1' }, '1.3', resolve));
+  assert.equal(shown, true);
+  assert.deepEqual(w.calls, [['debugger', 'attached', [{ targetId: 'T1' }]]]);
+  // A detach, both styles.
+  w.calls.length = 0;
+  await api.detach({ tabId: 7 });
+  await new Promise((resolve) => api.detach({ targetId: 'T1' }, resolve));
+  assert.deepEqual(w.calls, [['debugger', 'detached', [7]], ['debugger', 'detached', [{ targetId: 'T1' }]]]);
+  // A call Chromium refuses is not reported, in either style.
+  w.calls.length = 0;
+  w.debuggerState.fail = 'Another debugger is already attached to the tab with id: 7.';
+  await assert.rejects(api.attach({ tabId: 7 }, '1.3'), /Another debugger/);
+  w.debuggerState.fail = 'Another debugger is already attached to the tab with id: 7.';
+  const seen = await new Promise((resolve) => api.attach({ tabId: 7 }, '1.3', () => resolve(w.chrome.runtime.lastError && w.chrome.runtime.lastError.message)));
+  assert.match(seen, /Another debugger/);
+  assert.deepEqual(w.calls, []);
+  // A target that is no tab and no DevTools target is not reported.
+  await api.attach({ extensionId: 'x' }, '1.3');
+  assert.deepEqual(w.calls, []);
+  // A report the engine refuses does not fail the page's own call.
+  w.answers.set('debugger.attached', () => { throw new Error('the extension is not bridged.'); });
+  await api.attach({ tabId: 8 }, '1.3');
+  assert.deepEqual(w.calls, [['debugger', 'attached', [8]]]);
+  // A detach Chromium makes itself (the tab closed) is reported.
+  w.calls.length = 0;
+  api.onDetach.fire({ tabId: 8 }, 'target_closed');
+  await tick();
+  assert.deepEqual(w.calls, [['debugger', 'detached', [8]]]);
+  // sendCommand is Chromium's own, untouched.
+  w.reached.length = 0;
+  await api.sendCommand({ tabId: 8 }, 'Runtime.evaluate', {});
+  assert.deepEqual(w.reached, ['debugger.sendCommand']);
+}
+{
+  // A worker: bridge.js has wrapped chrome.debugger over its own port, and
+  // this script leaves it alone.
+  const w = world({ viaPage: false, debuggerApi: true });
+  await tick();
+  w.calls.length = 0;
+  assert.equal(w.sandbox.__nautilusBridge.installed.includes('debugger.reports'), false);
+  await w.chrome.debugger.attach({ tabId: 7 }, '1.3');
+  assert.deepEqual(w.calls, []);
+  // A page of an extension without the debugger permission gains nothing.
+  const bare = world({ viaPage: true });
+  assert.equal(bare.chrome.debugger, undefined);
+  assert.equal(bare.sandbox.__nautilusBridge.installed.includes('debugger.reports'), false);
+}
 // An extension page's context, as pages.rs composes it: the transport when
 // the context is created, the namespaces (page_defer.js around them) at the
 // first change of the document. Chromium's `chrome` appears between the two,
@@ -780,7 +873,7 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
   };
   vm.createContext(sandbox);
   vm.runInContext(read('page_transport.js'), sandbox);
-  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'tab_groups.js', 'commands.js', 'side_panel.js', 'page_report.js'].map(read).join('\n');
+  const namespaces = ['core.js', 'tabs.js', 'windows.js', 'runtime.js', 'tab_groups.js', 'commands.js', 'debugger.js', 'side_panel.js', 'page_report.js'].map(read).join('\n');
   vm.runInContext(
     `(function (root, install) {\n${read('page_defer.js')}\n})(self, function () {\ntry {\n${namespaces}\n} catch (e) { console.error('nautilus-bridge: ' + e); }\n});`,
     sandbox,

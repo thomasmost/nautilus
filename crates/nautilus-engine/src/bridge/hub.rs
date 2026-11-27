@@ -30,11 +30,14 @@ use super::pattern::Grants;
 use super::side_panel;
 use super::snapshot::Snapshot;
 use super::state::{BridgeState, Effect};
-use super::table::Report;
+use super::table::{Debuggee, Report, debuggee_of};
 use super::transport::Asker;
 
 /// Records a page's report of its own Chromium tab id (`Hub::report_tab`).
 pub(crate) type Reporter = Box<dyn Fn(TabId, i64, &str) -> Report>;
+/// Applies a page's debugger report: the extension, the debuggee, and
+/// whether it attached (`Bridge::page_debugger`).
+pub(crate) type DebuggerReports = Box<dyn Fn(&str, Debuggee, bool)>;
 use super::transport::{BridgeCall, BridgeTransport, CallId};
 use crate::delegate::DelegateState;
 
@@ -141,6 +144,8 @@ pub(crate) struct Hub {
     table: Box<dyn Fn(TabId) -> Option<i64>>,
     /// Records a page's report of its own Chromium tab id in the table.
     reporter: Reporter,
+    /// Records a page's report of its debugger in the set of debuggers.
+    debugger: DebuggerReports,
     /// Asks for another `tick` in a moment.
     nudge: Box<dyn Fn()>,
     captures: RefCell<HashMap<i32, Capture>>,
@@ -161,6 +166,7 @@ impl Hub {
         pages: Option<Rc<PageLane>>,
         table: Box<dyn Fn(TabId) -> Option<i64>>,
         reporter: Reporter,
+        debugger: DebuggerReports,
         nudge: Box<dyn Fn()>,
     ) -> Rc<Hub> {
         Rc::new(Hub {
@@ -172,6 +178,7 @@ impl Hub {
             delegate: Rc::downgrade(delegate),
             table,
             reporter,
+            debugger,
             nudge,
             captures: RefCell::new(HashMap::new()),
             last_capture: Cell::new(CAPTURE_IDS),
@@ -550,6 +557,20 @@ impl Hub {
                 Effect::SidePanel(call) => {
                     let effects = self.side_panel_call(&call);
                     self.run(effects);
+                }
+                Effect::Debugger(call) => {
+                    // The report first, the answer after: the page's
+                    // `attach` resolves once the tab is shown.
+                    match debuggee_of(call.args.first()) {
+                        Some(debuggee) => {
+                            (self.debugger)(&call.extension, debuggee, call.method == "attached");
+                        }
+                        None => log::warn!(
+                            "bridge: {}: a page's debugger report names no tab or target",
+                            call.extension
+                        ),
+                    }
+                    self.reply(call.id, Ok(Value::Null));
                 }
                 Effect::EngineRequest { extension, request } => {
                     if let Some(delegate) = self.delegate.upgrade() {
