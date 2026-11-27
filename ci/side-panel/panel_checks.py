@@ -30,8 +30,10 @@ worker asks it for its suite as it starts.
                  calls an extension makes when it opens its side panel:
                  tabs.group, tabGroups.update, get, query, tabs.ungroup; a
                  declared command and _execute_action through the test
-                 control's extension_command. Captures in <out>/shots-groups:
-                 the strip with the folder, and without it again.
+                 control's extension_command; then a second tab grouped into
+                 an existing group, each read made straight after the call
+                 before it. Captures in <out>/shots-groups: the strip with
+                 the folder, without it again, and with two tabs in one.
   sample-global, sample-site
                  a chrome-extensions-samples side panel cookbook, copied
                  with panel-probe.js added to its page.
@@ -294,16 +296,19 @@ class Harness:
         if self.window is None:
             self.note("the launched browser's window was not found: no captures")
 
-    def shot(self, name, front=False):
+    def shot(self, name, front=False, settle=1.0):
         """Capture the launched browser's first window, or with `front` the
-        one of its windows that is in front now."""
+        one of its windows that is in front now, `settle` seconds from now:
+        the strip slides to a new layout in about an eighth of a second
+        (osmena's STRIP_SLIDE_SECS), and a page repaints within a frame or
+        two, so a second is long after both."""
         window = (self.window_id() if front else None) or self.window
         if not window:
             self.note(f"no window id: {name}.png not captured")
             return
         shots = self.out / ("shots-" + self.mode)
         shots.mkdir(parents=True, exist_ok=True)
-        time.sleep(1.0)  # let the frame with the new layout be painted
+        time.sleep(settle)  # let the frame with the new layout be painted
         path = shots / (name + ".png")
         done = subprocess.run(["screencapture", "-x", "-o", "-l", str(window), str(path)])
         ok = done.returncode == 0 and path.is_file() and path.stat().st_size > 0
@@ -707,6 +712,12 @@ def behavior_checks(h):
 
 def groups_checks(h):
     def grouped():
+        # SHOT_SERIES=1: the same window again and again with no input in
+        # between, to tell a slide caught half way from a layout that stays.
+        if os.environ.get("SHOT_SERIES"):
+            began = time.time()
+            for at in (0.2, 1.0, 3.0, 6.0):
+                h.shot("1-grouped-at-%.1fs" % at, settle=max(0.0, began + at - time.time()))
         h.shot("1-grouped")
         h.send({"extension_command": {"extension": h.ext_id, "name": "probe-command"}})
 
@@ -717,6 +728,7 @@ def groups_checks(h):
         "grouped": grouped,
         "action-command": lambda: h.send({"extension_command": {"extension": h.ext_id, "name": "_execute_action"}}),
         "ungrouped": ungrouped,
+        "joined": lambda: h.shot("3-joined"),
     }
     h.launch(EXT, "https://example.com/ https://example.org/", 90, suite_name="groups", hold=0)
     h.find_window()

@@ -517,6 +517,38 @@
     );
     step('tabGroups.query({}) is empty again', same(await tg.query({}), []));
     await checkpoint('ungrouped');
+
+    // A tab joins a group that exists (what an extension does for a tab its
+    // assistant opens), and each read is made straight after the call
+    // before it resolved, with no wait: it must see that call's change.
+    const other = tabs.find((t) => t.id !== active.id);
+    const message = (error) => error.message;
+    const second = await chrome.tabs.group({ tabIds: [active.id] }).catch(message);
+    const joined = await chrome.tabs.group({ tabIds: other.id, groupId: second }).catch(message);
+    const both = await chrome.tabs.query({ groupId: second }).catch(message);
+    step(
+      'tabs.query({groupId}) straight after tabs.group into an existing group lists both tabs',
+      Number.isInteger(second) && joined === second && Array.isArray(both) && same(both.map((t) => t.id).sort(), [active.id, other.id].sort()),
+      { second, joined, both: Array.isArray(both) ? both.map((t) => [t.id, t.groupId]) : both }
+    );
+    const renamed = await tg.update(second, { title: 'Second' }).catch(message);
+    const read = await tg.get(second).catch(message);
+    step(
+      'tabGroups.get straight after tabGroups.update has the new title',
+      is(renamed, second, 'Second') && is(read, second, 'Second'),
+      { renamed, read }
+    );
+    await checkpoint('joined');
+    const out = await chrome.tabs.ungroup(other.id).then(() => 'undefined', message);
+    const left = await chrome.tabs.query({ groupId: second }).catch(message);
+    const loose = await chrome.tabs.get(other.id).catch(message);
+    step(
+      'tabs.query({groupId}) and tabs.get straight after tabs.ungroup show the tab out of the group',
+      out === 'undefined' && Array.isArray(left) && same(left.map((t) => t.id), [active.id]) && loose.groupId === tg.TAB_GROUP_ID_NONE,
+      { out, left: Array.isArray(left) ? left.map((t) => [t.id, t.groupId]) : left, loose: loose && loose.groupId }
+    );
+    await chrome.tabs.ungroup([active.id]).catch(() => {});
+    step('no group is left', same(await tg.query({}), []));
   }
 
   const suites = { panel: panelSuite, behavior: behaviorSuite, groups: groupsSuite };
