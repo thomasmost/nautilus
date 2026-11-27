@@ -34,6 +34,7 @@ mod input;
 mod keycodes;
 #[cfg(target_os = "macos")]
 mod mac_app;
+mod panel;
 mod popup;
 mod popup_pause;
 mod store;
