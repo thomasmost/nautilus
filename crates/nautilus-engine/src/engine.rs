@@ -58,10 +58,10 @@ pub static INFO: EngineInfo = EngineInfo {
             store_name: "Chrome Web Store",
             store_url: "https://chromewebstore.google.com/",
             store_item_id: crate::extensions::web_store_item_id,
-            // The docked panel arrives in a later change; until then
-            // osmena draws none. The strip is sent regardless: the shell
-            // sends it to every engine that runs extensions.
-            side_panels: false,
+            // The docked side panel: a windowless browser per open panel
+            // (`panel.rs`, `TabHost::create_view`), `chrome.sidePanel`
+            // answered by the engine (`bridge/side_panel.rs`).
+            side_panels: true,
         })
     } else {
         None
