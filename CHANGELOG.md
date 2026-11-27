@@ -133,6 +133,15 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Added
 
+- A tab pulled more than a tab's height off the strip comes away from
+  it, and let go there it opens in a window of its own under the
+  pointer, the size of the one it left. Dropped on another window's
+  strip it lands between the tabs where it was let go, not at the end.
+  A folder is dragged by its chip, whole, along the strip or off it
+  into a window, keeping its name. A tab held at an end of a crowded
+  strip scrolls it, and Escape puts a dragged tab back. A tab that
+  changes window still loads its page again (osmena 880642d).
+
 - A tab whose page is using the microphone or the camera carries a
   recording mark: a red dot left of its icon, slowly fading out and
   in, with the device named under the pointer (osmena draws it;
@@ -191,6 +200,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
   `on_before_browse` and `location.replace` here).
 
 ### Fixed
+
+- On macOS a tab can be dragged. A press on most of a tab moved the
+  whole window instead: the title bar macOS keeps, unseen, over the
+  top of the strip took it. The window is now moved by the grip and
+  the empty stretch right of the "+", as on Windows. A drag also no
+  longer ends when the pointer crosses the window's edge, and a tab
+  that widens as it is picked up stays under the pointer (osmena
+  880642d).
 
 - PDFs are shown again, as a tab's document and inside a page's frame.
   Since extensions' pages were given the browser's tabs and windows,
