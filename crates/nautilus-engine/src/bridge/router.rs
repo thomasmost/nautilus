@@ -909,6 +909,7 @@ pub(crate) fn settle(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use osmena_core::{ExtensionReply, ExtensionRequest, FolderId, TabId, WindowId};
@@ -933,6 +934,7 @@ mod tests {
             ids: &ids,
             grants: &Grants::default(),
             last_focused: None,
+            panels: &HashMap::new(),
         };
         assert_eq!(
             settle(
@@ -969,6 +971,7 @@ mod tests {
         ids: IdSpace,
         grants: Grants,
         last_focused: Option<WindowId>,
+        panels: HashMap<TabId, WindowId>,
     }
 
     impl World {
@@ -990,6 +993,7 @@ mod tests {
                     hosts: vec!["<all_urls>".to_string()],
                 },
                 last_focused: Some(WindowId(1)),
+                panels: HashMap::new(),
             }
         }
 
@@ -1008,6 +1012,7 @@ mod tests {
                 ids: &self.ids,
                 grants: &self.grants,
                 last_focused: self.last_focused,
+                panels: &self.panels,
             }
         }
 
@@ -1112,8 +1117,34 @@ mod tests {
         // A panel's view names its window.
         let mut world = World::two_windows();
         world.snapshot.windows[1].panel_view = Some(TabId(9));
-        let outcome = world.ask(Asker::View(TabId(9)), "tabs", "query", active_current);
+        let outcome = world.ask(
+            Asker::View(TabId(9)),
+            "tabs",
+            "query",
+            active_current.clone(),
+        );
         assert_eq!(brief(&outcome)[0].0, 105);
+        // A panel the strip does not name (the panel of a tab that is
+        // not the active one, or one the shell has not described yet) is
+        // in the window the engine opened it in, not the one focused last.
+        let mut world = World::two_windows();
+        world.panels.insert(TabId(8), WindowId(2));
+        let outcome = world.ask(
+            Asker::View(TabId(8)),
+            "tabs",
+            "query",
+            active_current.clone(),
+        );
+        assert_eq!(brief(&outcome)[0].0, 105);
+        let current = world.ask(Asker::View(TabId(8)), "windows", "getCurrent", json!([]));
+        let Outcome::Answer(current) = current else {
+            panic!("windows.getCurrent answers: {current:?}");
+        };
+        assert_eq!(current["id"], 2);
+        // A window that is gone from the strip is nobody's current window.
+        world.panels.insert(TabId(8), WindowId(7));
+        let outcome = world.ask(Asker::View(TabId(8)), "tabs", "query", active_current);
+        assert_eq!(brief(&outcome)[0].0, 101);
     }
 
     #[test]

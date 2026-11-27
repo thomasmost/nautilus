@@ -1,6 +1,8 @@
 //! The JSON objects extensions receive for tabs and windows.
 
-use osmena_core::{LoadState, WindowId};
+use std::collections::HashMap;
+
+use osmena_core::{LoadState, TabId, WindowId};
 use serde_json::{Value, json};
 
 use super::ids::{IdSpace, TAB_ID_NONE, group_id, window_id};
@@ -26,6 +28,10 @@ pub(crate) struct View<'a> {
     pub ids: &'a IdSpace,
     pub grants: &'a Grants,
     pub last_focused: Option<WindowId>,
+    /// The window of each open side panel's view, as the engine opened
+    /// it (`panel::PanelRegistry`). The strip names only the panel a
+    /// window shows, and only once the shell has described it.
+    pub panels: &'a HashMap<TabId, WindowId>,
 }
 
 impl<'a> View<'a> {
@@ -41,10 +47,16 @@ impl<'a> View<'a> {
 
     /// The window "current" means for `asker`: the one holding the page
     /// that asked, and the last focused one when that is not (yet) known.
+    /// A side panel's page is in the window the engine opened its panel
+    /// in, whether or not the strip names that panel.
     pub(crate) fn current_window(&self, asker: &Asker) -> Option<&'a SnapWindow> {
         let hosting = match asker {
             Asker::Worker => None,
-            Asker::View(view) => self.snapshot.window_of_view(*view),
+            Asker::View(view) => self
+                .panels
+                .get(view)
+                .and_then(|window| self.snapshot.window(*window))
+                .or_else(|| self.snapshot.window_of_view(*view)),
             Asker::Popup { over } => self.snapshot.window_of_view(*over),
         };
         hosting.or_else(|| self.last_focused_window())

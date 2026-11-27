@@ -194,6 +194,7 @@ impl Hub {
             call.method,
             call.asker
         );
+        self.sync_panels();
         // A page's call is held where the state says (`page_call`); a
         // worker's is answered at once.
         let effects = {
@@ -204,6 +205,23 @@ impl Hub {
             }
         };
         self.run(effects);
+    }
+
+    /// Give the state the open side panels' windows, from the registry:
+    /// the router answers "the current window" of a panel's page from
+    /// them (`View::current_window`), and a held call is routed inside the
+    /// state, where the registry is out of reach.
+    fn sync_panels(&self) {
+        let Some(delegate) = self.delegate.upgrade() else {
+            return;
+        };
+        let panels = delegate
+            .panels
+            .borrow()
+            .all()
+            .map(|panel| (panel.view, panel.window))
+            .collect();
+        self.state.borrow_mut().set_panel_windows(panels);
     }
 
     /// `chrome.sidePanel`, and the panel's part of `runtime.getContexts`
@@ -339,6 +357,8 @@ impl Hub {
     /// `Engine::strip_changed`.
     pub(crate) fn strip_changed(self: &Rc<Self>, windows: &[WindowStrip<'_>]) {
         let snapshot = Snapshot::copy_of(windows);
+        // Publishing can route the page calls that waited for it.
+        self.sync_panels();
         let effects = self
             .state
             .borrow_mut()
@@ -392,6 +412,10 @@ impl Hub {
             if !gone.is_empty() {
                 self.state.borrow_mut().page_gone(&gone);
             }
+        }
+        if self.state.borrow().needs_tick() {
+            // A held call may be routed in this tick.
+            self.sync_panels();
         }
         let effects = {
             let mut state = self.state.borrow_mut();

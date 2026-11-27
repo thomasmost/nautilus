@@ -159,6 +159,7 @@ mod tests {
             ids: &ids,
             grants: &grants,
             last_focused: None,
+            panels: &std::collections::HashMap::new(),
         };
         // Names the script sends to the engine that the router does not
         // serve yet: the tab-groups change empties this list.
@@ -273,6 +274,7 @@ mod tests {
             ids: &ids,
             grants: &grants,
             last_focused: None,
+            panels: &std::collections::HashMap::new(),
         };
         let strip = view.strip_json(&snapshot.windows[0], 0);
         let mut sent: Vec<String> = strip

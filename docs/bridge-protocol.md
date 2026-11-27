@@ -961,12 +961,17 @@ it. `ExtensionManager::extension_reply` passes every reply to
 `DelegateState::note_reply` first, which settles what the panel registry
 expected of the request and ends a reply to an engine token there.
 
-**The current window of a panel's page.** For a `sidePanel` call the hub
-asks the panel registry first (`PanelRegistry::window_of`), then the
-strip (`View::current_window`). `tabs` and `windows` calls are the
-router's and know only the strip, which names the one panel a window
-shows: a call from the page of a tab's panel whose tab is not the
-active one resolves `currentWindow` to the window focused last.
+**The current window of a panel's page.** It is the window the engine
+opened the panel in, by the panel registry (`PanelRegistry::window_of`):
+the hub asks it for a `sidePanel` call, and gives the state every open
+panel's window before a call is routed (`Hub::sync_panels`,
+`BridgeState::set_panel_windows`), so `tabs` and `windows` calls, which
+are the router's, answer `currentWindow`, `windows.getCurrent` and
+`WINDOW_ID_CURRENT` from it too (`View::current_window`). The strip
+names only the panel a window shows, and only once the shell has
+described it, which is after a panel's page can make its first call: so
+the strip is asked second. A panel whose window the strip no longer
+holds falls back to the window focused last.
 
 **A panel's page and the tab report.** A panel's page runs
 `js/page_report.js` like every bridged page. Its view is no tab and has

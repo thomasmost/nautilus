@@ -149,6 +149,8 @@ pub(crate) struct BridgeState {
     held_calls: Vec<HeldCall>,
     last_token: u64,
     last_focused: Option<WindowId>,
+    /// The window of each open side panel's view (`set_panel_windows`).
+    panel_windows: HashMap<TabId, WindowId>,
     seq: u64,
 }
 
@@ -159,7 +161,15 @@ impl BridgeState {
             ids: &self.ids,
             grants: self.grants.get(extension).unwrap_or(&NO_GRANTS),
             last_focused: self.last_focused,
+            panels: &self.panel_windows,
         }
+    }
+
+    /// The open side panels' views and their windows, from the engine's
+    /// registry: what "the current window" is for a call from a panel's
+    /// page (`View::current_window`).
+    pub(crate) fn set_panel_windows(&mut self, panels: HashMap<TabId, WindowId>) {
+        self.panel_windows = panels;
     }
 
     /// Whether `tick` has anything to wait for.
