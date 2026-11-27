@@ -101,10 +101,12 @@ pub(crate) struct ManifestFacts {
     pub worker: Option<String>,
     /// `background.type` is `"module"`.
     pub module_worker: bool,
-    /// `side_panel.default_path`. Nothing reads it yet; the first reader
-    /// removes the `allow` below.
-    #[allow(dead_code)]
+    /// `side_panel.default_path`, trimmed; `None` when absent or empty.
     pub side_panel: Option<String>,
+    /// Whether the extension can show a side panel at all: it names a
+    /// default page, or holds the `sidePanel` permission and may set a
+    /// page later with `chrome.sidePanel.setOptions`.
+    pub declares_side_panel: bool,
     /// `commands`, by name. Nothing reads it yet; the first reader removes
     /// the `allow` below.
     #[allow(dead_code)]
@@ -146,6 +148,15 @@ pub(crate) fn manifest_facts(manifest: &serde_json::Value, platform: KeyPlatform
         })
         .unwrap_or_default();
     commands.sort_by(|a, b| a.name.cmp(&b.name));
+    let side_panel = string(
+        manifest
+            .get("side_panel")
+            .and_then(|s| s.get("default_path")),
+    );
+    let side_panel_permitted = manifest
+        .get("permissions")
+        .and_then(|p| p.as_array())
+        .is_some_and(|list| list.iter().any(|p| p.as_str() == Some("sidePanel")));
     ManifestFacts {
         action: action.map(|a| ActionFacts {
             popup: string(a.get("default_popup")),
@@ -159,11 +170,8 @@ pub(crate) fn manifest_facts(manifest: &serde_json::Value, platform: KeyPlatform
             .and_then(|b| b.get("type"))
             .and_then(|t| t.as_str())
             == Some("module"),
-        side_panel: string(
-            manifest
-                .get("side_panel")
-                .and_then(|s| s.get("default_path")),
-        ),
+        declares_side_panel: side_panel_permitted || side_panel.is_some(),
+        side_panel,
         commands,
     }
 }
@@ -1181,6 +1189,7 @@ mod native {
                             self.report_error(format!("cannot remove the extension: {error}"));
                         }
                         None => {
+                            self.delegate.side_panel_uninstalled(&id);
                             // A store download of it is ours to delete.
                             let dir = self.store_dir.join(&id);
                             if crx::is_extension_id(&id)
@@ -1234,6 +1243,7 @@ mod native {
                 return;
             }
             let mut known = Vec::new();
+            let mut listing = Vec::new();
             let mut extensions = Vec::new();
             let mut helper_loaded = false;
             let mut granted: Vec<(String, Grants, bool)> = Vec::new();
@@ -1333,6 +1343,11 @@ mod native {
                     granted.push((id.clone(), manifest.grants.clone(), bridged));
                 }
                 let action = manifest.facts.action.as_ref();
+                listing.push(crate::bridge::side_panel::Listed {
+                    id: id.clone(),
+                    enabled,
+                    side_panel_path: manifest.facts.side_panel.clone(),
+                });
                 known.push(Known {
                     id: id.clone(),
                     popup: action.and_then(|a| a.popup.clone()),
@@ -1350,7 +1365,7 @@ mod native {
                     // Any toolbar action has a title, with or without a
                     // popup: the host decides what a click does.
                     action_title: action.map(|a| a.title.clone().unwrap_or(name)),
-                    side_panel: false,
+                    side_panel: manifest.facts.declares_side_panel,
                     commands: Vec::new(),
                 });
             }
@@ -1368,6 +1383,15 @@ mod native {
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            // The store follows the list: an enabled extension has its
+            // manifest's panel page, one that is off or gone loses its
+            // options and has its open panels closed.
+            self.delegate.side_panels.borrow_mut().listed(&listing);
+            let closes =
+                crate::bridge::side_panel::orphaned(&self.delegate.panels.borrow(), &listing);
+            for (extension, request) in closes {
+                self.delegate.request_of_engine(&extension, request);
+            }
             let bridged: Vec<String> = known
                 .iter()
                 .filter(|k| k.bridged && k.enabled)
@@ -1941,6 +1965,52 @@ mod tests {
                 None,
                 "{page}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod side_panel_manifest_tests {
+    use super::{KeyPlatform, ManifestFacts, manifest_facts};
+    use serde_json::json;
+
+    fn facts(manifest: &serde_json::Value) -> ManifestFacts {
+        manifest_facts(manifest, KeyPlatform::CURRENT)
+    }
+
+    #[test]
+    fn the_default_path_is_read_as_written() {
+        let manifest = json!({
+            "permissions": ["sidePanel"],
+            "side_panel": { "default_path": " sidepanel.html " }
+        });
+        assert_eq!(
+            facts(&manifest).side_panel.as_deref(),
+            Some("sidepanel.html")
+        );
+        assert!(facts(&manifest).declares_side_panel);
+    }
+
+    #[test]
+    fn a_permission_without_a_page_still_declares_a_panel() {
+        // cookbook.sidepanel-site-specific: the page comes from setOptions.
+        let manifest = json!({ "permissions": ["sidePanel", "tabs"] });
+        assert_eq!(facts(&manifest).side_panel, None);
+        assert!(facts(&manifest).declares_side_panel);
+    }
+
+    #[test]
+    fn anything_else_is_no_panel() {
+        for manifest in [
+            json!({}),
+            json!({ "permissions": ["tabs"] }),
+            json!({ "side_panel": {} }),
+            json!({ "side_panel": { "default_path": "" } }),
+            json!({ "side_panel": { "default_path": 3 } }),
+            json!({ "side_panel": "sidepanel.html" }),
+        ] {
+            assert_eq!(facts(&manifest).side_panel, None, "{manifest}");
+            assert!(!facts(&manifest).declares_side_panel, "{manifest}");
         }
     }
 }

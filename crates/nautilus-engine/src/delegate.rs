@@ -37,16 +37,19 @@ use cef::{
 };
 use osmena_core::{
     BlockedSites, Cursor, DownloadPolicy, DownloadReport, DownloadState, EditState, EngineEvent,
-    ExtensionSource, LoadState, Media, MediaKind, MediaRequest, Misspelling, PageContext,
-    PendingTab, RgbaImage, TabId,
+    ExtensionReply, ExtensionRequest, ExtensionSource, LoadState, Media, MediaKind, MediaRequest,
+    Misspelling, PageContext, PendingTab, RgbaImage, TabId,
 };
 use url::Url;
 
 use osmena_engine::PixelRect;
 
+#[cfg(any(windows, target_os = "macos"))]
+use crate::bridge::side_panel::SidePanelStore;
 use crate::extensions::ExtensionManager;
 use crate::frame::Frame;
 use crate::input;
+use crate::panel::{PanelNotice, PanelRegistry, panel_reports, screen_point};
 use crate::popup_pause;
 use crate::store::StoreRequest;
 
@@ -68,6 +71,12 @@ fn pixel_rect(rect: &Rect) -> Option<PixelRect> {
 type NativeCursor = *mut u8;
 #[cfg(not(target_os = "macos"))]
 type NativeCursor = cef::CursorHandle;
+
+/// Set in the token of every `ExtensionRequest` the engine makes for
+/// itself (an action click that opens a panel, a disabled panel
+/// closing): no extension call waits for those replies. The bridge's
+/// own tokens count up from zero and never reach this bit.
+pub(crate) const ENGINE_TOKEN: u64 = 1 << 63;
 
 /// Shared by every tab of one profile: the event queue and the tabs page
 /// content asked for.
@@ -110,6 +119,13 @@ pub(crate) struct DelegateState {
     blocked: RefCell<BlockedSites>,
     /// The id of the next request for the microphone or the camera.
     next_media_request: Cell<u64>,
+    /// The side panels that have a view, and the requests that will
+    /// make one (`panel.rs`).
+    pub(crate) panels: RefCell<PanelRegistry>,
+    /// Panels opened and closed since the extensions were last told.
+    panel_notices: RefCell<Vec<PanelNotice>>,
+    /// The next token of a request the engine makes for itself.
+    next_engine_token: Cell<u64>,
     /// Each tab's browser, by the model's id, with CEF's identifier for it
     /// (kept so a page's browser can be matched without asking CEF under
     /// the borrow): for the screenshot `tabs.captureVisibleTab` takes, and
@@ -124,9 +140,80 @@ pub(crate) struct DelegateState {
     /// The lane extension pages call the bridge on (`bridge/pages.rs`).
     #[cfg(any(windows, target_os = "macos"))]
     page_lane: RefCell<Option<Rc<crate::bridge::pages::PageLane>>>,
+    /// Every extension's side panel options and behaviour
+    /// (`bridge::side_panel`).
+    #[cfg(any(windows, target_os = "macos"))]
+    pub(crate) side_panels: RefCell<SidePanelStore>,
+    /// Where the panel behaviours are written, once the engine said.
+    #[cfg(any(windows, target_os = "macos"))]
+    side_panel_file: RefCell<Option<PathBuf>>,
 }
 
 impl DelegateState {
+    /// Ask the model for something no extension call waits on.
+    pub(crate) fn request_of_engine(&self, extension: &str, request: ExtensionRequest) {
+        let token = ENGINE_TOKEN | self.next_engine_token.get();
+        self.next_engine_token.set(self.next_engine_token.get() + 1);
+        self.note_request(token, extension, &request);
+        self.push(EngineEvent::ExtensionRequest {
+            token,
+            extension: extension.to_string(),
+            request,
+        });
+    }
+
+    /// Every `ExtensionRequest` passes here on its way to the model, so
+    /// that a panel about to open is expected by the time its view is
+    /// asked for.
+    pub(crate) fn note_request(&self, token: u64, extension: &str, request: &ExtensionRequest) {
+        self.panels.borrow_mut().expect(token, extension, request);
+    }
+
+    /// Every reply passes here first. Returns true when the request was
+    /// the engine's own, which nobody else waits for.
+    #[allow(dead_code)] // Task 7 (`engine.rs` via `ExtensionManager`) is the first user.
+    pub(crate) fn note_reply(&self, token: u64, reply: &ExtensionReply) -> bool {
+        self.panels.borrow_mut().settle(token);
+        if token & ENGINE_TOKEN == 0 {
+            return false;
+        }
+        if let ExtensionReply::Refused(why) = reply {
+            log::warn!("the model refused a side panel request of the engine: {why}");
+        }
+        true
+    }
+
+    /// `create_view` made the view of the panel the model asked for.
+    /// False if no request of the engine's was waiting for it.
+    #[allow(dead_code)] // Task 6 (`host.rs` `create_view`) is the first user.
+    pub(crate) fn panel_opened(&self, view: TabId, extension: &str, page: &str) -> bool {
+        let bound = self.panels.borrow_mut().bind(view, extension, page);
+        match bound {
+            Some(open) => {
+                self.panel_notices
+                    .borrow_mut()
+                    .push(PanelNotice::Opened(open));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The panel's view is closing or closed. Nothing happens twice.
+    pub(crate) fn panel_gone(&self, view: TabId) {
+        let removed = self.panels.borrow_mut().remove(view);
+        if let Some(open) = removed {
+            self.panel_notices
+                .borrow_mut()
+                .push(PanelNotice::Closed(open));
+        }
+    }
+
+    #[allow(dead_code)] // Task 7 (the bridge's notices) is the first user.
+    pub(crate) fn take_panel_notices(&self) -> Vec<PanelNotice> {
+        self.panel_notices.take()
+    }
+
     pub(crate) fn drain(&self) -> Vec<EngineEvent> {
         self.events.borrow_mut().drain(..).collect()
     }
@@ -289,6 +376,35 @@ impl DelegateState {
     /// The bridge's hub, while the engine is alive.
     pub(crate) fn hub(&self) -> Option<Rc<crate::bridge::hub::Hub>> {
         self.hub.borrow().upgrade()
+    }
+
+    /// Read the panel behaviours of earlier runs from `file`, where
+    /// later changes are written.
+    #[allow(dead_code)] // Task 7 (`ExtensionManager::start`) is the first user.
+    pub(crate) fn load_side_panel_behaviors(&self, file: PathBuf) {
+        if let Ok(text) = std::fs::read_to_string(&file) {
+            self.side_panels.borrow_mut().load_behaviors(&text);
+        }
+        *self.side_panel_file.borrow_mut() = Some(file);
+    }
+
+    #[allow(dead_code)] // Task 7 (the behaviour's setter) is the first user.
+    pub(crate) fn save_side_panel_behaviors(&self) {
+        let Some(file) = self.side_panel_file.borrow().clone() else {
+            return;
+        };
+        let text = self.side_panels.borrow().behaviors_json();
+        if let Err(e) = std::fs::write(&file, text) {
+            log::warn!("cannot write {}: {e}", file.display());
+        }
+    }
+
+    /// The user removed `extension`: its panel behaviour goes with it.
+    pub(crate) fn side_panel_uninstalled(&self, extension: &str) {
+        let had = self.side_panels.borrow_mut().uninstalled(extension);
+        if had {
+            self.save_side_panel_behaviors();
+        }
     }
 }
 
@@ -541,6 +657,15 @@ pub(crate) struct ViewState {
     /// callback and the permissions it asked for, which an allowing
     /// answer must repeat exactly.
     pub media_requests: RefCell<HashMap<u64, (MediaAccessCallback, u32)>>,
+    /// For a side panel's view: the tab the window shows, shared with
+    /// the host, which stands as the opener of what the panel opens.
+    /// `None` for a tab.
+    panel: Option<Rc<Cell<Option<TabId>>>>,
+    /// The browser is closing without the host having asked (a panel
+    /// whose renderer died, or that closed natively): the host drops
+    /// its entry the next time it looks.
+    #[allow(dead_code)] // Task 6 (`host.rs`) reads it; tests read it now.
+    pub gone: Cell<bool>,
 }
 
 /// Tell a view that was told it is hidden that it is shown again, and
@@ -604,6 +729,52 @@ impl ViewState {
             drag: RefCell::new(None),
             cursor: Cell::new(Cursor::Default),
             media_requests: RefCell::new(HashMap::new()),
+            panel: None,
+            gone: Cell::new(false),
+        }
+    }
+
+    /// The view of a side panel, under the id the model gave it: a
+    /// tab's view in everything but what it reports (`panel_reports`)
+    /// and what it may open. `origin` is its own, not the page's. It
+    /// starts hidden, as `create_view` tells the browser.
+    #[allow(dead_code)] // Task 6 (`host.rs` `create_view`) is the first user.
+    pub(crate) fn panel(
+        view: TabId,
+        delegate: Rc<DelegateState>,
+        parent: cef::sys::cef_window_handle_t,
+        dip_size: (i32, i32),
+        scale: f32,
+        origin: Rc<Cell<(i32, i32)>>,
+        shown_tab: Rc<Cell<Option<TabId>>>,
+    ) -> ViewState {
+        ViewState {
+            panel: Some(shown_tab),
+            hidden: Cell::new(true),
+            ..ViewState::new(view, delegate, parent, dip_size, scale, origin)
+        }
+    }
+
+    pub(crate) fn is_panel(&self) -> bool {
+        self.panel.is_some()
+    }
+
+    /// The tab that opens what this view asks for: itself for a tab,
+    /// the window's shown tab for a panel.
+    pub(crate) fn opener(&self) -> Option<TabId> {
+        match &self.panel {
+            Some(shown) => shown.get(),
+            None => self.tab.get(),
+        }
+    }
+
+    /// A panel's browser is going without the host having asked: the
+    /// host's entry is dead and the panel is no longer open.
+    pub(crate) fn retire(&self) {
+        self.gone.set(true);
+        self.closing.set(true);
+        if let Some(view) = self.tab.get() {
+            self.delegate.panel_gone(view);
         }
     }
 
@@ -632,16 +803,23 @@ impl ViewState {
     /// The tab's name in a log line.
     pub(crate) fn label(&self) -> String {
         match self.tab.get() {
+            Some(view) if self.is_panel() => format!("side panel {view:?}"),
             Some(tab) => format!("{tab:?}"),
             None => "(a popup not yet adopted)".to_string(),
         }
     }
 
     /// Report what `event` makes for this view's tab: now, or when the
-    /// view becomes a tab.
+    /// view becomes a tab. A side panel's view says only what a panel
+    /// may (`panel_reports`).
     pub(crate) fn report(&self, event: impl FnOnce(TabId) -> EngineEvent + 'static) {
         match self.tab.get() {
-            Some(tab) => self.delegate.push(event(tab)),
+            Some(tab) => {
+                let event = event(tab);
+                if !self.is_panel() || panel_reports(&event) {
+                    self.delegate.push(event);
+                }
+            }
             None => self.held.borrow_mut().push(Box::new(event)),
         }
     }
@@ -663,8 +841,11 @@ impl ViewState {
         let Some(url) = url.and_then(|u| Url::parse(&u.to_string()).ok()) else {
             return;
         };
-        let Some(opener) = self.tab.get() else {
-            log::debug!("a popup not yet adopted asked for {url}; ignored");
+        let Some(opener) = self.opener() else {
+            log::debug!(
+                "{} asked for {url} with no tab to open it; ignored",
+                self.label()
+            );
             return;
         };
         match popup_plan(disposition) {
@@ -896,6 +1077,11 @@ wrap_permission_handler! {
             let Some(callback) = callback else {
                 return 0;
             };
+            if self.view.is_panel() {
+                // Nobody can be asked on a panel's behalf: refused.
+                log::info!("refused a media request from {}", self.view.label());
+                return 0;
+            }
             let origin = requesting_origin
                 .map(CefString::to_string)
                 .unwrap_or_default();
@@ -971,12 +1157,12 @@ wrap_render_handler! {
             screen_x: Option<&mut ::std::os::raw::c_int>,
             screen_y: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
-            let (origin_x, origin_y) = self.view.origin.get();
-            if let Some(x) = screen_x {
-                *x = origin_x + view_x;
+            let (x, y) = screen_point(self.view.origin.get(), (view_x, view_y));
+            if let Some(screen_x) = screen_x {
+                *screen_x = x;
             }
-            if let Some(y) = screen_y {
-                *y = origin_y + view_y;
+            if let Some(screen_y) = screen_y {
+                *screen_y = y;
             }
             1
         }
@@ -1174,6 +1360,14 @@ wrap_life_span_handler! {
             _extra_info: Option<&mut Option<cef::DictionaryValue>>,
             _no_javascript_access: Option<&mut ::std::os::raw::c_int>,
         ) -> ::std::os::raw::c_int {
+            if self.view.is_panel() {
+                // A panel is no tab and can be nobody's opener: what it
+                // opens is a tab of its window at the URL, as a
+                // Ctrl-clicked link is, and Chromium's popup is
+                // cancelled.
+                self.view.open_elsewhere(target_url, target_disposition);
+                return 1;
+            }
             // Chromium creates the popup itself, as one more windowless
             // browser, so the page and its popup keep their handles to
             // each other: `window.open` returns the window,
@@ -1225,6 +1419,9 @@ wrap_life_span_handler! {
         fn do_close(&self, _browser: Option<&mut Browser>) -> ::std::os::raw::c_int {
             if !self.view.closing.get() {
                 // The page closed itself (`window.close()`).
+                if self.view.is_panel() {
+                    self.view.retire();
+                }
                 self.view.report(EngineEvent::TabClosed);
             }
             // Let the close proceed; `on_before_close` follows.
@@ -1579,7 +1776,7 @@ wrap_request_handler! {
 
         fn on_render_process_terminated(
             &self,
-            _browser: Option<&mut Browser>,
+            browser: Option<&mut Browser>,
             status: TerminationStatus,
             error_code: ::std::os::raw::c_int,
             error_string: Option<&CefString>,
@@ -1601,6 +1798,14 @@ wrap_request_handler! {
             };
             log::warn!("tab {}: {reason}", self.view.label());
             log::error!("tab crashed: {reason}");
+            if self.view.is_panel() {
+                // The model closes a panel whose view crashed and sends
+                // no `CloseView` for it: the browser is closed here.
+                self.view.retire();
+                if let Some(host) = browser.and_then(|b| b.host()) {
+                    host.close_browser(1);
+                }
+            }
             self.view.report(move |tab| EngineEvent::TabCrashed {
                 tab,
                 reason,
@@ -1634,6 +1839,11 @@ wrap_context_menu_handler! {
             };
             if let Some(callback) = callback {
                 callback.cancel();
+            }
+            if self.view.is_panel() {
+                // No context menu in a side panel: CEF's is declined and
+                // the shell is not told.
+                return 1;
             }
             let (x, y) = (params.xcoord(), params.ycoord());
             *self.view.context_menu.borrow_mut() = Some(MenuPoint {
@@ -2182,11 +2392,12 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     use super::strings_of;
     use super::{
-        DelegateState, EditCommand, PopupPlan, ViewState, edit_command, escape_html, media_request,
-        popup_plan,
+        DelegateState, ENGINE_TOKEN, EditCommand, PopupPlan, ViewState, edit_command, escape_html,
+        media_request, popup_plan,
     };
+    use crate::panel::PanelNotice;
     use cef::WindowOpenDisposition;
-    use osmena_core::{EngineEvent, TabId};
+    use osmena_core::{EngineEvent, ExtensionReply, ExtensionRequest, TabId, WindowId};
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -2203,6 +2414,110 @@ mod tests {
             2.0,
             Rc::new(Cell::new((10, 20))),
         )
+    }
+
+    fn panel_view(delegate: &Rc<DelegateState>, view: TabId, shown: Option<TabId>) -> ViewState {
+        // SAFETY: as in `view`: all-zero is "no window" and nothing here
+        // hands it to Chromium.
+        let parent = unsafe { std::mem::zeroed() };
+        ViewState::panel(
+            view,
+            delegate.clone(),
+            parent,
+            (360, 600),
+            2.0,
+            Rc::new(Cell::new((930, 216))),
+            Rc::new(Cell::new(shown)),
+        )
+    }
+
+    #[test]
+    fn a_panels_view_reports_its_pixels_and_its_end_but_is_no_tab() {
+        let delegate = Rc::new(DelegateState::default());
+        let panel = panel_view(&delegate, TabId(9), Some(TabId(4)));
+        assert!(panel.is_panel());
+        assert!(
+            panel.hidden.get(),
+            "a panel starts hidden, as create_view tells it"
+        );
+        assert_eq!(panel.tab(), Some(TabId(9)));
+        panel.report(|tab| EngineEvent::TitleChanged {
+            tab,
+            title: "Panel".to_string(),
+        });
+        panel.report(|tab| EngineEvent::LoadStateChanged {
+            tab,
+            state: osmena_core::LoadState::Complete,
+        });
+        panel.report(EngineEvent::FrameReady);
+        panel.report(EngineEvent::TabClosed);
+        assert_eq!(
+            delegate.drain(),
+            [
+                EngineEvent::FrameReady(TabId(9)),
+                EngineEvent::TabClosed(TabId(9)),
+            ]
+        );
+        // A tab's view is not filtered.
+        assert!(!view(&delegate, TabId(4)).is_panel());
+    }
+
+    #[test]
+    fn what_a_panel_opens_is_opened_by_the_windows_shown_tab() {
+        let delegate = Rc::new(DelegateState::default());
+        assert_eq!(view(&delegate, TabId(4)).opener(), Some(TabId(4)));
+        assert_eq!(
+            panel_view(&delegate, TabId(9), Some(TabId(4))).opener(),
+            Some(TabId(4))
+        );
+        // No tab has been shown yet: nothing to open beside.
+        assert_eq!(panel_view(&delegate, TabId(9), None).opener(), None);
+    }
+
+    #[test]
+    fn a_panel_that_ends_by_itself_leaves_the_registry_once() {
+        let delegate = Rc::new(DelegateState::default());
+        let request = ExtensionRequest::OpenSidePanel {
+            window: WindowId(1),
+            tab: None,
+            page: "panel.html".to_string(),
+        };
+        delegate.request_of_engine("ext", request.clone());
+        let events = delegate.drain();
+        let [
+            EngineEvent::ExtensionRequest {
+                token,
+                extension,
+                request: sent,
+            },
+        ] = &events[..]
+        else {
+            panic!("one request expected: {events:?}");
+        };
+        assert_ne!(token & ENGINE_TOKEN, 0);
+        assert_eq!((extension.as_str(), sent), ("ext", &request));
+
+        assert!(delegate.panel_opened(TabId(9), "ext", "panel.html"));
+        // The engine's own token: the reply is the engine's to drop.
+        assert!(delegate.note_reply(*token, &ExtensionReply::Done));
+        assert_eq!(
+            delegate.panels.borrow().window_of(TabId(9)),
+            Some(WindowId(1))
+        );
+
+        let panel = panel_view(&delegate, TabId(9), None);
+        panel.retire();
+        panel.retire();
+        assert!(panel.gone.get());
+        assert!(panel.closing.get());
+        assert_eq!(delegate.panels.borrow().window_of(TabId(9)), None);
+        let notices = delegate.take_panel_notices();
+        assert!(matches!(
+            &notices[..],
+            [PanelNotice::Opened(_), PanelNotice::Closed(_)]
+        ));
+        // An extension's own token is not the engine's.
+        assert!(!delegate.note_reply(7, &ExtensionReply::Done));
     }
 
     #[test]

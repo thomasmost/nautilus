@@ -3,10 +3,6 @@
 //! sizes, what a panel reports, the open panels) is here with its tests;
 //! the browser itself is made by `TabHost::create_view` in `host.rs`.
 
-// Task 5 (`delegate.rs`) and Task 6 (`host.rs`) are the first users of this
-// module; the allow goes with the first of them.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use osmena_core::{EngineEvent, ExtensionRequest, TabId, WindowId};
@@ -14,6 +10,7 @@ use url::Url;
 
 /// The panel's width before the shell's first `resize_content`, in
 /// logical pixels. The shell sizes the view on the next frame.
+#[allow(dead_code)] // Task 6 (`host.rs`) is the first user.
 pub(crate) const FIRST_WIDTH_DIP: f32 = 360.0;
 
 /// A side panel path as the model carries it (`SidePanel::page`,
@@ -25,6 +22,7 @@ pub(crate) fn normalize_page(path: &str) -> String {
 
 /// The address a panel's browser loads: `page` under the extension's
 /// root. `None` when `page` leads anywhere else (another scheme or host).
+#[allow(dead_code)] // Task 6 (`host.rs` `create_view`) is the first user.
 pub(crate) fn page_url(extension: &str, page: &str) -> Option<Url> {
     let root = Url::parse(&format!("chrome-extension://{extension}/")).ok()?;
     let url = root.join(&normalize_page(page)).ok()?;
@@ -32,6 +30,7 @@ pub(crate) fn page_url(extension: &str, page: &str) -> Option<Url> {
 }
 
 /// A view's size in logical pixels.
+#[allow(dead_code)] // Task 6 (`host.rs`) is the first user.
 pub(crate) fn dip_size(width: u32, height: u32, scale: f32) -> (i32, i32) {
     (
         ((width as f32 / scale).round() as i32).max(1),
@@ -46,6 +45,7 @@ pub(crate) fn screen_point(origin: (i32, i32), view: (i32, i32)) -> (i32, i32) {
 }
 
 /// What a `resize_content` changed.
+#[allow(dead_code)] // Task 6 (`host.rs` `resize_content`) is the first user.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Resized {
     Unchanged,
@@ -58,12 +58,14 @@ pub(crate) enum Resized {
 /// The sizes of a window's views in physical pixels: one for the page
 /// area, which every tab shares (a hidden tab must have it when it is
 /// shown), and one for each panel view.
+#[allow(dead_code)] // Task 6 (`host.rs`) is the first user.
 #[derive(Debug)]
 pub(crate) struct ViewSizes {
     page: (u32, u32),
     panels: HashMap<TabId, (u32, u32)>,
 }
 
+#[allow(dead_code)] // Task 6 (`host.rs`) is the first user.
 impl ViewSizes {
     pub(crate) fn new(page: (u32, u32)) -> ViewSizes {
         ViewSizes {
@@ -220,6 +222,7 @@ impl PanelRegistry {
 
     /// The window hosting the panel whose view is `view`: the "current
     /// window" of a call made from the panel's page.
+    #[allow(dead_code)] // Task 7 (`bridge::hub`, the panel's window) is the first user.
     pub(crate) fn window_of(&self, view: TabId) -> Option<WindowId> {
         self.get(view).map(|p| p.window)
     }
