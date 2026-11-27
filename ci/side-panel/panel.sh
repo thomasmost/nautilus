@@ -3,6 +3,7 @@
 # with the test hooks: cargo xtask bundle-mac --features test-hooks).
 # usage: ci/side-panel/panel.sh panel
 #        ci/side-panel/panel.sh behavior
+#        ci/side-panel/panel.sh groups
 #        ci/side-panel/panel.sh sample-global <cookbook dir>
 #        ci/side-panel/panel.sh sample-site <cookbook dir>
 # panel_checks.py starts Nautilus through run.sh serve (a scratch data

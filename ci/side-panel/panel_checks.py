@@ -5,6 +5,7 @@
     cargo xtask bundle-mac --features test-hooks
     ci/side-panel/panel.sh panel
     ci/side-panel/panel.sh behavior
+    ci/side-panel/panel.sh groups
     ci/side-panel/panel.sh sample-global <cookbook dir>
     ci/side-panel/panel.sh sample-site <cookbook dir>
 
@@ -25,6 +26,12 @@ worker asks it for its suite as it starts.
                  setPanelBehavior({openPanelOnActionClick: true}) and checks
                  side-panel-behavior.json; the second calls nothing and a
                  click must still open the panel.
+  groups         tab groups and a keyboard command over the bridge, with the
+                 calls an extension makes when it opens its side panel:
+                 tabs.group, tabGroups.update, get, query, tabs.ungroup; a
+                 declared command and _execute_action through the test
+                 control's extension_command. Captures in <out>/shots-groups:
+                 the strip with the folder, and without it again.
   sample-global, sample-site
                  a chrome-extensions-samples side panel cookbook, copied
                  with panel-probe.js added to its page.
@@ -660,6 +667,39 @@ def behavior_checks(h):
         shutil.rmtree(data, ignore_errors=True)
 
 
+# --- tab groups and a command --------------------------------------------------
+
+def groups_checks(h):
+    def grouped():
+        h.shot("1-grouped")
+        h.send({"extension_command": {"extension": h.ext_id, "name": "probe-command"}})
+
+    def ungrouped():
+        h.shot("2-ungrouped")
+
+    handlers = {
+        "grouped": grouped,
+        "action-command": lambda: h.send({"extension_command": {"extension": h.ext_id, "name": "_execute_action"}}),
+        "ungrouped": ungrouped,
+    }
+    h.launch(EXT, "https://example.com/ https://example.org/", 90, suite_name="groups", hold=0)
+    h.find_window()
+    if h.pump(handlers, 80):
+        h.check("the suite ran to its end", True)
+    log = h.log_text()
+    sent = re.findall(r"TEST HOOK: command \d+: extension_command .*", log)
+    h.check("the control handed the declared command to the bridge",
+            len(sent) == 2 and '"probe-command"' in sent[0] and sent[0].endswith("handed to the bridge"), sent)
+    h.check("the control's action command was the click, sent to the bridge",
+            len(sent) == 2 and '"_execute_action"' in sent[1] and sent[1].endswith("sent to the bridge"), sent)
+    delivered = re.findall(r'extension \S+: command "probe-command" for TabId\(\d+\).*', log)
+    h.check("the engine sent the command to a context that listens",
+            len(delivered) == 1 and "no context listens" not in delivered[0], delivered)
+    chords = re.findall(r'extension \S+: command "probe-command" on (\S+)', log)
+    h.note("the chord the shell is told for the command: " + json.dumps(sorted(set(chords))))
+    h.finish()
+
+
 # --- the two samples ----------------------------------------------------------
 
 def prepare_sample(source, dest):
@@ -725,7 +765,7 @@ def sample_checks(h, source):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=["panel", "behavior", "sample-global", "sample-site"])
+    parser.add_argument("mode", choices=["panel", "behavior", "groups", "sample-global", "sample-site"])
     parser.add_argument("source", nargs="?", help="the cookbook directory (sample modes)")
     parser.add_argument("--hold", type=int, default=int(os.environ.get("HOLD", "180")),
                         help="seconds the browser stays open after the checks' time, for the steps by hand")
@@ -747,6 +787,8 @@ def main():
             panel_checks(h)
         elif args.mode == "behavior":
             behavior_checks(h)
+        elif args.mode == "groups":
+            groups_checks(h)
         else:
             sample_checks(h, Path(args.source))
     finally:

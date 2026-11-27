@@ -377,7 +377,136 @@
     await checkpoint('behavior-set');
   }
 
-  const suites = { panel: panelSuite, behavior: behaviorSuite };
+  // Tab groups and a keyboard command over the bridge, with the calls and
+  // the argument shapes an extension makes when it opens its side panel:
+  // tabs.group, then tabGroups.update with a title and a colour, get,
+  // query, and tabs.ungroup. The harness captures the window while the
+  // tab is grouped and sends the command through the test control.
+  async function groupsSuite() {
+    let tabs = await chrome.tabs.query({});
+    for (let i = 0; i < 100 && tabs.length < 2; i += 1) {
+      await sleep(200);
+      tabs = await chrome.tabs.query({});
+    }
+    const active = tabs.find((t) => t.active) || tabs[0];
+    const window = active.windowId;
+    await post('tabs', { id: chrome.runtime.id, active: active.id, window, activeUrl: active.url });
+    const tg = chrome.tabGroups;
+    step('two tabs', tabs.length === 2, tabs.map((t) => t.url));
+    step(
+      'the bridge owns chrome.tabGroups and chrome.commands',
+      !!self.__nautilusBridge &&
+        ['tabs', 'tabGroups', 'commands'].every((name) => self.__nautilusBridge.installed.includes(name)),
+      self.__nautilusBridge && self.__nautilusBridge.installed
+    );
+    step(
+      'the constants an extension reads are there',
+      tg.TAB_GROUP_ID_NONE === -1 && tg.Color.ORANGE === 'orange' && tg.Color.GREY === 'grey',
+      { none: tg.TAB_GROUP_ID_NONE, color: tg.Color }
+    );
+    const events = [];
+    tg.onCreated.addListener((group) => events.push(['tabGroups.onCreated', group]));
+    tg.onUpdated.addListener((group) => events.push(['tabGroups.onUpdated', group]));
+    tg.onRemoved.addListener((group) => events.push(['tabGroups.onRemoved', group]));
+    chrome.tabs.onUpdated.addListener((id, info) => {
+      if ('groupId' in info) events.push(['tabs.onUpdated', { id, groupId: info.groupId }]);
+    });
+    const commands = [];
+    chrome.commands.onCommand.addListener((command, tab) => commands.push({ command, tab: tab && tab.id, window: tab && tab.windowId }));
+    const clicks = [];
+    chrome.action.onClicked.addListener((tab) => clicks.push(tab && tab.id));
+    const names = () => events.map((e) => e[0]);
+    const shape = (title) => ({ id: null, collapsed: false, color: 'grey', title, windowId: window, shared: false });
+    const is = (group, id, title) => same(group, { ...shape(title), id });
+
+    step('the tab starts in no group', active.groupId === tg.TAB_GROUP_ID_NONE, active.groupId);
+    // What a panel opening does first.
+    const id = await chrome.tabs.group({ tabIds: [active.id], createProperties: { windowId: window } }).catch((error) => error.message);
+    step('tabs.group({tabIds, createProperties: {windowId}}) resolves a group id', Number.isInteger(id) && id > 0, id);
+    if (!Number.isInteger(id)) return;
+    // Straight after, with no wait: the group is there.
+    const made = await tg.get(id).catch((error) => error.message);
+    step('tabGroups.get(id) straight after finds the group, named for the extension', is(made, id, 'Nautilus Panel Test Session'), made);
+    const updated = await tg
+      .update(id, { title: 'Phase 7 check', color: tg.Color.ORANGE, collapsed: false })
+      .catch((error) => error.message);
+    step('tabGroups.update(id, {title, color, collapsed}) resolves the group, grey', is(updated, id, 'Phase 7 check'), updated);
+    const got = await tg.get(id).catch((error) => error.message);
+    step('tabGroups.get(id) after the update has the title', is(got, id, 'Phase 7 check'), got);
+    const all = await tg.query({}).catch((error) => error.message);
+    step('tabGroups.query({}) lists the one group', Array.isArray(all) && all.length === 1 && is(all[0], id, 'Phase 7 check'), all);
+    const titled = await tg.query({ title: 'Phase*', windowId: chrome.windows.WINDOW_ID_CURRENT }).catch((error) => error.message);
+    step('tabGroups.query({title, windowId}) finds it by pattern', Array.isArray(titled) && titled.length === 1, titled);
+    const inGroup = await chrome.tabs.query({ groupId: id });
+    step(
+      "tabs.query({groupId}) lists the tab, whose groupId is the group's",
+      inGroup.length === 1 && inGroup[0].id === active.id && inGroup[0].groupId === id,
+      inGroup.map((t) => [t.id, t.groupId])
+    );
+    step(
+      'tabGroups.onCreated fired before the tab was said to be in the group, then onUpdated',
+      await until(() => names().includes('tabGroups.onUpdated'), 10) &&
+        same(names().slice(0, 3), ['tabGroups.onCreated', 'tabs.onUpdated', 'tabGroups.onUpdated']) &&
+        events[1][1].id === active.id &&
+        events[1][1].groupId === id &&
+        is(events[2][1], id, 'Phase 7 check'),
+      events
+    );
+    const moved = await rejection(tg.move(id, { index: 0 }));
+    step('tabGroups.move is refused by the bridge', moved === 'tabGroups.move is not supported.', moved);
+
+    // The harness captures the window here, with the folder in the strip,
+    // and sends the command and then the action command.
+    const declared = await chrome.commands.getAll().catch((error) => error.message);
+    step(
+      'commands.getAll() lists the declared command with its shortcut',
+      Array.isArray(declared) &&
+        declared.length === 1 &&
+        declared[0].name === 'probe-command' &&
+        declared[0].description === 'The command panel_checks.py groups sends' &&
+        typeof declared[0].shortcut === 'string' &&
+        declared[0].shortcut.endsWith('9'),
+      declared
+    );
+    await checkpoint('grouped');
+    step(
+      "the declared command reached commands.onCommand once, with a tab of the window as the strip has it",
+      await until(() => commands.length >= 1, 10) &&
+        commands.length === 1 &&
+        commands[0].command === 'probe-command' &&
+        tabs.some((t) => t.id === commands[0].tab) &&
+        commands[0].window === window,
+      commands
+    );
+    // The control commands for the tab focused last, which is the active
+    // tab when the window has had the keyboard.
+    post('note', `the command's tab is ${commands[0] && commands[0].tab}; the active tab is ${active.id}`);
+    await checkpoint('action-command');
+    step(
+      '_execute_action is the click: action.onClicked ran, and no onCommand',
+      await until(() => clicks.length >= 1, 10) && clicks.length === 1 && tabs.some((t) => t.id === clicks[0]) && commands.length === 1,
+      { clicks, commands }
+    );
+
+    const ungrouped = await chrome.tabs.ungroup([active.id]).then((value) => (value === undefined ? 'undefined' : value), (error) => error.message);
+    step('tabs.ungroup([tab]) resolves undefined', ungrouped === 'undefined', ungrouped);
+    const gone = await rejection(tg.get(id));
+    step('the emptied group is gone', gone === `No group with id: ${id}.`, gone);
+    const after = await chrome.tabs.get(active.id);
+    step('the tab is in no group again', after.groupId === tg.TAB_GROUP_ID_NONE, after.groupId);
+    step(
+      'the tab left the group before tabGroups.onRemoved fired',
+      await until(() => names().includes('tabGroups.onRemoved'), 10) &&
+        same(names().slice(3), ['tabs.onUpdated', 'tabGroups.onRemoved']) &&
+        events[3][1].groupId === -1 &&
+        is(events[4][1], id, 'Phase 7 check'),
+      events.slice(3)
+    );
+    step('tabGroups.query({}) is empty again', same(await tg.query({}), []));
+    await checkpoint('ungrouped');
+  }
+
+  const suites = { panel: panelSuite, behavior: behaviorSuite, groups: groupsSuite };
 
   fetch(HARNESS + '/suite')
     .then((r) => r.json())
