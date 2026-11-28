@@ -301,7 +301,15 @@ under `<dir>` instead, for a second Nautilus beside the first.
   `chrome.*`, a second extension (`ci/side-panel/popup-ext`) installed
   mid-run, a debugger attached from the panel's page to a background
   tab, and that it outlives that page when the panel is closed under
-  it. `groups` checks `tabs.group`, `tabGroups.update`, `get`, `query`
+  it. It also reads the frames of both extension pages (the window's
+  and the tab's) and of the closer tab: an `about:blank` frame with no
+  `src`, one with `src="about:blank"`, a `srcdoc` frame and a blank
+  frame inside a blank one, and the window its `window.open('about:blank')`
+  opens; none may have the bridge or a bridged namespace. And it judges
+  `runtime.sendMessage`'s argument shapes, after the hold (what Chromium
+  does) and during it (what the bridge's hold does): Chromium accepts
+  each valid shape, refuses each refused one, and the hold does the same.
+  `groups` checks `tabs.group`, `tabGroups.update`, `get`, `query`
   and `tabs.ungroup` with the calls an extension makes as it opens its
   panel, each read straight after the call before it, the group
   events' order, a declared command and `_execute_action` through the
