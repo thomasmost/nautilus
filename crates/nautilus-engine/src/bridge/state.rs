@@ -28,9 +28,13 @@ pub(crate) const PUBLISH_WAIT: Duration = Duration::from_secs(2);
 /// when the call's wait is over.
 pub(crate) const UNBRIDGED: &str = "the extension is not bridged.";
 
-/// What a page's call waits for before the engine answers it.
+/// What a call waits for before the engine answers it: a page's, for its
+/// tab or its extension; a worker's, for the tabs' real ids.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Hold {
+    /// A worker's call that reads or names tabs, made before the tabs
+    /// have the ids Chromium knows them by (`BridgeState::worker_call`).
+    Ids,
     /// The tab the page is in is not in the published strip, and a strip is
     /// still pending.
     Tab(TabId),
@@ -40,7 +44,7 @@ pub(crate) enum Hold {
     Queued,
 }
 
-/// A page's call held until its `Hold` is met or the bound has passed.
+/// A call held until its `Hold` is met or the bound has passed.
 struct HeldCall {
     call: BridgeCall,
     hold: Hold,
@@ -143,6 +147,27 @@ struct Telling {
     since: Instant,
 }
 
+/// Whether a worker's `call` reads or names tabs, so that its answer
+/// hands out tab ids or it is given one: every `chrome.tabs` function
+/// (not the bridge's own `stripOf`, which answers a strip's fields for an
+/// id the context already has), and a `chrome.windows` read asked for
+/// with its tabs (`populate`). Nothing else is held for the ids.
+fn hands_out_tab_ids(call: &BridgeCall) -> bool {
+    match call.namespace.as_str() {
+        "tabs" => call.method != "stripOf",
+        "windows" => {
+            matches!(
+                call.method.as_str(),
+                "get" | "getAll" | "getCurrent" | "getLastFocused"
+            ) && call
+                .args
+                .iter()
+                .any(|arg| arg.get("populate").and_then(Value::as_bool) == Some(true))
+        }
+        _ => false,
+    }
+}
+
 /// Whether `call` is one the side panel's stores answer, not the router.
 fn side_panel_call(call: &BridgeCall) -> bool {
     call.namespace == "sidePanel"
@@ -198,8 +223,15 @@ pub(crate) struct BridgeState {
     /// The first refusal among a call's requests.
     refused: HashMap<CallId, String>,
     waiting: Vec<Waiting>,
-    /// Page calls held for their tab or their extension, in arrival order.
+    /// Page calls held for their tab or their extension, and worker calls
+    /// held for the tabs' ids, in arrival order.
     held_calls: Vec<HeldCall>,
+    /// The helper's first listing of Chromium's tab ids has been joined
+    /// (`table_joined`).
+    joined: bool,
+    /// A worker's call waited out its bound for ids that did not come:
+    /// a listing that never comes is waited for once, not by every call.
+    waited_out: bool,
     last_token: u64,
     last_focused: Option<WindowId>,
     /// The window of each open side panel's view (`set_panel_windows`).
@@ -559,8 +591,10 @@ impl BridgeState {
         } else if self
             .held_calls
             .iter()
-            .any(|held| held.call.extension == call.extension)
+            .any(|held| held.hold != Hold::Ids && held.call.extension == call.extension)
         {
+            // Behind the extension's held page calls; a worker's held call
+            // is another lane's, and holds no page up.
             Some(Hold::Queued)
         } else {
             None
@@ -576,6 +610,55 @@ impl BridgeState {
             }
             None => self.call(call),
         }
+    }
+
+    /// A call from a service worker (the relay's lane). One that reads or
+    /// names tabs is held while the ids it would be answered with are not
+    /// yet Chromium's (`ids_pending`), for `PUBLISH_WAIT` at most, and
+    /// then answered in arrival order (`settle`): an extension that keeps
+    /// a synthetic id from its first `tabs.query` and hands it to
+    /// Chromium's own `debugger.attach`, `scripting.executeScript` or
+    /// `tabs.sendMessage` gets "No tab with id". Any other call is
+    /// answered at once.
+    pub(crate) fn worker_call(&mut self, call: BridgeCall, now: Instant) -> Vec<Effect> {
+        if hands_out_tab_ids(&call) && self.ids_pending() {
+            self.held_calls.push(HeldCall {
+                call,
+                hold: Hold::Ids,
+                since: now,
+            });
+            return Vec::new();
+        }
+        self.call(call)
+    }
+
+    /// Whether a worker's tab call would be answered too early: before the
+    /// first strip is published (the answer would be no tabs), or while a
+    /// live tab of the published strip still has a synthetic id that a
+    /// join can replace: the helper's first listing has not come, or a
+    /// strip is waiting for its ids (which the two-second rule ends).
+    fn ids_pending(&self) -> bool {
+        if self.seq == 0 {
+            return self.held.is_some() || !self.waited_out;
+        }
+        let synthetic = self
+            .published
+            .windows
+            .iter()
+            .flat_map(|window| &window.tabs)
+            .any(|tab| !tab.deferred && !self.ids.is_live(tab.id));
+        synthetic && (self.held.is_some() || !(self.joined || self.waited_out))
+    }
+
+    /// The helper's listing of Chromium's tab ids was joined into the
+    /// table: the first one ends the wait of the workers' tab calls.
+    pub(crate) fn table_joined(
+        &mut self,
+        chromium: &dyn Fn(TabId) -> Option<i64>,
+        now: Instant,
+    ) -> Vec<Effect> {
+        self.joined = true;
+        self.table_changed(chromium, now)
     }
 
     fn request(
@@ -649,14 +732,16 @@ impl BridgeState {
         // went with it): its page gave up waiting long before this.
         self.telling
             .retain(|telling| now.saturating_duration_since(telling.since) < PUBLISH_WAIT);
-        // Held page calls, in arrival order within each extension: a call
-        // goes once its hold is met or its bound has passed, and a later call
-        // of the same extension never goes before it. Another extension's
-        // held calls do not wait for it.
-        let mut blocked: BTreeSet<String> = BTreeSet::new();
+        // Held calls, in arrival order within each extension and lane (its
+        // pages, its worker): a call goes once its hold is met or its bound
+        // has passed, and a later call of the same extension and lane never
+        // goes before it. Another extension's held calls do not wait for
+        // it, and neither does the other lane's.
+        let mut blocked: BTreeSet<(String, bool)> = BTreeSet::new();
         let mut kept = Vec::new();
         for held in std::mem::take(&mut self.held_calls) {
-            if blocked.contains(&held.call.extension) {
+            let lane = (held.call.extension.clone(), held.hold == Hold::Ids);
+            if blocked.contains(&lane) {
                 kept.push(held);
                 continue;
             }
@@ -664,11 +749,19 @@ impl BridgeState {
                 Hold::Queued => true,
                 Hold::Served => self.serves(&held.call.extension),
                 Hold::Tab(tab) => self.published.locate(tab).is_some() || self.held.is_none(),
+                Hold::Ids => !self.ids_pending(),
             };
             let waited = now.saturating_duration_since(held.since);
             if !ready && waited < PUBLISH_WAIT {
-                blocked.insert(held.call.extension.clone());
+                blocked.insert(lane);
                 kept.push(held);
+                continue;
+            }
+            if held.hold == Hold::Ids {
+                // Answered with what there is; and when the ids did not
+                // come, the calls after it do not wait for them again.
+                self.waited_out |= !ready;
+                effects.extend(self.call(held.call));
                 continue;
             }
             if self.serves(&held.call.extension) {
@@ -956,6 +1049,184 @@ mod tests {
             later,
         );
         assert_eq!(queried_ids(&mut state), vec![SYNTHETIC_BASE, 102]);
+    }
+
+    /// The tab ids a reply to `tabs.query` carries.
+    fn ids_of(effect: &Effect, call: CallId) -> Vec<i64> {
+        let Effect::Reply(id, Ok(Value::Array(tabs))) = effect else {
+            panic!("{effect:?}");
+        };
+        assert_eq!(*id, call);
+        tabs.iter().map(|t| t["id"].as_i64().unwrap()).collect()
+    }
+
+    #[test]
+    fn a_workers_tab_call_before_the_first_listing_waits_for_the_real_ids() {
+        // The browser starts, and the strip is published with synthetic
+        // ids after two seconds because nothing has listed Chromium's ids
+        // yet (the helper is not loaded). Then an extension's worker
+        // starts and lists the tabs.
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
+        let t0 = Instant::now();
+        let strip = snapshot(vec![window(1, true, vec![tab(1, "a*"), tab(2, "b")])]);
+        state.strip_changed(strip, &unknown, t0);
+        state.tick(&unknown, t0 + PUBLISH_WAIT);
+        let later = t0 + PUBLISH_WAIT + Duration::from_millis(500);
+        // Held: an id answered now would be a synthetic one, which
+        // Chromium's own `debugger`, `scripting` and `tabs.sendMessage`
+        // do not know.
+        assert_eq!(
+            state.worker_call(call(1, EXT, "tabs", "query", json!([{}])), later),
+            vec![]
+        );
+        assert_eq!(
+            state.worker_call(call(2, EXT, "tabs", "get", json!([SYNTHETIC_BASE])), later),
+            vec![]
+        );
+        assert!(state.needs_tick());
+        assert_eq!(state.tick(&unknown, later + Duration::from_secs(1)), vec![]);
+        // The helper's first listing is joined: both are answered, in the
+        // order they came, with Chromium's ids.
+        let effects = state.table_joined(&live, later + Duration::from_secs(1));
+        assert_eq!(effects.len(), 2, "{effects:?}");
+        assert_eq!(ids_of(&effects[0], 1), vec![101, 102]);
+        let Effect::Reply(2, Ok(forward)) = &effects[1] else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(forward["__forward"]["args"][0], 101);
+        assert!(!state.needs_tick());
+        // From now on a worker's call is answered at once.
+        let effects = state.worker_call(call(3, EXT, "tabs", "query", json!([{}])), later);
+        assert_eq!(ids_of(&effects[0], 3), vec![101, 102]);
+    }
+
+    #[test]
+    fn a_workers_tab_call_is_answered_with_what_there_is_at_the_bound() {
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
+        let t0 = Instant::now();
+        // Before the shell has described any strip: held, not answered [].
+        assert_eq!(
+            state.worker_call(call(1, EXT, "tabs", "query", json!([{}])), t0),
+            vec![]
+        );
+        let strip = snapshot(vec![window(1, true, vec![tab(1, "a*")])]);
+        assert_eq!(state.strip_changed(strip, &unknown, t0), vec![]);
+        assert_eq!(
+            state.tick(&unknown, t0 + PUBLISH_WAIT - Duration::from_millis(1)),
+            vec![]
+        );
+        // Nothing ever lists the tab: at the bound the strip is published
+        // with a synthetic id, and the call is answered with it.
+        let effects = state.tick(&unknown, t0 + PUBLISH_WAIT);
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        assert_eq!(ids_of(&effects[0], 1), vec![SYNTHETIC_BASE]);
+        // A listing that never comes is waited for once, not by every call.
+        let after = t0 + PUBLISH_WAIT + Duration::from_secs(5);
+        let effects = state.worker_call(call(2, EXT, "tabs", "query", json!([{}])), after);
+        assert_eq!(ids_of(&effects[0], 2), vec![SYNTHETIC_BASE]);
+
+        // A strip whose tabs the table already knows is published at once,
+        // and the call that waited for the first strip with it.
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
+        assert_eq!(
+            state.worker_call(call(1, EXT, "tabs", "query", json!([{}])), t0),
+            vec![]
+        );
+        let strip = snapshot(vec![window(1, true, vec![tab(1, "a*")])]);
+        let effects = state.strip_changed(strip, &live, t0);
+        assert_eq!(ids_of(&effects[0], 1), vec![101]);
+        // No strip at all within the bound: answered with no tabs.
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
+        assert_eq!(
+            state.worker_call(call(1, EXT, "tabs", "query", json!([{}])), t0),
+            vec![]
+        );
+        let effects = state.tick(&unknown, t0 + PUBLISH_WAIT);
+        assert_eq!(ids_of(&effects[0], 1), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn a_workers_call_that_hands_out_no_tab_id_is_not_held() {
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
+        let t0 = Instant::now();
+        let strip = snapshot(vec![window(1, true, vec![tab(1, "a*")])]);
+        state.strip_changed(strip, &unknown, t0);
+        state.tick(&unknown, t0 + PUBLISH_WAIT);
+        let now = t0 + PUBLISH_WAIT;
+        // A tab call is held.
+        assert_eq!(
+            state.worker_call(call(1, EXT, "tabs", "query", json!([{}])), now),
+            vec![]
+        );
+        // These are answered at once, ahead of it: a registration, the
+        // panels' ids, the commands, a window without its tabs, a group
+        // read, the strip's fields of a tab (which names no new id), and a
+        // side panel call (the hub's).
+        for (id, namespace, method, args) in [
+            (2, "bridge", "listen", json!(["tabs.onCreated"])),
+            (3, "bridge", "panels", json!([])),
+            (4, "commands", "getAll", json!([])),
+            (5, "windows", "getAll", json!([])),
+            (6, "windows", "getAll", json!([{ "populate": false }])),
+            (7, "windows", "getCurrent", json!([])),
+            (8, "tabGroups", "query", json!([{}])),
+            (9, "tabs", "stripOf", json!([SYNTHETIC_BASE])),
+            (10, "sidePanel", "getLayout", json!([])),
+        ] {
+            let effects = state.worker_call(call(id, EXT, namespace, method, args), now);
+            assert_eq!(effects.len(), 1, "{namespace}.{method}: {effects:?}");
+            assert!(
+                matches!(&effects[0], Effect::Reply(reply, _) if *reply == id)
+                    || matches!(&effects[0], Effect::SidePanel(_)),
+                "{namespace}.{method}: {effects:?}"
+            );
+        }
+        // A window asked for with its tabs hands out their ids: held, in
+        // each of the four forms.
+        for (id, method, args) in [
+            (11, "getAll", json!([{ "populate": true }])),
+            (12, "getCurrent", json!([{ "populate": true }])),
+            (13, "getLastFocused", json!([{ "populate": true }])),
+            (14, "get", json!([1, { "populate": true }])),
+        ] {
+            assert_eq!(
+                state.worker_call(call(id, EXT, "windows", method, args), now),
+                vec![],
+                "windows.{method}"
+            );
+        }
+        // All five go when the listing is joined, in the order they came.
+        let effects = state.table_joined(&live, now);
+        let order: Vec<CallId> = effects
+            .iter()
+            .map(|effect| match effect {
+                Effect::Reply(id, Ok(_)) => *id,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(order, vec![1, 11, 12, 13, 14]);
+
+        // A page's calls of the same extension are not queued behind a
+        // worker's held call: each lane keeps its own order.
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all(), true)]);
+        let strip = snapshot(vec![window(1, true, vec![tab(1, "a*")])]);
+        state.strip_changed(strip, &unknown, t0);
+        state.tick(&unknown, t0 + PUBLISH_WAIT);
+        assert_eq!(
+            state.worker_call(call(1, EXT, "tabs", "query", json!([{}])), now),
+            vec![]
+        );
+        let mut from_page = call(2, EXT, "tabs", "query", json!([{}]));
+        from_page.asker = Asker::View(TabId(1));
+        from_page.page = Some(5);
+        let effects = state.page_call(from_page, now);
+        assert_eq!(ids_of(&effects[0], 2), vec![SYNTHETIC_BASE]);
     }
 
     #[test]

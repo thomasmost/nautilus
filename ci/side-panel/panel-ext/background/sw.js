@@ -129,8 +129,9 @@
     const sp = chrome.sidePanel;
     const self_ = chrome.runtime.id;
     // A worker that asks as it is installed asks before the engine has
-    // published its first strip, and is answered with no tabs: wait for
-    // the two.
+    // published its first strip; its call is held until the strip is out
+    // and the tabs have Chromium's ids (two seconds at most), so the first
+    // answer has both tabs. The loop stays for the bound's sake.
     let tabs = await chrome.tabs.query({});
     const firstCount = tabs.length;
     for (let i = 0; i < 100 && tabs.length < 2; i += 1) {

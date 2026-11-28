@@ -202,13 +202,14 @@ impl Hub {
             call.asker
         );
         self.sync_panels();
-        // A page's call is held where the state says (`page_call`); a
-        // worker's is answered at once.
+        // A page's call is held where the state says (`page_call`), and
+        // so is a worker's that reads or names tabs before their ids are
+        // Chromium's (`worker_call`).
         let effects = {
             let mut state = self.state.borrow_mut();
             match lane {
                 Lane::Page => state.page_call(call, Instant::now()),
-                Lane::Worker => state.call(call),
+                Lane::Worker => state.worker_call(call, Instant::now()),
             }
         };
         self.run(effects);
@@ -456,6 +457,20 @@ impl Hub {
     /// the relay calls this when the worker has taken it or it is given up.
     pub(crate) fn told(self: &Rc<Self>, token: u64) {
         let effects = self.state.borrow_mut().told(token);
+        self.run(effects);
+    }
+
+    /// The helper's listing of Chromium's tab ids was joined into the
+    /// table (`BridgeState::table_joined`): the workers' tab calls that
+    /// waited for the first one are answered.
+    pub(crate) fn table_joined(self: &Rc<Self>) {
+        // A held call may be routed here.
+        self.sync_panels();
+        let effects = self
+            .state
+            .borrow_mut()
+            .table_joined(&*self.table, Instant::now());
+        self.forget_closed_tabs();
         self.run(effects);
     }
 

@@ -246,6 +246,14 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- An extension's worker that lists the tabs as it starts is answered
+  with the ids Chromium knows them by. Started early (an extension
+  installed into a running browser, or a quick worker at launch) it
+  could be told there were no tabs, or be given placeholder ids that
+  Chromium's own `debugger`, `scripting` and `tabs.sendMessage` refuse
+  with "No tab with id". Its tab calls now wait, two seconds at most,
+  until the ids are known.
+
 - The first message a side panel's page sends as it loads reaches the
   extension's worker without `sender.tab`, as every later one did and
   as in Chrome, where an extension tells its panel from its content

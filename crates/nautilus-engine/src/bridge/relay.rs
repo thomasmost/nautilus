@@ -1654,16 +1654,23 @@ impl Bridge {
                         }
                     }
                 };
+                let joined = targets.is_some();
                 if let Some(targets) = targets {
                     self.check_worker_targets(&targets);
                     self.apply_pending();
                 }
                 self.run_jobs();
                 // The hub is called with no borrow of `inner` held: it calls
-                // back into this bridge.
+                // back into this bridge. A listing that was joined is what
+                // the workers' first tab calls wait for; one that failed
+                // changes nothing they could be answered from.
                 let hub = self.delegate.hub();
                 if let Some(hub) = hub {
-                    hub.table_changed();
+                    if joined {
+                        hub.table_joined();
+                    } else {
+                        hub.table_changed();
+                    }
                 }
             }
             Pending::Probe => match value {
