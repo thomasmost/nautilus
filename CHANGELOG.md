@@ -246,6 +246,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- `chrome.debugger.attach` and `detach` called from an extension's
+  page (a side panel's among them) no longer wait behind that page's
+  other calls to the browser, which could hold them for seconds while
+  a tab was opening.
+
 - An extension's keyboard shortcut is read as Chrome reads it. One
   written with spaces around its parts (`Ctrl + Shift + Y`) or with a
   modifier named twice was not taken as a shortcut at all; and three

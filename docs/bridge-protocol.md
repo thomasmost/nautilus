@@ -396,8 +396,12 @@ too) and listens to `onDetach`, exactly as the worker's transport does,
 and calls `debugger.attached` / `debugger.detached` with the same
 `debuggee`. It does nothing in a worker (`__nautilusTransport` is the
 mark) and nothing where the page has no `chrome.debugger`. The state
-hands the call over as `Effect::Debugger` (after the page's holds, like
-every page call), and `Hub::run` gives the debuggee to
+hands the call over as `Effect::Debugger` at once, ahead of the page's
+holds (`BridgeState::page_call`: the page's own `attach` or `detach`
+waits for the answer, and a report needs only the tab-id table, which no
+hold waits for; held with the page's other calls it could wait up to the
+page transport's ten seconds), in the order the reports come, and
+`Hub::run` gives the debuggee to
 `Bridge::page_debugger`, which applies it to the same set
 (`bridge/debugger.rs`) with the same show and hide, and only then
 answers the call: so a page's `attach` also resolves with its tab

@@ -580,7 +580,16 @@ impl BridgeState {
     /// published strip and a strip is still pending; `settle` answers it when
     /// that is so, or at `PUBLISH_WAIT`. A call that finds calls held ahead of
     /// it is held behind them, so the calls are answered in arrival order.
+    ///
+    /// A page's debugger report is never held: the page's own
+    /// `chrome.debugger.attach` or `detach` waits for its answer, and what
+    /// a report needs is the tab-id table, which no hold waits for. The
+    /// reports are handed over as they come, so an attach and the detach
+    /// after it keep their order.
     pub(crate) fn page_call(&mut self, call: BridgeCall, now: Instant) -> Vec<Effect> {
+        if debugger_report(&call) {
+            return self.call(call);
+        }
         let hold = if !self.serves(&call.extension) {
             Some(Hold::Served)
         } else if let Asker::View(tab) = call.asker
@@ -1905,25 +1914,63 @@ mod tests {
     }
 
     #[test]
-    fn a_held_debugger_report_is_handed_to_the_hub_when_its_hold_ends() {
-        // A report from a panel's page (a view in no strip) made while a
-        // strip is pending waits for the strip, like the page's other
-        // calls, and is handed over then.
+    fn a_pages_debugger_report_goes_ahead_of_the_holds_and_keeps_its_order() {
+        // The page's own `attach` and `detach` wait for the report's
+        // answer, so a report is never held: not for the page's tab, not
+        // for its extension, and not behind the page's held calls.
+        let report = |id: CallId, method: &str, asker: TabId| BridgeCall {
+            page: Some(3),
+            asker: Asker::View(asker),
+            ..call(id, EXT, "debugger", method, json!([42]))
+        };
+        let query = |id: CallId, asker: TabId| BridgeCall {
+            page: Some(3),
+            asker: Asker::View(asker),
+            ..call(id, EXT, "tabs", "query", json!([{}]))
+        };
+
+        // A panel's page (a view in no strip) while a strip is pending:
+        // its query waits for the strip (`Hold::Tab`), its reports do not,
+        // and attach comes before detach as they were made.
         let (mut state, now) = started(vec![tab(1, "a*")]);
         state.strip_changed(
             snapshot(vec![window(1, true, vec![tab(1, "a*"), tab(2, "b")])]),
             &unknown,
             now,
         );
-        let report = BridgeCall {
-            page: Some(3),
-            asker: Asker::View(TabId(9)),
-            ..call(3, EXT, "debugger", "attached", json!([42]))
-        };
-        assert!(state.page_call(report.clone(), now).is_empty());
+        assert!(state.page_call(query(1, TabId(9)), now).is_empty());
+        let attached = report(2, "attached", TabId(9));
+        let detached = report(3, "detached", TabId(9));
         assert_eq!(
-            state.table_changed(&live, now),
-            vec![Effect::Debugger(report)]
+            state.page_call(attached.clone(), now),
+            vec![Effect::Debugger(attached)],
+            "a report waited behind the page's held call"
+        );
+        assert_eq!(
+            state.page_call(detached.clone(), now),
+            vec![Effect::Debugger(detached)]
+        );
+        // The query is still held, and goes when the strip is published.
+        let effects = state.table_changed(&live, now);
+        assert!(
+            matches!(&effects[..], [Effect::Reply(1, Ok(_))]),
+            "{effects:?}"
+        );
+
+        // An extension the bridge does not serve yet: the report is
+        // handed over at once all the same (its page's debugger is on the
+        // tab whatever the engine has listed), ahead of the held call.
+        let mut state = BridgeState::default();
+        let t0 = Instant::now();
+        assert!(state.page_call(query(1, TabId(1)), t0).is_empty());
+        let attached = report(2, "attached", TabId(1));
+        assert_eq!(
+            state.page_call(attached.clone(), t0),
+            vec![Effect::Debugger(attached)]
+        );
+        assert_eq!(
+            state.tick(&unknown, t0 + PUBLISH_WAIT),
+            vec![Effect::Reply(1, Err(UNBRIDGED.to_string()))]
         );
     }
 
