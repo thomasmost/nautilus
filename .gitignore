@@ -4,3 +4,4 @@
 .env
 .DS_Store
 ci/side-panel/out/
+__pycache__/
