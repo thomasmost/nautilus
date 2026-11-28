@@ -917,7 +917,10 @@ Upstream causes and the features they block are tracked in
   - Every tab group is grey: a folder has no colour, and a colour
     passed to `tabGroups.update` is ignored. `tabGroups.move` is
     refused and `tabGroups.onMoved` never fires. Tabs are grouped
-    within their own window only.
+    within their own window only: `tabs.group` with tabs of two
+    windows, or into a group or a window that is not the tabs' own,
+    is refused (`Tabs can only be grouped within their own window.`),
+    where Chrome moves the tabs to the group's window.
   - `commands.getAll` reports the shortcut a command declares even
     when a Nautilus shortcut has the keys and the command can never
     fire (Settings shows which are not active). An extension's

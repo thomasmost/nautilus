@@ -1204,6 +1204,20 @@ group.
 `tabGroups.TAB_GROUP_ID_NONE` and `tabGroups.Color` are Chromium's own
 values, copied by `define`.
 
+**Grouping across windows is refused, where Chrome moves the tabs**
+(`groups.rs`, `CROSS_WINDOW`). In Chrome `tabs.group` with tabs of more
+than one window, with a `groupId` of a group in another window, or with
+`createProperties.windowId` naming another window than the tabs' own,
+moves the tabs into the target window and groups them there. Here each
+of the three rejects with `Tabs can only be grouped within their own
+window.` and nothing moves: a folder gathers tabs of one window where
+they are, the model has no request that moves a tab between windows for
+it (`tabs.move` to another window is refused the same way), and the
+bridge does not make one out of two. An extension that gathers tabs
+from several windows into one group gets the rejection; one that groups
+the tab it works on (the Claude extension) never meets it. Decided, not
+planned to change.
+
 **When a group call resolves** (`router::settle`, `Then::Group`). Each
 resolves on the published strip that shows its own change, so a read
 made straight after the promise sees it; a strip published since the
