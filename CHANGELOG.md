@@ -288,7 +288,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
   moment, until the worker has been told which Chromium tab the panel
   is; before, the message got there first. A script that wraps
   `runtime.sendMessage` while that hold is in place (a library does it
-  at load) keeps its wrapper once the hold ends.
+  at load) keeps its wrapper once the hold ends. A call whose argument
+  shape Chromium refuses throws at once, as Chromium's does; any other
+  argument error comes after the hold. `chrome.tabs.create` answers with
+  the new tab's Chromium id once the page has reported it, so an
+  extension does not keep an id that the tab then replaces.
 
 - A side panel's page that sends a message and closes itself, with the
   message still held (the hold above), no longer loses that message: the
