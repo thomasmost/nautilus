@@ -214,6 +214,8 @@
     // stays Chromium's, and the namespace is not refused for it.
     try {
       window.close = function () {
+        // A message the page holds goes before the engine is asked to close it.
+        if (typeof root.__nautilusHoldFlush === 'function') { root.__nautilusHoldFlush(); }
         bounded(bridge.call('sidePanel', 'closeSelf', []), CLOSE_WAIT).then(
           (closed) => {
             if (closed === false) nativeClose();

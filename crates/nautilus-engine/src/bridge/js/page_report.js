@@ -118,6 +118,11 @@
     });
     // An answer that never comes is not waited for past the report's bound.
     answerTimer = setTimeout(letGo, REPORT_WAIT_MS);
+    // A page that goes away lets its held messages go first, so they are not
+    // lost with it. side_panel.js's window.close calls the same flush before
+    // it asks the engine to close the page.
+    root.__nautilusHoldFlush = letGo;
+    if (typeof root.addEventListener === 'function') { root.addEventListener('pagehide', letGo); }
   }
 
   var timer = setTimeout(release, REPORT_WAIT_MS);

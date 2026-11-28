@@ -290,6 +290,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
   `runtime.sendMessage` while that hold is in place (a library does it
   at load) keeps its wrapper once the hold ends.
 
+- A side panel's page that sends a message and closes itself, with the
+  message still held (the hold above), no longer loses that message: the
+  held messages go when the page is hidden for good, and when its own
+  `window.close()` asks the engine to close it.
+
 - `runtime.getContexts` in an extension with a side panel answers for
   the moment it was called. The side panels in the answer were read
   only once Chromium's part had come back, so an extension that asks

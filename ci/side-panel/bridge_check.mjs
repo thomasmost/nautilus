@@ -1248,7 +1248,12 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
   };
   // The engine's word to this page, as the page lane delivers an event.
   const tell = (event, args) => sandbox.__nautilusBridgeDeliver(JSON.stringify({ event, args }));
-  return { sandbox, observers, errors, sent, reports, events, reached, chrome, mutate, messages, messageState, nativeSendMessage, tell };
+  // The page's own events: `pagehide` (the page goes away), delivered as a
+  // browser would deliver it.
+  const listeners = {};
+  sandbox.addEventListener = (type, listener) => { (listeners[type] = listeners[type] || []).push(listener); };
+  const fire = (type) => { for (const listener of listeners[type] || []) listener({ type }); };
+  return { sandbox, observers, errors, sent, reports, events, reached, chrome, mutate, messages, messageState, nativeSendMessage, tell, fire };
 }
 
 {
@@ -1900,6 +1905,39 @@ function loadWorker(runtime) {
   b.tell('bridge.reported', [{ panel: true }]);
   b.tell('bridge.told', []);
   assert.deepEqual(b.messages, [['through browser']]);
+}
+{
+  // The page goes away during the hold (a panel that sends and then closes
+  // itself): the messages it holds go at its pagehide, not lost with it.
+  const p = pageContext({ sidePanel: true });
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50 });
+  p.mutate();
+  const sent = p.sandbox.chrome.runtime.sendMessage('last words');
+  await tick(); await tick();
+  p.tell('bridge.reported', [{ panel: true }]);
+  assert.deepEqual(p.messages, [], 'the message left before the engine said its id was told');
+  p.fire('pagehide');
+  assert.deepEqual(p.messages, [['last words']], 'a held message was lost when the page went away');
+  assert.deepEqual(await sent, { heard: 'last words' });
+  p.tell('bridge.told', []);
+  assert.deepEqual(p.messages, [['last words']]);
+}
+{
+  // The page's own window.close() asks the engine to close it: a held message
+  // goes before the engine is asked, so it is not lost with the page.
+  const p = pageContext({ sidePanel: true });
+  p.sandbox.window = p.sandbox;
+  p.sandbox.top = p.sandbox;
+  p.sandbox.close = () => {};
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50 });
+  p.mutate();
+  const sent = p.sandbox.chrome.runtime.sendMessage('before close');
+  await tick(); await tick();
+  p.tell('bridge.reported', [{ panel: true }]);
+  p.sandbox.window.close();
+  assert.deepEqual(p.messages, [['before close']], 'a held message was not sent before the close was asked');
+  assert.deepEqual(await sent, { heard: 'before close' });
+  assert.ok(p.sent.some((m) => m.ns === 'sidePanel' && m.method === 'closeSelf'), 'the close was not asked of the engine');
 }
 // window.close() in an extension page. An extension with the "sidePanel"
 // permission asks the engine first, for at most half a second: a side
