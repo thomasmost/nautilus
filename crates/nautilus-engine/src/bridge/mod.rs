@@ -248,8 +248,8 @@ mod tests {
     use super::snapshot::Snapshot;
     use super::transport::{Asker, BridgeCall};
     use super::{
-        COMMANDS_JS, CORE_JS, DEBUGGER_JS, NO_FACTS, PAGE_TRANSPORT_JS, RUNTIME_JS, SIDE_PANEL_JS,
-        TAB_GROUPS_JS, TABS_JS, WINDOWS_JS, namespaces_script, worker_script,
+        COMMANDS_JS, CORE_JS, DEBUGGER_JS, NO_FACTS, RUNTIME_JS, SIDE_PANEL_JS, TAB_GROUPS_JS,
+        TABS_JS, WINDOWS_JS, namespaces_script, worker_script,
     };
 
     /// The names in `key: ['a', 'b']` of a namespace script.
@@ -264,6 +264,17 @@ mod tests {
             .collect()
     }
 
+    // What is left here of the tests that read the scripts' text
+    // (2026-11-27). A script's behaviour is checked where the script runs,
+    // in `ci/side-panel/bridge_check.mjs`: that a replaced namespace has
+    // nothing of Chromium's left, the pin, both globals, the refusal, the
+    // events, the debugger's reports. A test that only asserted a script
+    // contains some text proved none of that and is gone. The ones kept
+    // each hold a script to something on the Rust side, which the node
+    // check cannot see: the names a script sends against the router and
+    // the side panel's routes, the lists of Chromium's own functions a
+    // script lets through, the strip's fields, and the composition.
+
     #[test]
     fn every_function_of_a_replaced_namespace_is_ours() {
         let snapshot = Snapshot::default();
@@ -277,6 +288,8 @@ mod tests {
             panels: &std::collections::HashMap::new(),
             facts: &NO_FACTS,
         };
+        // Kept: the node check cannot ask the router. Every name a script
+        // sends to the engine has a row there.
         for (namespace, script) in [
             ("tabs", TABS_JS),
             ("windows", WINDOWS_JS),
@@ -307,167 +320,45 @@ mod tests {
                 );
             }
         }
-        // Only these two are Chromium's own functions, and neither walks
-        // a tab strip.
+        // Kept: the node check shows that the functions its stand-in has
+        // do not reach Chromium, which says nothing of a name its stand-in
+        // lacks. These lists are every function and event of Chromium's
+        // own that a script lets through: `tabs.sendMessage` and
+        // `tabs.connect`, which walk no tab strip, the zoom event, and
+        // nothing of `windows`, `tabGroups` or `commands`.
         assert_eq!(list(TABS_JS, "direct"), ["sendMessage", "connect"]);
-        assert!(list(WINDOWS_JS, "direct").is_empty());
-        // Whatever else Chromium defines is replaced by a rejection, and
-        // whatever events it has that the engine does not fire are inert.
-        assert!(CORE_JS.contains("target[key] = unsupported(namespace, key);"));
-        assert!(CORE_JS.contains("target[key] = new BridgeEvent(null);"));
-        assert!(CORE_JS.contains("configurable: false, writable: false"));
-        // One place puts a replacement in, for `chrome` and for the
-        // `browser` global beside it: the core's `pin`, which `define`
-        // and the hand-written sidePanel both go through. No namespace
-        // script sets a property of `chrome` itself, so none can cover
-        // one global and miss the other.
-        assert!(CORE_JS.contains("var other = root.browser;"));
-        assert!(CORE_JS.contains("[chrome, twin].forEach(function (holder) {"));
-        assert!(CORE_JS.contains("install(namespace, build(namespace, spec, source))"));
-        assert!(SIDE_PANEL_JS.contains("bridge.pin('sidePanel', Object.freeze(api))"));
-        for script in [
-            TABS_JS,
-            WINDOWS_JS,
-            TAB_GROUPS_JS,
-            COMMANDS_JS,
-            SIDE_PANEL_JS,
-        ] {
-            assert!(!script.contains("Object.defineProperty(chrome,"));
-            assert!(!script.contains("root.browser"));
-        }
-        for (namespace, script) in [
-            ("tabs", TABS_JS),
-            ("windows", WINDOWS_JS),
-            ("tabGroups", TAB_GROUPS_JS),
-        ] {
-            assert!(script.contains(&format!("bridge.define('{namespace}', {{")));
-        }
-        assert!(COMMANDS_JS.contains("bridge.defineInPlace('commands', {"));
-        // What the bridge wraps on Chromium's own runtime and debugger
-        // objects holds for `browser` because the object is one.
-        assert!(CORE_JS.contains("same('runtime');"));
-        assert!(CORE_JS.contains("same('debugger');"));
-        for script in [
-            CORE_JS,
-            TABS_JS,
-            WINDOWS_JS,
-            RUNTIME_JS,
-            TAB_GROUPS_JS,
-            COMMANDS_JS,
-            DEBUGGER_JS,
-            SIDE_PANEL_JS,
-            PAGE_TRANSPORT_JS,
-        ] {
-            assert!(script.contains("'use strict';"));
-        }
-    }
-
-    #[test]
-    fn a_pages_debugger_is_reported_by_its_own_script_and_a_workers_by_the_transport() {
-        // The page's script is one of the namespaces, so every bridged
-        // page gets it; it stands aside in a worker, whose transport made
-        // the same wrap over its own port.
-        let script = namespaces_script();
-        let at = |part: &str| script.find(part).expect("the script is there");
-        assert!(at(COMMANDS_JS) < at(DEBUGGER_JS));
-        assert!(at(DEBUGGER_JS) < at(SIDE_PANEL_JS));
-        assert!(DEBUGGER_JS.contains("root.__nautilusTransport ||"));
-        assert!(DEBUGGER_JS.contains("bridge.installed.push('debugger.reports');"));
-        // Its two reports are the calls the state hands to the hub
-        // (`Effect::Debugger`), under the names the worker's transport
-        // uses for its own.
-        for (method, worker) in [
-            ("attached", "'debugger.attached'"),
-            ("detached", "'debugger.detached'"),
-        ] {
-            assert!(
-                DEBUGGER_JS.contains(&format!("Detach, '{method}')"))
-                    || DEBUGGER_JS.contains(&format!("Attach, '{method}')"))
-            );
-            assert!(super::install::BRIDGE_JS.contains(worker));
-        }
-        assert!(DEBUGGER_JS.contains("bridge.call('debugger', method, [debuggee])"));
-    }
-
-    #[test]
-    fn tab_groups_and_commands_are_replaced_whole_and_refused_when_they_cannot_be() {
-        assert_eq!(
-            list(TAB_GROUPS_JS, "bridged"),
-            ["get", "query", "update", "move"]
-        );
-        assert_eq!(
-            list(TAB_GROUPS_JS, "events"),
-            ["onCreated", "onUpdated", "onMoved", "onRemoved"]
-        );
-        assert_eq!(list(COMMANDS_JS, "bridged"), ["getAll"]);
-        assert_eq!(list(COMMANDS_JS, "events"), ["onCommand"]);
-        // Nothing of either is Chromium's own function.
-        for script in [TAB_GROUPS_JS, COMMANDS_JS] {
+        assert_eq!(list(TABS_JS, "nativeEvents"), ["onZoomChange"]);
+        for script in [WINDOWS_JS, TAB_GROUPS_JS, COMMANDS_JS] {
             assert!(list(script, "direct").is_empty());
-            assert!(list(script, "optional").is_empty());
             assert!(list(script, "nativeEvents").is_empty());
         }
-        // tabs.group and tabs.ungroup are the engine's too.
-        for method in ["group", "ungroup"] {
-            assert!(list(TABS_JS, "bridged").contains(&method.to_string()));
+        for script in [TAB_GROUPS_JS, COMMANDS_JS] {
+            assert!(list(script, "optional").is_empty());
         }
-        // Each is replaced only where Chromium defines it.
-        assert!(TAB_GROUPS_JS.contains("!root.chrome.tabGroups"));
-        assert!(COMMANDS_JS.contains("!root.chrome.commands"));
-        // Both come before the side panel's script, which is last.
-        let script = namespaces_script();
-        let at = |part: &str| script.find(part).expect("the script is there");
-        assert!(at(TABS_JS) < at(TAB_GROUPS_JS));
-        assert!(at(TAB_GROUPS_JS) < at(COMMANDS_JS));
-        assert!(at(COMMANDS_JS) < at(SIDE_PANEL_JS));
     }
 
     #[test]
-    fn every_side_panel_function_is_ours() {
-        // The members the script declares as the engine's, and nothing else.
-        assert_eq!(
-            list(SIDE_PANEL_JS, "bridged"),
-            [
-                "open",
-                "close",
-                "getOptions",
-                "setOptions",
-                "getPanelBehavior",
-                "setPanelBehavior",
-                "getLayout"
-            ]
-        );
-        assert_eq!(list(SIDE_PANEL_JS, "events"), ["onOpened", "onClosed"]);
-        for method in list(SIDE_PANEL_JS, "bridged") {
-            assert!(side_panel::is_method(&method), "{method}");
-            // Each is defined on the object the script installs.
-            assert!(
-                SIDE_PANEL_JS.contains(&format!("      {method}: callbackable(")),
-                "{method}"
-            );
+    fn every_side_panel_function_is_one_the_engine_routes() {
+        // Kept: the node check holds `chrome.sidePanel` to exactly these
+        // members (its `Object.keys` assertion); this holds the engine to
+        // routing each of them, and to refusing a name that is not one.
+        for method in [
+            "open",
+            "close",
+            "getOptions",
+            "setOptions",
+            "getPanelBehavior",
+            "setPanelBehavior",
+            "getLayout",
+        ] {
+            assert!(side_panel::is_method(method), "{method}");
         }
-        // A name the script does not declare is not one of the engine's:
-        // `route` rejects it as unsupported.
         assert!(!side_panel::is_method("frobnicate"));
-        assert!(SIDE_PANEL_JS.contains("Object.freeze(api)"));
-        assert!(SIDE_PANEL_JS.contains("bridge.pin('sidePanel', Object.freeze(api))"));
-        // Its events are the core's, announced and dispatched there: the
-        // script registers no event handler of its own.
-        for event in list(SIDE_PANEL_JS, "events") {
-            assert!(
-                SIDE_PANEL_JS.contains(&format!(
-                    "{event}: new bridge.BridgeEvent('sidePanel.{event}')"
-                )),
-                "{event}"
-            );
-        }
-        assert!(!SIDE_PANEL_JS.contains("__bridgeOnEvent("));
-        // It is the last of the namespaces, after the core it needs.
-        assert_eq!(super::NAMESPACES[7].0, SIDE_PANEL_JS);
     }
 
     #[test]
     fn the_strip_fields_a_worker_remembers_are_the_ones_the_engine_sends() {
+        // Kept: the two halves of one contract are in two languages.
         // `js/runtime.js` keeps these fields of each tab for `sender.tab`;
         // `View::strip_json` is what the engine answers `stripOf` with.
         let opening = "var FIELDS = [";
@@ -504,16 +395,12 @@ mod tests {
 
     #[test]
     fn the_worker_script_is_the_refusal_the_transport_then_the_namespaces() {
+        // Kept, with the test below: the order is the engine's to compose.
         let script = worker_script();
         let at = |part: &str| script.find(part).expect("the script is there");
         assert!(at(super::REFUSE_JS) < at(super::install::BRIDGE_JS));
         assert!(at(super::install::BRIDGE_JS) < at(CORE_JS));
         assert!(script.ends_with(&namespaces_script()));
-        // The two globals the namespaces are written against, and no
-        // tabs.query of the transport's own.
-        assert!(super::install::BRIDGE_JS.contains("self.__bridgeCall = function"));
-        assert!(super::install::BRIDGE_JS.contains("self.__bridgeOnEvent = function"));
-        assert!(!super::install::BRIDGE_JS.contains("define(chrome.tabs, 'query'"));
     }
 
     // A text test, kept: what this composes is what runs in an extension,

@@ -536,10 +536,14 @@ Ninja on `PATH`:
   namespace script gets a row in `NAMESPACES` (`bridge/mod.rs`) and in
   `bridge_check.mjs`'s list of the same name. Never fix a refused
   function by letting it through; give it a row in the router. The
-  tests are `every_function_of_a_replaced_namespace_is_ours`,
-  `tab_groups_and_commands_are_replaced_whole_and_refused_when_they_cannot_be`
-  and `every_side_panel_function_is_ours` (`bridge/mod.rs`), with
-  `ci/side-panel/bridge_check.mjs`.
+  scripts' behaviour is checked in `ci/side-panel/bridge_check.mjs`,
+  where they run; the tests in `bridge/mod.rs`
+  (`every_function_of_a_replaced_namespace_is_ours`,
+  `every_side_panel_function_is_one_the_engine_routes`,
+  `each_namespace_script_runs_in_its_own_guard_and_its_failure_is_refused`)
+  hold the scripts to the router and to the composition, which that
+  check cannot see. Do not add a test that only asserts a script
+  contains some text.
 - **A tab group is a tab folder, asked for through an
   `ExtensionRequest`.** `bridge/groups.rs` (pure) maps a group onto a
   folder: the id is the folder's number, every group is grey,

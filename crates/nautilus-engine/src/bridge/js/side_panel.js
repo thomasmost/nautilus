@@ -19,9 +19,6 @@
   if (!bridge || !chrome || bridge.installed.indexOf('runtime.getContexts') !== -1) { return; }
   bridge.installed.push('runtime.getContexts');
 
-  // The members the engine answers, read by a test in bridge/mod.rs
-  // (keep each list on one line): bridged: ['open', 'close', 'getOptions', 'setOptions', 'getPanelBehavior', 'setPanelBehavior', 'getLayout'], events: ['onOpened', 'onClosed'].
-
   // `promise`, or a rejection once `ms` have passed without it settling:
   // nothing below waits on the engine for longer than it says.
   function bounded(promise, ms) {

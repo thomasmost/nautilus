@@ -857,11 +857,16 @@ for (const viaPage of [false, true]) {
 
   // A `browser.runtime` that is another object than `chrome.runtime` (not
   // what Chromium 156 gives) is made the same one, so the bridge's
-  // getContexts and onMessage are the only ones.
+  // getContexts and onMessage are the only ones; and a `browser.debugger`
+  // likewise, so the wrapped attach and detach are.
   {
     const w = world({ viaPage, browser: 'alias', runtimeApart: true });
     assert.equal(w.sandbox.browser.runtime, w.chrome.runtime);
     assert.ok(w.errors.some((e) => e.includes('browser.runtime is not chrome.runtime')));
+    const d = world({ viaPage, browser: 'separate', debuggerApi: true });
+    assert.equal(d.sandbox.browser.debugger, d.chrome.debugger);
+    assert.equal(d.sandbox.browser.debugger.attach, d.chrome.debugger.attach);
+    assert.ok(d.errors.some((e) => e.includes('browser.debugger is not chrome.debugger')));
   }
 }
 // One namespace whose install fails does not leave the others Chromium's
@@ -1131,10 +1136,15 @@ for (const twin of [null, 'alias']) {
   onDetach.removeListener(listener);
   assert.equal(onDetach.hasListeners(), false);
   assert.equal(onDetach.count(), 1);
-  // A detach Chromium makes is still reported by the transport.
+  // A detach Chromium makes is still reported by the transport, and an
+  // attach and a detach the extension makes are reported under the names
+  // the engine takes them by (`Bridge::worker_call`).
   onDetach.fire({ tabId: 9 }, 'target_closed');
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.deepEqual(w.served, ['debugger.detached']);
+  await sandbox.chrome.debugger.attach({ tabId: 7 }, '1.3');
+  await sandbox.chrome.debugger.detach({ tabId: 7 });
+  assert.deepEqual(w.served, ['debugger.detached', 'debugger.attached', 'debugger.detached']);
 }
 {
   // A worker: bridge.js has wrapped chrome.debugger over its own port, and

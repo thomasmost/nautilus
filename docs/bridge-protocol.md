@@ -1344,12 +1344,20 @@ it happens in gains no API afterwards, since Chromium defines nothing on
 a stand-in. A refused namespace's events take listeners and never fire,
 so an extension's first evaluation does not throw on
 `onUpdated.addListener`. The worker's transport is guarded too: if it
-throws, the core finds no transport and refuses all five. The tests are
-`every_function_of_a_replaced_namespace_is_ours` and
-`tab_groups_and_commands_are_replaced_whole_and_refused_when_they_cannot_be`
-(`bridge/mod.rs`), `group_calls_and_the_command_listing_are_routed`
-(`bridge/router.rs`) and the group and command parts of
-`ci/side-panel/bridge_check.mjs`. `phase5.py`'s two fail-closed checks
+throws, the core finds no transport and refuses all five. The scripts'
+behaviour is checked where they run, in `ci/side-panel/bridge_check.mjs`
+(nothing of Chromium's left in a replaced namespace, the pin, both
+globals, the refusal, the events, the debugger's reports); the Rust
+tests hold the scripts to what that check cannot see:
+`every_function_of_a_replaced_namespace_is_ours` (every name a script
+sends has a row in the router, and the lists of Chromium's own functions
+a script lets through are `tabs.sendMessage`, `tabs.connect` and nothing
+else), `every_side_panel_function_is_one_the_engine_routes`,
+`each_namespace_script_runs_in_its_own_guard_and_its_failure_is_refused`
+and `the_strip_fields_a_worker_remembers_are_the_ones_the_engine_sends`
+(`bridge/mod.rs`), and `group_calls_and_the_command_listing_are_routed`
+(`bridge/router.rs`). The tests of `bridge/mod.rs` that only asserted a
+script contains some text were removed on 2026-11-27. `phase5.py`'s two fail-closed checks
 call `tabGroups.move`, the one function of these namespaces the engine
 still refuses.
 
@@ -1384,10 +1392,10 @@ ever differ. The fail-closed refusal (`__nautilusRefuseNative`,
 object per namespace, pinned.
 
 1. A file under `bridge/js/` calls `__nautilusBridge.define('<name>', { bridged, optional, direct, events, nativeEvents })` (the comment on `define` in `js/core.js` says what each list does; `js/tabs.js` and `js/windows.js` are the examples). `bridged` names the functions the engine answers, `optional` the same where Chromium defines them, `direct` Chromium's own functions, called bound, `events` the events the engine fires, `nativeEvents` Chromium's events, kept.
-2. Its name is added to `namespaces_script()` in `bridge/mod.rs`, so the file's text follows the others in a worker's and a page's script.
+2. Its script gets a row in `NAMESPACES` in `bridge/mod.rs`, with what its failure refuses, so the file's text follows the others in a worker's and a page's script, in a guard of its own; and the same row in `NAMESPACES` of `ci/side-panel/bridge_check.mjs`.
 3. Its rows go in `router::route` (`bridge/router.rs`): one arm per namespace, one per method, each answered as S, R, F, D or X in the method tables above.
 4. Its events are `StripEvent` variants (`bridge/differ.rs`) produced by `diff`, with a `render` arm giving the event name and its argument list.
-5. Its names are covered by the test `every_function_of_a_replaced_namespace_is_ours` (`bridge/mod.rs`), which checks that every bridged or optional method of the `tabs`, `windows`, `tabGroups` and `commands` scripts reaches the router (`tabGroups.move` excepted, which the router refuses on purpose). A new script's constant joins that test's loop, its `'use strict'` list, and the file lists of `ci/side-panel/bridge_check.mjs`, in the order of `namespaces_script()`; it goes before `js/side_panel.js`, which a test keeps last.
+5. Its names are covered by the test `every_function_of_a_replaced_namespace_is_ours` (`bridge/mod.rs`), which checks that every bridged or optional method of the `tabs`, `windows`, `tabGroups` and `commands` scripts reaches the router (`tabGroups.move` excepted, which the router refuses on purpose). A new script's constant joins that test's loop and the test of the composition (`each_namespace_script_runs_in_its_own_guard_and_its_failure_is_refused`), in the order of `NAMESPACES`; it goes before `js/side_panel.js`, which is last. What the script does is checked in `ci/side-panel/bridge_check.mjs`, not by reading its text.
 
 **`sidePanel` is written by hand, and is the exception.** `js/side_panel.js` does not use `define`, its calls are not rows of `router::route`, and its events are not `StripEvent`s. The reasons, one per step above: its functions check their arguments as Chromium's do and fail with a `TypeError` naming the function before anything is sent, and its object is frozen whole, neither of which `define` does (what `define` would have given, the callback style with `runtime.lastError` set, it does not have: a callback gets no argument on failure and the error is logged as unchecked); its answers come from stores in `DelegateState` that a call changes (`SidePanelStore`, `PanelRegistry`), which the router, a pure function of the call and the published strip, cannot hold, so the hub answers them (`Effect::SidePanel`, "Messages Phase 6 adds"); and a panel opening or closing is no difference between two strips, so the events come from the panel registry's notices through `BridgeState::emit`. What it keeps of the recipe: its events are `__nautilusBridge.BridgeEvent`s, so they are announced and dispatched like every other; it is fail-closed (a member Chromium defines and the script does not name is not in the frozen object, or rejects where Chromium does not let go of the property; a method the engine does not know rejects); and it has its own test, `every_side_panel_function_is_ours`, with its part of `ci/side-panel/bridge_check.mjs`. A namespace whose answers are a function of the strip follows the five steps, not this.
 
