@@ -719,6 +719,113 @@ A task is complete only when:
   when a bug or feature turns out to be upstream; re-check every `C` entry
   on a CEF bump.
 
+## Status and handoff (2026-11-28, the panel's handshake)
+
+The owner, on build 98, signed in to claude.ai: the Claude button
+opens the side panel, sign-in works, and the panel then shows a card
+from claude.ai, "Can't reach Claude in Chrome — Claude in Chrome didn't
+respond." On the branch `side-panel-phases-6-8`, one commit after
+`f776232`, not pushed.
+
+The cause. Signed in, the extension's panel page (1.0.107) frames
+`https://claude.ai/cic/new?surface=cic_sidepanel`, and that page asks
+the extension about the panel it is in with an external message
+(`externally_connectable`; `get_sidepanel_host_info`). The frame is in
+the panel's browser, which Chromium takes for a tab, so the message
+reached `runtime.onMessageExternal` with `sender.tab` naming the panel.
+The extension reads "no `sender.tab`" as "my own side panel": for a
+sender with a tab its answer leaves out the account it is signed in to
+(and the actions it offers its panel), and the page shows that card
+when the answer has no account. Nothing was lost on the way: the frame
+has `chrome.runtime`, the message is delivered and answered within
+milliseconds, the frame's `postMessage` to the panel page arrives, and
+`chrome.tabs.get` of the id in the panel's address answers. The bridge
+took the tab off `onMessage` only; `onMessageExternal` was Chromium's.
+
+What was shown, before the change (every launch on a scratch
+`--data-dir`, the installed profile only read):
+
+- A probe extension with `externally_connectable` for
+  `http://localhost/*`, its panel framing a local page with the Claude
+  frame's sandbox attribute and without one, and the same page as a
+  tab: in all of them `chrome.runtime.sendMessage` and `connect` exist,
+  a message is answered in 1 to 11 ms, a port echoes, and the panel
+  page's `tabs.get` answers. From both frames the worker saw
+  `sender.tab` with the panel's Chromium id and the panel page's
+  address; from the tabs, the tab with `index` and `windowId` -1.
+- The Claude extension from a copy of its folder, signed out, with
+  DevTools on the panel page and on a claude.ai frame made by hand with
+  the extension's address and sandbox: the frame has `chrome.runtime`;
+  `ping` is answered; `get_sidepanel_host_info` is answered `ok` with
+  an empty `capabilities`, which the extension gives a sender that has
+  a tab; the frame posts `CLAUDE_AI_READY`, `cic_sidepanel_ready` and
+  `cic_sidepanel_logged_out` to the panel page; the panel's address
+  carries the tab's Chromium id and `tabs.get` of it answers.
+- The page's script, read in that frame: the card is the state the
+  page takes, with an account loaded, when the host's answer did not
+  come or came without an account.
+
+The change: `js/runtime.js` wraps `runtime.onMessageExternal` as it
+wraps `onMessage` (`wrap`), and holds an external message whose
+sender's tab id the context does not know until the engine has
+answered `stripOf` for it (`held`, `EXTERNAL_WAIT_MS`); the convention
+"A side panel's view is a tab's view with one more field" and
+`docs/bridge-protocol.md`, "A web page framed in a panel is no
+`sender.tab` either", have the rule. No Rust changed: the engine
+already marked a panel's id in `stripOf`'s answer.
+
+Verified at `3572338` (the Mac, Apple silicon, CEF 156):
+
+- The gate: `cargo fmt --all --check`, clippy with and without
+  `--all-features`, `cargo build --workspace`, `cargo test
+  --workspace` (360 and 3; 373 and 3 with all features), `node
+  ci/side-panel/bridge_check.mjs`.
+- The scripted modes on the bundle with `test-hooks`, each exit 0 with
+  no check failing: `panel.sh panel` (157 checks), `groups` (59), `behavior`
+  (23, two launches), `phase5.py` (76), `run.sh spike` (54), `pump` (7).
+  The panel suite's two new sender checks failed on the bundle built
+  at `f776232` (12 of 12 messages from the panel's frame with a
+  `sender.tab`; the tab's with `index` and `windowId` -1) and pass on
+  this one; `bridge_check.mjs` failed at its first new assertion
+  before `runtime.js` changed.
+- The Claude extension again, signed out, on the fixed bundle: the
+  same question from the frame is answered with `capabilities`
+  `open_options` and `set_locale`, which the extension gives only its
+  own panel; and again straight after its worker was stopped through
+  DevTools (the answer took 435 ms, from a new worker).
+- Outputs and probes are in `evidence/handshake/` beside the worktrees.
+
+Not verified:
+
+- Signed in. No account was used: that the answer now carries the
+  account, that the card is gone, and everything after the handshake
+  (the tool relay between the frame and the panel page, the anchor tab
+  group, a message sent to Claude, its debugger and screenshots) has
+  not run. The owner should open the panel signed in on the next
+  build; README, checklist item 25.
+- Windows: no platform code changed, nothing run there.
+- `panel.sh sample-global`, `sample-site`, and `run.sh reload`,
+  `zombie`, `stop`, `idle` and `broken` were not run again.
+
+Known and left:
+
+- A port's sender is Chromium's (`runtime.onConnectExternal`, as
+  `onConnect`): from a panel's frame it has the panel as its tab. The
+  Claude extension has no external port listener.
+- A panel's id is told to its own extension only: a page framed in one
+  extension's panel that writes to another extension arrives there
+  with the tab.
+- `runtime.onMessage` still delivers at once, so the first message a
+  just-started worker gets from a panel's own page can carry the tab
+  (README, Known limitations); the hold is for external messages only.
+- `sidePanel.onClosed` for the panel of a tab that is closing can lack
+  `tabId`: `side_panel::notice_event` looks the tab up when the notice
+  is sent, and the tab can have left the table by then. Seen once in
+  three runs of `panel.sh panel` on 2026-11-28 (the check "closing a
+  tab closes its own panel, and onClosed names the tab", on the bundle
+  from before this change), never in the runs recorded before. Not
+  looked into further.
+
 ## Status and handoff (2026-11-27, the extension side panel)
 
 The owner: "I still can't open the Claude extension sidebar in
