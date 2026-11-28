@@ -145,7 +145,7 @@ mod delivery_tests {
     use osmena_core::TabId;
     use serde_json::json;
 
-    use super::{Delivery, Job, Payload, click_message};
+    use super::{Delivery, Job, Payload, Pending, click_message, told_of_pending};
 
     #[test]
     fn a_click_names_its_tab_by_chromiums_id_and_carries_the_strips_fields() {
@@ -201,6 +201,24 @@ mod delivery_tests {
         };
         assert_eq!(job(click()).kind(), JobKind::Click);
         assert_eq!(job(event()).kind(), JobKind::Emit);
+    }
+
+    #[test]
+    fn a_pending_event_that_is_lost_names_the_token_it_waits_on() {
+        // A relay that closes, or a page that is gone, with an event's
+        // delivery in flight gives it up: the hub is told by its token, so
+        // the one who waits is not left waiting. A click has no token.
+        let deliver = |payload| Pending::Deliver(Delivery { id: 9, attempt: 0, payload });
+        let event = |told| Payload::Event {
+            event: "tabs.onCreated".to_string(),
+            args: Vec::new(),
+            instance: None,
+            told,
+        };
+        assert_eq!(told_of_pending(&deliver(event(Some(4)))), Some(4));
+        assert_eq!(told_of_pending(&deliver(event(None))), None);
+        assert_eq!(told_of_pending(&deliver(Payload::Click { tab: TabId(3) })), None);
+        assert_eq!(told_of_pending(&Pending::Poll), None);
     }
 }
 
@@ -424,7 +442,9 @@ impl Bridge {
                 "bridge: CEF replaced message id {TAB_PROBE_ID} with {id} for {tab:?}'s probe"
             );
         }
-        self.inner.borrow_mut().tabs.insert(
+        // A displaced record holds a browser and a registration: let go of it
+        // after the borrow.
+        let displaced = self.inner.borrow_mut().tabs.insert(
             tab,
             TabRecord {
                 browser: browser.clone(),
@@ -432,6 +452,7 @@ impl Bridge {
                 _probe: registration,
             },
         );
+        drop(displaced);
     }
 
     fn target_known(&self, tab: TabId, success: bool, result: &[u8]) {
@@ -773,7 +794,8 @@ impl Bridge {
         let generation = self.next_generation();
         match HiddenPage::open(self, key, &url, generation) {
             Some(page) => {
-                self.inner.borrow_mut().pages.insert(key.to_string(), page);
+                let displaced = self.inner.borrow_mut().pages.insert(key.to_string(), page);
+                drop(displaced);
             }
             None if is_helper => {
                 log::error!("bridge: Chromium could not create the helper's page");
@@ -786,16 +808,19 @@ impl Bridge {
     /// purpose. Its pending evaluations go with it. Its debuggers are kept: a
     /// retry opens a fresh relay for a worker that may still be debugging.
     fn close_relay(&self, extension: &str) {
-        let page = {
+        let (page, told) = {
             let mut inner = self.inner.borrow_mut();
             if extension == HELPER_KEY {
                 inner.refreshing = false;
             }
-            drop_pending(&mut inner, extension, "its page was closed");
-            inner.pages.remove(extension)
+            let told = drop_pending(&mut inner, extension, "its page was closed");
+            (inner.pages.remove(extension), told)
         };
         if let Some(page) = page {
             page.close();
+        }
+        for token in told {
+            self.told(Some(token));
         }
     }
 
@@ -963,12 +988,12 @@ impl Bridge {
     /// never from this callback. `close` says the page still has to be
     /// closed by us.
     pub(super) fn page_gone(self: &Rc<Self>, key: &str, generation: u64, why: &str, close: bool) {
-        let (page, stale_jobs) = {
+        let (page, stale_jobs, told) = {
             let mut inner = self.inner.borrow_mut();
             let Some(page) = take_page(&mut inner, key, generation) else {
                 return;
             };
-            drop_pending(&mut inner, key, why);
+            let told = drop_pending(&mut inner, key, why);
             let is_helper = key == HELPER_KEY;
             if is_helper {
                 inner.refreshing = false;
@@ -977,7 +1002,7 @@ impl Bridge {
                 .into_iter()
                 .partition(|job| fails_on_loss(job.kind(), job.extension(), key, is_helper));
             inner.jobs = kept;
-            (page, stale)
+            (page, stale, told)
         };
         log::warn!("bridge: page {key} is gone ({why})");
         // The extension's debuggers are kept: its worker may still be
@@ -987,6 +1012,9 @@ impl Bridge {
             page.close();
         }
         self.fail_jobs(stale_jobs, "its page is gone");
+        for token in told {
+            self.told(Some(token));
+        }
     }
 
     /// A page's DevTools session ended: the page cannot be evaluated in any
@@ -1562,10 +1590,17 @@ impl Bridge {
             Payload::Event { .. } => log::Level::Debug,
         };
         let expression = format!("nautilusRelay.deliver({message})");
+        // Read before the delivery moves into the pending evaluation: when
+        // the evaluation cannot be made, the delivery is given up here.
+        let told = match &delivery.payload {
+            Payload::Event { told, .. } => *told,
+            Payload::Click { .. } => None,
+        };
         if self.evaluate(extension, &expression, Pending::Deliver(delivery)) {
             log::log!(level, "{sent}");
         } else {
             log::warn!("{unreachable}");
+            self.told(told);
         }
     }
 
@@ -2001,16 +2036,33 @@ fn log_lost(key: &str, pending: &Pending, why: &str) {
     }
 }
 
+/// The hub's token of a pending delivery's event: what the hub is told when
+/// the delivery is given up, if anyone waits on it.
+fn told_of_pending(pending: &Pending) -> Option<u64> {
+    match pending {
+        Pending::Deliver(Delivery {
+            payload: Payload::Event { told, .. },
+            ..
+        }) => *told,
+        _ => None,
+    }
+}
+
 /// Drop the pending evaluations of `key`; a delivery among them is lost
-/// with its page, and the log says so.
-fn drop_pending(inner: &mut Inner, key: &str, why: &str) {
+/// with its page, and the log says so. The tokens of the events among them
+/// are returned: the caller tells the hub of each once its borrow of `inner`
+/// has ended (`Bridge::told`).
+fn drop_pending(inner: &mut Inner, key: &str, why: &str) -> Vec<u64> {
+    let mut told = Vec::new();
     inner.pending.retain(|(k, _), pending| {
         if k != key {
             return true;
         }
         log_lost(key, pending, why);
+        told.extend(told_of_pending(pending));
         false
     });
+    told
 }
 
 /// A tab's Chromium id as the log shows it, so that a run can name the tab
