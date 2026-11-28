@@ -849,12 +849,25 @@ Known and left:
 - `README.md`, Known limitations, "Extension side panels, tab groups
   and shortcuts" has the differences from Chrome; they are not
   repeated here.
-- Proton Pass's content scripts logged `This script should only be
-  loaded in a browser extension.` three times in the first second of
-  one launch, as the extension was installed into three tabs that
-  were still loading; not in the launch with both extensions, and
-  their messages reached the worker afterwards. The cause was not
-  looked for, and whether `main` does the same was not tried.
+- Proton Pass's content scripts log `This script should only be
+  loaded in a browser extension.` up to three times when the
+  extension is loaded through the control at the browser's start
+  (six launches of six on this branch, none of six when it is loaded
+  eight seconds later, none of three on `main`). Looked into on
+  2026-11-27 and not the branch's fault: in the extension's isolated
+  world of each tab `chrome.runtime` is an object with an id at first
+  and reads `undefined` from under a second later, for good, on
+  `main` exactly as here (read through the tabs' DevTools sessions,
+  `evidence/final/r3`); a probe extension with static and injected
+  content scripts keeps its `chrome.runtime.id` under the same loads
+  on both builds, so nothing of Nautilus clears it. The line is what
+  the extension's second injection into such a world prints, and only
+  this branch has one: its worker lists the tabs with
+  `browser.tabs.query`, which `main` left Chromium's own (no tabs),
+  and injects its scripts into them at install. What in the
+  extension lets go of `chrome.runtime` was not found, and whether
+  Chrome prints the same when it is installed into loading tabs
+  could not be tried.
 - The control's `load` of a folder over a profile that already has
   that extension reloads it at start, and the Claude extension's
   worker then did not acknowledge `bridge.wake` twice, ten seconds
