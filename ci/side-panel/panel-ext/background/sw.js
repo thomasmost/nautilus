@@ -103,6 +103,29 @@
     removed[id] = Date.now();
   });
 
+  // A web page's messages (ci/side-panel/external.html, at the origin the
+  // manifest's externally_connectable names): what the worker sees as the
+  // sender of each. In Chrome a page framed in a side panel has no
+  // sender.tab, and a page in a tab has its tab.
+  const senderOf = (sender) => ({
+    hasTab: 'tab' in sender,
+    tab: sender.tab ? { id: sender.tab.id, index: sender.tab.index, windowId: sender.tab.windowId } : null,
+    origin: sender.origin || null,
+    url: sender.url || null,
+    frameId: sender.frameId,
+  });
+  chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+    if (!message || message.type !== 'external-ping') return undefined;
+    const seen = senderOf(sender);
+    post('external', Object.assign({ where: message.where, label: message.label }, seen));
+    sendResponse({ pong: true, hasTab: seen.hasTab });
+    return undefined;
+  });
+  chrome.runtime.onConnectExternal.addListener((port) => {
+    post('external-port', Object.assign({ name: port.name }, senderOf(port.sender || {})));
+    port.onMessage.addListener((message) => port.postMessage({ echo: message }));
+  });
+
   // The panel page's debugger check (panel.js, debuggerCheck). While the
   // page holds a session on a tab, what this worker can do with that tab:
   // a command through the page's session, and an attach of its own. Then
@@ -285,6 +308,13 @@
     // The ids the check compares, so a failure shows a mismatch in them.
     post('closer-gone', { gone, at: removed[closer.id] || null, closerId: closer.id, removedIds: Object.keys(removed) });
     if (!gone) await chrome.tabs.remove(closer.id).catch(() => {});
+
+    // The control of the external-message check: the page the panel frames,
+    // as a tab. (The framed one runs with every load of panel.html.)
+    const web = await chrome.tabs.create({ url: `http://localhost:47616/external.html?where=tab&ext=${self_}`, active: false });
+    post('external-tab', { id: web.id });
+    await checkpoint('external');
+    await chrome.tabs.remove(web.id).catch(() => {});
 
     // Left open for the steps by hand (side-panel.AC1.2, AC1.3).
     await sp.open({ windowId: window });

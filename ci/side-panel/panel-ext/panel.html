@@ -13,6 +13,10 @@
 <p>Keys: <span id="keys"></span></p>
 <p><a id="link" href="https://example.net/" target="_blank">A link with a target</a></p>
 <button id="close">window.close()</button>
+<!-- A web page in a frame, with the sandbox attribute a real extension gives
+     the site it embeds in its panel: panel.js gives it its address. -->
+<iframe id="external" title="External message test" style="width: 100%; height: 40px; border: 0; margin-top: 8px"
+  sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads"></iframe>
 <script src="panel-probe.js"></script>
 <script src="browser-facts.js"></script>
 <script src="frames-probe.js"></script>

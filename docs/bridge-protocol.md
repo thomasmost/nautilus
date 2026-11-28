@@ -580,6 +580,9 @@ debuggers are kept", and the tab is not hidden (`review4-broken-run1.out`).
   is never called; its `sidePanel` too, and all of them on `browser` as on
   `chrome`. The same holds for one namespace whose install fails, in a
   page and in a worker ("Fail closed", below).
+- An external message (`runtime.onMessageExternal`) follows the same rules,
+  and waits for the engine's word when its sender's tab id is unknown to the
+  context ("A web page framed in a panel is no `sender.tab` either", below).
 - A message from a tab (`sender.tab`) is delivered synchronously, so Chromium gets
   the answer to its keep-open question at once: the wrapper returns true only when a
   listener of this context kept the channel open (returned true or a promise). A
@@ -1206,6 +1209,50 @@ its `sender.tab` is Chromium's. A held `sendMessage` whose arguments
 Chromium refuses rejects (or logs, with a callback) where the unheld
 call throws.
 
+**A web page framed in a panel is no `sender.tab` either (2026-11-28).**
+An extension that names a site in `externally_connectable` can show
+that site in a frame of its side panel, and the site then asks the
+extension things with `chrome.runtime.sendMessage(extensionId, ...)`
+(`runtime.onMessageExternal` in the extension). The frame is in the
+panel's browser, so Chromium names the panel as `sender.tab` (its id,
+the panel page's address, `index` and `windowId` -1), with the frame's
+own `origin`, `url` and `frameId`; in Chrome that sender has no tab, and
+an extension tells its own panel's frame from a tab by exactly that.
+Seen with the Claude extension (1.0.107): its answer about the panel
+leaves out the account it is signed in to when the sender has a tab, and
+the site then reports that the extension cannot be reached. So
+`js/runtime.js` wraps `runtime.onMessageExternal` as it wraps
+`onMessage` (`wrap`; one listener of the bridge's with Chromium, the
+extension's listeners run by it, `installed` has
+`runtime.onMessageExternal`), with the same two rules, a panel's id
+gives no tab and a tab's id gives the strip's fields, and one more.
+Nothing can hold this message at the sending end: the sender is a web
+page, where the bridge is not. So the receiving end holds it
+(`held`), in a context that has `chrome.sidePanel`, when the sender's
+tab id is neither a panel's it was told nor a tab's whose strip it has:
+the wrapper returns true to Chromium, which keeps the channel, asks
+`tabs.stripOf(id)`, and delivers once on the answer (`{panel: true}`:
+without the tab, and the id is remembered; a strip: with its fields;
+`null`: as Chromium gave it) or after `EXTERNAL_WAIT_MS` (1 s). That
+covers a worker the message itself started, whose own question
+(`bridge.panels`) is not answered yet, and a panel that has just
+opened. `stripOf` is not held for the tab ids at a worker's first
+start (`hands_out_tab_ids`), so the wait is one round trip to the
+engine. After a held delivery, when no listener answered and none kept
+the channel, the wrapper answers with nothing: it kept the channel open
+itself and nothing else would close it. The sender then gets
+`undefined` without the `runtime.lastError` Chromium sets for a message
+nobody answers, and where two contexts of the extension listen, that
+empty answer can come before the other context's. A context that knows
+the id delivers at once and returns what `onMessage`'s wrapper returns.
+Not done: a port (`runtime.onConnectExternal`'s `port.sender`) is
+Chromium's, as `onConnect`'s is; and a panel's id is told only to the
+panel's own extension, so a page framed in one extension's panel that
+writes to another extension arrives there with the tab. Checked in
+`bridge_check.mjs` (each rule, the hold, the bound) and live in
+`panel.sh panel` (`ci/side-panel/external.html` framed in the panel's
+page at each of its loads, writing as it loads, and once as a tab).
+
 **The action click.** `ExtensionManager::click` is the one decision
 (`side_panel::decide_action_click`), in Chromium's order
 (`ExtensionActionRunner::RunAction`): the panel when the extension asked
@@ -1425,7 +1472,8 @@ and Chromium's own object, one for both, has its members replaced in
 place, so Chromium's update of a live context's APIs does not stop at
 `commands`; where a member cannot be replaced it is pinned like the
 rest. What the bridge wraps without replacing
-(`runtime.getContexts`, `runtime.onMessage`, the worker's
+(`runtime.getContexts`, `runtime.onMessage`,
+`runtime.onMessageExternal`, the worker's
 `runtime.onConnect`, `debugger.attach` and `detach`) it wraps on
 Chromium's own object, which is one object for both globals;
 `core.js`'s `same` gives `browser` `chrome`'s object should the two

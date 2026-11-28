@@ -1,0 +1,81 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>External message test</title>
+<p>A web page the side panel suite serves (panel_checks.py), named by the test
+extension's externally_connectable.</p>
+<script>
+// A web page that talks to the test extension as a site talks to its own
+// extension: chrome.runtime.sendMessage and connect with the extension's id
+// (the manifest's externally_connectable names this origin). The suite loads
+// it twice: in a frame of the side panel's page, with the sandbox attribute a
+// real extension gives such a frame, and as a tab. It reports what it could
+// reach as one 'external-page' record; the worker reports each message's
+// sender as 'external' (panel-ext/background/sw.js).
+(async () => {
+  const query = new URLSearchParams(location.search);
+  const where = query.get('where');
+  const ext = query.get('ext');
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const runtime = self.chrome && chrome.runtime;
+  const out = {
+    where,
+    framed: self !== top,
+    facts: {
+      chrome: typeof self.chrome,
+      runtime: typeof runtime,
+      sendMessage: typeof (runtime && runtime.sendMessage),
+      connect: typeof (runtime && runtime.connect),
+    },
+  };
+  // One message, by callback: the answer, runtime.lastError, and how long.
+  const send = (label) => new Promise((resolve) => {
+    const started = performance.now();
+    const timer = setTimeout(() => resolve({ label, timedOut: true }), 8000);
+    try {
+      chrome.runtime.sendMessage(ext, { type: 'external-ping', where, label }, (answer) => {
+        clearTimeout(timer);
+        const error = chrome.runtime.lastError;
+        resolve({ label, answer: answer === undefined ? null : answer, lastError: error ? error.message : null, ms: Math.round(performance.now() - started) });
+      });
+    } catch (error) {
+      clearTimeout(timer);
+      resolve({ label, threw: String((error && error.message) || error) });
+    }
+  });
+  // Sent as the page loads: in a panel's frame this can reach the worker
+  // before the worker has been told the panel's id.
+  out.first = await send('first');
+  await sleep(1500);
+  out.second = await send('second');
+  out.port = await new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ timedOut: true }), 8000);
+    try {
+      const port = chrome.runtime.connect(ext, { name: 'external-' + where });
+      port.onDisconnect.addListener(() => {
+        clearTimeout(timer);
+        const error = chrome.runtime.lastError;
+        resolve({ disconnected: true, lastError: error ? error.message : null });
+      });
+      port.onMessage.addListener((message) => { clearTimeout(timer); resolve({ echoed: message }); port.disconnect(); });
+      port.postMessage({ hello: where });
+    } catch (error) {
+      clearTimeout(timer);
+      resolve({ threw: String((error && error.message) || error) });
+    }
+  });
+  // The frame asks the page around it, which is the extension's and asks
+  // chrome.tabs for the tab beside the panel (panel.js).
+  if (out.framed) {
+    out.parent = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ timedOut: true }), 8000);
+      addEventListener('message', (event) => {
+        if (!event.data || event.data.type !== 'external-tab') return;
+        clearTimeout(timer);
+        resolve({ origin: event.origin, answer: event.data.answer });
+      });
+      parent.postMessage({ type: 'external-get-tab' }, '*');
+    });
+  }
+  fetch('/record', { method: 'POST', body: JSON.stringify({ kind: 'external-page', data: out }) }).catch(() => {});
+})();
+</script>

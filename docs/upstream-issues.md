@@ -265,7 +265,19 @@ window, its page a windowless browser of Nautilus's own
 wrapped to report it as a `SIDE_PANEL` context. Chromium takes that
 browser for a tab, so two things are put right by hand: the panel's
 page is kept out of the tab-id table, and a message from it is given
-without `sender.tab`. A click on the action is decided by Nautilus, in
+without `sender.tab`. The same holds for every frame in that browser
+(seen 2026-11-28, Chromium 156): a web page framed in the panel's page
+that writes to the extension through `externally_connectable` has
+`chrome.runtime.sendMessage` and `connect`, is delivered and answered,
+and arrives in `runtime.onMessageExternal` with `sender.tab` naming the
+panel (the panel page's address, `index` and `windowId` -1) beside the
+frame's own `origin`, `url` and `frameId`. An extension that reads "no
+tab" as "my own side panel" then answers its panel's frame as it
+answers a tab, which is what kept the Claude extension's panel from
+its handshake; the bridge takes the tab off that message too
+(`js/runtime.js`, `docs/bridge-protocol.md`). A port's sender
+(`onConnect`, `onConnectExternal`) is left as Chromium gives it.
+A click on the action is decided by Nautilus, in
 Chromium's order (the panel, then the popup, then `action.onClicked`).
 If CEF ever
 hosts extension side panels for Alloy browsers, the store and the

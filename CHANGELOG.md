@@ -246,6 +246,18 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- The Claude extension's side panel reaches the extension when you are
+  signed in. The panel shows claude.ai in a frame, and that page asks
+  the extension about the panel it is in; the extension answered as it
+  answers a tab, because the browser named the panel as the tab the
+  question came from, and the page then said "Can't reach Claude in
+  Chrome". A message a web page sends an extension
+  (`externally_connectable`, `runtime.onMessageExternal`) from a frame
+  in that extension's side panel now arrives without `sender.tab`, as
+  in Chrome, from the first message on; and one from a web page in a
+  tab carries the tab's place in the strip (`index`, `windowId`,
+  `groupId` and the rest), where `index` and `windowId` were -1.
+
 - `chrome.debugger.onDetach.hasListeners()` answers for the
   extension's own listeners. It was always true in an extension with
   the `debugger` permission, in its worker and in its pages, because

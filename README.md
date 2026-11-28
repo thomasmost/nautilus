@@ -309,6 +309,17 @@ under `<dir>` instead, for a second Nautilus beside the first.
   `runtime.sendMessage`'s argument shapes, after the hold (what Chromium
   does) and during it (what the bridge's hold does): Chromium accepts
   each valid shape, refuses each refused one, and the hold does the same.
+  And a web page reaches the extension by external message
+  (`externally_connectable`): `ci/side-panel/external.html`, which the
+  harness serves at `http://localhost:47616`, runs in a frame of the
+  panel's page with the sandbox attribute a real extension gives such a
+  frame, at every load of that page, and once as a tab. Both must have
+  `chrome.runtime.sendMessage` and `connect`, be answered as they load
+  and later, and get an echo over a port; the framed one asks the
+  panel's page for the tab beside it (`chrome.tabs.get`); the worker
+  must see the framed page without `sender.tab` from its first message
+  on, and the tab's with its `sender.tab` and the strip's `index` and
+  `windowId`.
   `groups` checks `tabs.group`, `tabGroups.update`, `get`, `query`
   and `tabs.ungroup` with the calls an extension makes as it opens its
   panel, each read straight after the call before it, the group
@@ -655,7 +666,10 @@ engine glue. Each item must pass.
     again. Cmd+E (Ctrl+E on Windows), Claude's own shortcut, opens the
     panel, and pressed again closes it (signed in to claude.ai; on its
     sign-in screen the second press does nothing); Settings lists the
-    shortcut under Extensions. Switch to another tab: Claude's panel
+    shortcut under Extensions. Signed in, the panel shows claude.ai's
+    own page with its message box, not a card reading "Can't reach
+    Claude in Chrome" (that card means the page's question to the
+    extension was answered as a tab's is). Switch to another tab: Claude's panel
     belongs to its tab and is not shown; switch back and it is.
     Open Raindrop.io's panel (its toolbar button, or the shortcut
     Settings lists for it): it opens under a header reading
@@ -949,6 +963,17 @@ Upstream causes and the features they block are tracked in
     `index` and `windowId` -1), and a port from a panel
     (`runtime.connect`, `runtime.onConnect`) keeps the `sender.tab`
     Chromium gives it.
+  - A message a web page sends the extension from a frame in its
+    panel (`externally_connectable`, `runtime.onMessageExternal`) has
+    no `sender.tab` either, from the first one. Where the extension
+    has not been told who the sender is (its worker was just started,
+    by that message perhaps), the message waits for the browser's
+    answer, a second at the very most; if no listener then answers it
+    or keeps it open, the sender gets an empty answer without the
+    `runtime.lastError` Chrome sets. An external port
+    (`runtime.onConnectExternal`) keeps the `sender.tab` Chromium
+    gives it, and so does a message from a page framed in another
+    extension's panel.
   - Every tab group is grey: a folder has no colour, and a colour
     passed to `tabGroups.update` is ignored. `tabGroups.move` is
     refused and `tabGroups.onMoved` never fires. Tabs are grouped

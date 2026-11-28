@@ -118,6 +118,8 @@ class Handler(BaseHTTPRequestHandler):
             with lock:
                 name, suite["name"] = suite["name"], None
             return self._send(json.dumps({"suite": name}).encode(), "application/json")
+        if url.path == "/external.html":
+            return self._send((HERE / "external.html").read_bytes(), "text/html")
         if url.path == "/go":
             name = parse_qs(url.query).get("name", [""])[0]
             with lock:
@@ -143,6 +145,14 @@ def latest(kind, test=lambda data: True):
         for record in reversed(records):
             if record["kind"] == kind and isinstance(record["data"], dict) and test(record["data"]):
                 return record
+    return None
+
+
+def latest_unlocked(kind):
+    """The data of the last record of `kind`, for a caller that holds `lock`."""
+    for record in reversed(records):
+        if record["kind"] == kind and isinstance(record["data"], dict):
+            return record["data"]
     return None
 
 
@@ -544,12 +554,16 @@ def panel_checks(h):
             "with the second window closed the first window's panel is still shown",
             wait(lambda: h.shown("panel.html"), 10), h.panel("panel.html")),
         "closer": lambda: closer(h),
+        "external": lambda: h.check(
+            "the web page opened as a tab reported (the external-message control)",
+            wait(lambda: latest("external-page", lambda d: d.get("where") == "tab"), 25)),
         "left-open": lambda: left_open(h),
     }
     h.launch(EXT, "https://example.com/ https://example.org/", h.args.budget, suite_name="panel")
     h.find_window()
     h.pump(handlers, h.args.budget - 10)
     frames_check(h)
+    external_check(h)
     gone = latest("closer-gone")
     if gone is not None:
         asked = latest("closer")
@@ -681,6 +695,61 @@ def frames_check(h):
             tags[:len(expected)])
     if tags:
         h.note("delivery order of the tagged forms at the worker, first load: " + json.dumps(tags[:len(expected)]))
+
+
+def external_check(h):
+    """A web page reaches the extension by external message (the manifest's
+    externally_connectable; ci/side-panel/external.html), from a frame of the
+    side panel's page and from a tab. In Chrome the framed page's sender has
+    no tab, which is how an extension knows its own panel's frame; Chromium
+    here names the panel's browser as the tab, and the bridge takes it off
+    (js/runtime.js), from the first message of every load of the panel."""
+    with lock:
+        pages = [r["data"] for r in records if r["kind"] == "external-page" and isinstance(r["data"], dict)]
+        seen = [r["data"] for r in records if r["kind"] == "external" and isinstance(r["data"], dict)]
+        ports = [r["data"] for r in records if r["kind"] == "external-port" and isinstance(r["data"], dict)]
+        web = latest_unlocked("external-tab")
+
+    def answered(page, which):
+        got = page.get(which) or {}
+        return isinstance(got.get("answer"), dict) and got["answer"].get("pong") is True and got.get("lastError") is None
+
+    framed = [p for p in pages if p.get("where") == "panel"]
+    tabbed = [p for p in pages if p.get("where") == "tab"]
+    h.note("the web page reported from a panel's frame %d time(s) and from a tab %d time(s); the worker saw %d external message(s)"
+           % (len(framed), len(tabbed), len(seen)))
+    for where, group in (("framed in a side panel", framed), ("in a tab", tabbed)):
+        bare = [p.get("facts") for p in group if (p.get("facts") or {}).get("sendMessage") != "function"
+                or (p.get("facts") or {}).get("connect") != "function"]
+        h.check(f"a web page {where} has chrome.runtime.sendMessage and connect", bool(group) and not bare, bare[:2])
+        silent = [[p.get("first"), p.get("second")] for p in group if not (answered(p, "first") and answered(p, "second"))]
+        h.check(f"a web page {where} reaches the extension by external message, as it loads and later",
+                bool(group) and not silent, silent[:2])
+        mute = [p.get("port") for p in group if ((p.get("port") or {}).get("echoed") or {}).get("echo") != {"hello": p.get("where")}]
+        h.check(f"a web page {where} reaches the extension by an external port", bool(group) and not mute, mute[:2])
+    lost = [p.get("parent") for p in framed
+            if not (((p.get("parent") or {}).get("answer") or {}).get("ok") is True
+                    and ((p.get("parent") or {}).get("answer") or {}).get("same") is True)]
+    h.check("the framed page asks the panel's page, which reads the tab beside it through chrome.tabs",
+            bool(framed) and not lost, lost[:2])
+    from_panel = [d for d in seen if d.get("where") == "panel"]
+    with_tab = [d for d in from_panel if d.get("hasTab")]
+    firsts = [d for d in from_panel if d.get("label") == "first"]
+    h.check("the worker sees no sender.tab for a web page framed in a side panel, from its first message on",
+            bool(firsts) and len(from_panel) >= 2 * len(framed) and not with_tab,
+            {"messages": len(from_panel), "with a tab": len(with_tab), "example": with_tab[:1]})
+    from_tab = [d for d in seen if d.get("where") == "tab"]
+    web_id = (web or {}).get("id")
+    off = [d for d in from_tab
+           if not (d.get("hasTab") and (d.get("tab") or {}).get("id") == web_id
+                   and isinstance((d.get("tab") or {}).get("index"), int) and d["tab"]["index"] >= 0
+                   and isinstance((d.get("tab") or {}).get("windowId"), int) and d["tab"]["windowId"] >= 1)]
+    h.check("the worker sees the same page in a tab with its sender.tab, which has the strip's index and window",
+            len(from_tab) >= 2 and web_id is not None and not off, {"tab": web_id, "off": off[:2]})
+    # A port's sender is as Chromium gave it (README, Known limitations).
+    h.note("external ports' senders, from a panel's frame with a tab: %d of %d"
+           % (sum(1 for d in ports if d.get("name") == "external-panel" and d.get("hasTab")),
+              sum(1 for d in ports if d.get("name") == "external-panel")))
 
 
 def start(h):

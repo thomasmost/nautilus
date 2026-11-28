@@ -56,8 +56,10 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
   let handler = null;
   const filters = []; // the filters Chromium's own getContexts was given
   const messages = nativeEvent(); // Chromium's runtime.onMessage
+  const externals = nativeEvent(); // Chromium's runtime.onMessageExternal
   const runtime = {
     onMessage: messages,
+    onMessageExternal: externals,
     id: 'x',
     // Chromium's own answer: `contexts` when a test gives them (Chromium
     // applies the filter itself; this stand-in records it and does not).
@@ -246,7 +248,7 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
     sandbox.__nautilusTransport = { protocol: 1, portHidden: true };
   }
   vm.runInContext(namespacesScript(), sandbox);
-  return { chrome, natives, ownCommands, reached, calls, answers, messages, filters, debuggerState, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
+  return { chrome, natives, ownCommands, reached, calls, answers, messages, externals, filters, debuggerState, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -738,6 +740,119 @@ for (const viaPage of [false, true]) {
     await tick();
     assert.ok(!bare.calls.some(([ns, method, args]) => ns === 'bridge' && (method === 'panels' || (method === 'listen' && args[0] === 'bridge.panels'))), 'an extension without a side panel asked for panel ids');
   }
+  // runtime.onMessageExternal: a message from a web page (the manifest's
+  // externally_connectable) or from another extension. A web page framed in
+  // a side panel's page is in the panel's browser, so Chromium names the
+  // panel as its sender.tab; in Chrome such a sender has no tab, and an
+  // extension tells its own panel's frame from a tab by exactly that. The
+  // sending end is a web page, which the bridge is not in and cannot hold,
+  // so the receiving end decides: a sender whose tab id this context knows
+  // (a panel's, or a tab's with its strip) is delivered at once, as
+  // onMessage delivers; one it does not know waits for the engine's word on
+  // that id, with the channel kept open, and is then delivered once.
+  {
+    const s = world({ viaPage, panels: [50], prime: viaPage ? null : [{ id: 9, index: 2, windowId: 4, groupId: -1, active: false, highlighted: false, selected: false, pinned: false }] });
+    const never = new Promise(() => {});
+    s.answers.set('tabs.stripOf', ([id]) => (id === 7 ? { index: 3, windowId: 1, groupId: -1, active: true } : id === 52 || id === 53 ? { panel: true } : id === 60 ? never : null));
+    const seen = [];
+    const listener = (message, sender, respond) => {
+      seen.push([message, 'tab' in sender ? Object.assign({}, sender.tab) : 'none', sender.origin]);
+      if (message === 'ask') { respond('answer'); }
+      if (message === 'later') { setTimeout(() => respond('late answer'), 5); return true; }
+      return undefined;
+    };
+    const external = s.chrome.runtime.onMessageExternal;
+    assert.notEqual(external, s.externals, 'runtime.onMessageExternal is Chromium\'s own event');
+    assert.equal(s.externals.count(), 0, 'Chromium was given a listener before the extension added one');
+    external.addListener(listener);
+    external.addListener(listener);
+    assert.equal(s.externals.count(), 1, 'one listener of the bridge\'s is registered with Chromium');
+    assert.ok(external.hasListener(listener) && external.hasListeners());
+    assert.ok(s.sandbox.__nautilusBridge.installed.includes('runtime.onMessageExternal'));
+    await tick(); await tick();
+    const answers = [];
+    const from = (id, message = 'ask') => s.externals.fire(message, id === null ? { origin: 'https://web.example' } : { origin: 'https://web.example', url: 'https://web.example/framed', frameId: 8, tab: { id, index: -1, windowId: -1 } }, (v) => answers.push([message, v]));
+    // A panel this context was told of: at once, without a tab.
+    assert.deepEqual(from(50), [false], 'a known panel\'s external message was held');
+    assert.deepEqual(seen.at(-1), ['ask', 'none', 'https://web.example'], 'a web page framed in a known panel arrived with a sender.tab');
+    assert.deepEqual(answers.at(-1), ['ask', 'answer']);
+    // No tab at all (another extension's worker): straight through.
+    assert.deepEqual(from(null), [false]);
+    assert.deepEqual(seen.at(-1), ['ask', 'none', 'https://web.example']);
+    // A panel this context was not told of (it just started, or the panel
+    // just opened): held, the channel kept, and delivered without a tab once
+    // the engine has marked the id. Its first message, not its second.
+    const before = seen.length;
+    const told = answers.length;
+    assert.deepEqual(from(52), [true], 'an unknown sender tab was not held with the channel open');
+    assert.equal(seen.length, before, 'an unknown sender tab was delivered before the engine answered');
+    await tick(); await tick(); await tick();
+    assert.deepEqual(seen.slice(before), [['ask', 'none', 'https://web.example']], 'the first external message from a panel the context had not been told of arrived with a sender.tab');
+    assert.deepEqual(answers.slice(told), [['ask', 'answer']], 'the held message\'s answer did not reach the sender exactly once');
+    // And at once from then on.
+    assert.deepEqual(from(52), [false]);
+    assert.equal(seen.at(-1)[1], 'none');
+    // A listener that answers later keeps the channel through the hold, and
+    // nothing is sent in its place meanwhile.
+    const mark = answers.length;
+    assert.deepEqual(from(53, 'later'), [true]);
+    await tick(); await tick(); await tick();
+    assert.equal(seen.at(-1)[1], 'none');
+    assert.equal(answers.length, mark, 'a held message whose listener keeps the channel was answered early');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(answers.slice(mark), [['later', 'late answer']]);
+    // A tab this context has not learnt: held, then delivered with its tab
+    // and the strip's fields, from its first message.
+    assert.deepEqual(from(7), [true]);
+    await tick(); await tick(); await tick();
+    assert.deepEqual(seen.at(-1)[1], { id: 7, index: 3, windowId: 1, groupId: -1, active: true }, 'a tab\'s first external message lacks its strip');
+    assert.deepEqual(from(7), [false], 'a tab the context has learnt was held again');
+    assert.deepEqual(seen.at(-1)[1], { id: 7, index: 3, windowId: 1, groupId: -1, active: true });
+    if (!viaPage) {
+      // A tab the worker listed at its start: at once, with its strip.
+      assert.deepEqual(from(9), [false]);
+      assert.deepEqual(seen.at(-1)[1], { id: 9, index: 2, windowId: 4, groupId: -1, active: false, highlighted: false, selected: false, pinned: false });
+    }
+    // A tab the engine knows nothing of: held, then delivered as Chromium gave
+    // it. Nobody answers 'quiet': the channel this context held open is closed
+    // with one empty answer, since nothing else would close it.
+    const quiet = answers.length;
+    assert.deepEqual(from(8, 'quiet'), [true]);
+    await tick(); await tick(); await tick();
+    assert.deepEqual(seen.at(-1), ['quiet', { id: 8, index: -1, windowId: -1 }, 'https://web.example']);
+    assert.deepEqual(answers.slice(quiet), [['quiet', undefined]], 'a held message nobody answers left its channel open');
+    // Not held twice: what the engine does not know is asked once per message
+    // only while it stays unknown, and every message is delivered exactly once.
+    const count = seen.length;
+    from(8, 'quiet'); await tick(); await tick(); await tick();
+    assert.equal(seen.length, count + 1);
+    // An engine that never answers does not keep the message: it goes, as
+    // Chromium gave it, after the bound.
+    if (!viaPage) {
+      const waited = seen.length;
+      assert.deepEqual(from(60), [true]);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(seen.length, waited, 'the hold let go before its bound');
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      assert.deepEqual(seen.slice(waited), [['ask', { id: 60, index: -1, windowId: -1 }, 'https://web.example']], 'a message held for an engine that never answers was not delivered at the bound');
+    }
+    // removeListener lets go of Chromium's event.
+    external.removeListener(listener);
+    assert.equal(s.externals.count(), 0);
+    assert.equal(external.hasListeners(), false);
+    // An extension that cannot have a side panel holds nothing: its senders
+    // are tabs, delivered at once as onMessage delivers them.
+    const bare = world({ viaPage, sidePanel: false });
+    bare.answers.set('tabs.stripOf', ([id]) => (id === 7 ? { index: 3, windowId: 1 } : null));
+    const plain = [];
+    bare.chrome.runtime.onMessageExternal.addListener((message, sender, respond) => { plain.push(sender.tab && sender.tab.windowId); respond('answer'); });
+    await tick(); await tick();
+    assert.deepEqual(bare.externals.fire('ask', { tab: { id: 7, windowId: -1 } }, () => {}), [false], 'an extension without a side panel held an external message');
+    assert.deepEqual(plain, [-1]);
+    await tick(); await tick();
+    bare.externals.fire('ask', { tab: { id: 7, windowId: -1 } }, () => {});
+    assert.deepEqual(plain, [-1, 1], 'the next external message from the tab lacks its strip');
+  }
   // An asynchronous listener keeps the channel.
   chrome.runtime.onMessage.addListener((message) => (message === 'later' ? Promise.resolve('promised') : undefined));
   assert.deepEqual(w.messages.fire('later', {}, (v) => responses.push(v)), [true]);
@@ -779,6 +894,8 @@ for (const viaPage of [false, true]) {
     assert.equal(browser.runtime, chrome.runtime);
     assert.equal(browser.runtime.getContexts, chrome.runtime.getContexts);
     assert.equal(browser.runtime.onMessage, chrome.runtime.onMessage);
+    assert.equal(browser.runtime.onMessageExternal, chrome.runtime.onMessageExternal);
+    assert.notEqual(chrome.runtime.onMessageExternal, w.externals, `runtime.onMessageExternal is not wrapped (${where})`);
     // A call through `browser` is the engine's to answer.
     await tick();
     w.calls.length = 0;

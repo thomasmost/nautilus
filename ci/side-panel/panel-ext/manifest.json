@@ -9,6 +9,7 @@
   "background": { "service_worker": "background/sw.js" },
   "action": { "default_title": "Panel test" },
   "side_panel": { "default_path": "panel.html" },
+  "externally_connectable": { "matches": ["http://localhost/*"] },
   "commands": {
     "probe-command": {
       "suggested_key": { "default": "Ctrl+Shift+9", "mac": "MacCtrl+Shift+9" },

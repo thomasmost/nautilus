@@ -1,20 +1,25 @@
-// chrome.runtime.onMessage, wrapped so that sender.tab carries the strip's
-// fields (index, windowId, groupId, active, highlighted, selected, pinned)
-// before the extension's listeners see it. Chromium knows none of them for
-// these tabs. One listener is registered with Chromium, and it runs the
-// extension's listeners itself, as Chromium would: the first response wins; a
-// listener that returns true or a promise keeps the channel open. The wrapper
-// is synchronous, so it returns exactly what Chromium needs: true only when a
-// listener of this context kept the channel open, and false otherwise, which
-// lets Chromium close a channel that no listener of this context holds.
-// A message from a side panel's page is given without sender.tab (`panels`).
+// chrome.runtime.onMessage and onMessageExternal, wrapped so that sender.tab
+// carries the strip's fields (index, windowId, groupId, active, highlighted,
+// selected, pinned) before the extension's listeners see it. Chromium knows
+// none of them for these tabs. One listener per event is registered with
+// Chromium, and it runs the extension's listeners itself, as Chromium would:
+// the first response wins; a listener that returns true or a promise keeps the
+// channel open. For onMessage the wrapper is synchronous, so it returns exactly
+// what Chromium needs: true only when a listener of this context kept the
+// channel open, and false otherwise, which lets Chromium close a channel that
+// no listener of this context holds.
+// A message from a side panel's page is given without sender.tab (`panels`),
+// and so is an external message from a web page framed in that page, which is
+// held here for the engine's word when this context does not know its
+// sender's tab id (`held`).
 (function (root) {
   'use strict';
   var bridge = root.__nautilusBridge;
   var runtime = root.chrome && root.chrome.runtime;
-  var nativeEvent = runtime && runtime.onMessage;
-  if (!bridge || !nativeEvent || bridge.installed.indexOf('runtime.onMessage') !== -1) { return; }
-  var listeners = [];
+  if (!bridge || !runtime || !runtime.onMessage || bridge.installed.indexOf('runtime.onMessage') !== -1) { return; }
+  // How long an external message whose sender's tab id this context does not
+  // know waits for the engine's answer about that id.
+  var EXTERNAL_WAIT_MS = 1000;
 
   // The strip's fields by tab id, as the engine last reported them. A message
   // is delivered at once, so the fields come from here; a tab this context does
@@ -89,60 +94,113 @@
     bridge.tap('tabs.onRemoved', function (id) { delete strips[id]; });
   }
 
-  // Delivers to this context's listeners; returns whether one kept the channel
-  // open (returned true or a promise).
-  function deliver(message, sender, sendResponse) {
-    var open = false;
-    var done = false;
-    function respond(value) {
-      if (!done) { done = true; sendResponse(value); }
-    }
-    listeners.slice().forEach(function (fn) {
-      var result;
-      try { result = fn(message, sender, respond); } catch (e) { console.error(e); return; }
-      if (result === true) {
-        open = true;
-      } else if (result && typeof result.then === 'function') {
-        open = true;
-        result.then(respond, function (e) { console.error(e); respond(); });
-      }
-    });
-    return open;
-  }
+  // One of Chromium's message events, wrapped: `name` is the property of
+  // chrome.runtime; `hold` says whether a message whose sender's tab id this
+  // context knows nothing of waits for the engine's answer about it.
+  function wrap(name, hold) {
+    var nativeEvent = runtime[name];
+    var listeners = [];
 
-  function onNative(message, sender, sendResponse) {
-    var tab = sender && sender.tab;
-    if (!tab || typeof tab.id !== 'number') {
+    // Delivers to this context's listeners; returns whether one kept the
+    // channel open (returned true or a promise).
+    function deliver(message, sender, sendResponse) {
+      var open = false;
+      var done = false;
+      function respond(value) {
+        if (!done) { done = true; sendResponse(value); }
+      }
+      listeners.slice().forEach(function (fn) {
+        var result;
+        try { result = fn(message, sender, respond); } catch (e) { console.error(e); return; }
+        if (result === true) {
+          open = true;
+        } else if (result && typeof result.then === 'function') {
+          open = true;
+          result.then(respond, function (e) { console.error(e); respond(); });
+        }
+      });
+      return open;
+    }
+
+    // An external message from a tab id this context has no word on. Its
+    // sender is a web page (or another extension's content script), which
+    // the bridge is not in, so nothing holds the message at the sending end
+    // as page_report.js holds a panel page's own: a web page framed in a
+    // side panel can write before this context is told the panel's id, and
+    // always does when its message is what starts a stopped worker. So the
+    // message waits here, the channel kept open, for the engine's answer
+    // about the id (`stripOf`: the mark of a panel, a tab's strip, or
+    // nothing), under a bound, and is then delivered once. Where no listener
+    // answers or keeps the channel after that, the channel this wrapper
+    // itself kept open is closed with an empty answer, which nothing else
+    // would close.
+    function held(message, sender, sendResponse) {
+      var id = sender.tab.id;
+      var settled = false;
+      var timer = null;
+      function go(answer) {
+        if (settled) { return; }
+        settled = true;
+        clearTimeout(timer);
+        var to = sender;
+        if (answer && answer.panel === true) {
+          panels[id] = true;
+          to = withoutTab(sender);
+        } else if (answer) {
+          remember(Object.assign({ id: id }, answer));
+          Object.assign(sender.tab, strips[id]);
+        }
+        var answered = false;
+        var open = deliver(message, to, function (value) { answered = true; sendResponse(value); });
+        if (!open && !answered) { sendResponse(); }
+      }
+      timer = setTimeout(go, EXTERNAL_WAIT_MS);
+      bridge.call('tabs', 'stripOf', [id]).then(go, function () { go(null); });
+      return true;
+    }
+
+    function onNative(message, sender, sendResponse) {
+      var tab = sender && sender.tab;
+      if (!tab || typeof tab.id !== 'number') {
+        return deliver(message, sender, sendResponse);
+      }
+      if (panels[tab.id]) {
+        return deliver(message, withoutTab(sender), sendResponse);
+      }
+      var strip = strips[tab.id];
+      if (!strip && hold) { return held(message, sender, sendResponse); }
+      if (strip) { Object.assign(tab, strip); }
+      fetchStrip(tab.id);
       return deliver(message, sender, sendResponse);
     }
-    if (panels[tab.id]) {
-      return deliver(message, withoutTab(sender), sendResponse);
+
+    var wrapper = {
+      addListener: function (fn) {
+        if (typeof fn !== 'function' || listeners.indexOf(fn) !== -1) { return; }
+        listeners.push(fn);
+        if (listeners.length === 1) { nativeEvent.addListener(onNative); }
+      },
+      removeListener: function (fn) {
+        var at = listeners.indexOf(fn);
+        if (at === -1) { return; }
+        listeners.splice(at, 1);
+        if (listeners.length === 0) { nativeEvent.removeListener(onNative); }
+      },
+      hasListener: function (fn) { return listeners.indexOf(fn) !== -1; },
+      hasListeners: function () { return listeners.length > 0; }
+    };
+    try {
+      Object.defineProperty(runtime, name, { value: wrapper, enumerable: true, configurable: true });
+      bridge.installed.push('runtime.' + name);
+    } catch (e) {
+      console.error('nautilus-bridge: cannot wrap runtime.' + name + ': ' + e);
     }
-    var strip = strips[tab.id];
-    if (strip) { Object.assign(tab, strip); }
-    fetchStrip(tab.id);
-    return deliver(message, sender, sendResponse);
   }
 
-  var wrapper = {
-    addListener: function (fn) {
-      if (typeof fn !== 'function' || listeners.indexOf(fn) !== -1) { return; }
-      listeners.push(fn);
-      if (listeners.length === 1) { nativeEvent.addListener(onNative); }
-    },
-    removeListener: function (fn) {
-      var at = listeners.indexOf(fn);
-      if (at === -1) { return; }
-      listeners.splice(at, 1);
-      if (listeners.length === 0) { nativeEvent.removeListener(onNative); }
-    },
-    hasListener: function (fn) { return listeners.indexOf(fn) !== -1; },
-    hasListeners: function () { return listeners.length > 0; }
-  };
-  try {
-    Object.defineProperty(runtime, 'onMessage', { value: wrapper, enumerable: true, configurable: true });
-    bridge.installed.push('runtime.onMessage');
-  } catch (e) {
-    console.error('nautilus-bridge: cannot wrap runtime.onMessage: ' + e);
+  wrap('onMessage', false);
+  // Only an extension that can have a side panel holds: without one every
+  // sender's tab is a tab, delivered at once as onMessage delivers it.
+  if (runtime.onMessageExternal && typeof runtime.onMessageExternal.addListener === 'function') {
+    wrap('onMessageExternal', !!root.chrome.sidePanel);
   }
 })(self);

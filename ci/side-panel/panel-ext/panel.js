@@ -118,6 +118,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
+// A web page framed in this page (panel.html only): the suite's own page
+// at the origin the manifest's externally_connectable names. It sends this
+// extension external messages as it loads (ci/side-panel/external.html), and
+// asks this page for the tab beside the panel, which this page reads through
+// chrome.tabs.
+const external = document.getElementById('external');
+if (external) {
+  window.addEventListener('message', async (event) => {
+    if (event.source !== external.contentWindow || !event.data || event.data.type !== 'external-get-tab') return;
+    let answer;
+    try {
+      const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = await chrome.tabs.get(active.id);
+      answer = { ok: true, id: tab.id, same: tab.id === active.id, url: tab.url };
+    } catch (error) {
+      answer = { ok: false, error: String((error && error.message) || error) };
+    }
+    event.source.postMessage({ type: 'external-tab', answer }, event.origin);
+  });
+  external.src = `http://localhost:47616/external.html?where=panel&ext=${chrome.runtime.id}`;
+}
+
 (async () => {
   const page = location.pathname.slice(1);
   self.framesProbe();
