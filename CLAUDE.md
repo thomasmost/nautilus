@@ -465,7 +465,18 @@ Ninja on `PATH`:
   in `bridge/hidden_page.rs` clone their `Rc` of the bridge and their
   key first; a borrowed `&self.key` there was read after it was freed
   (2026-11-27, a test holds the file to it). A new handler that calls
-  something able to close its own browser does the same.
+  something able to close its own browser does the same. Every
+  `wrap_*!` handler of the crate was read for it that day: an observer
+  owned by a `Registration` (a DevTools message observer) is the kind
+  CEF does not keep alive across its own callback, and none of the
+  other three (`ManagerDevTools`, `TabProbe`, `CaptureObserver`) lets
+  go of its registration inside its callback; four handlers that
+  closed their own browser or window, or cleared the list holding
+  their own request, and then read `self` again, or lent the page lane
+  their own `delegate`, take clones first now
+  (`TabRequestHandler::on_render_process_terminated`,
+  `PopupLife::on_before_close`, `CrxDownload::on_request_complete`,
+  the two `on_process_message_received`).
 - **A side panel's view is a tab's view with one more field, and
   never a tab to extensions.** osmena allocates the view's `TabId`
   and asks for it (`TabHost::create_view`, `close_view`,
@@ -850,9 +861,6 @@ Known and left:
   each, and said hello only when a click started it. A plain restart
   does not do this. Not looked into further: it is the scripted way
   in, not a user's.
-- The other DevTools observers and handlers of the crate
-  (`extensions.rs`, `relay.rs`'s tab probes, `popup.rs`) were not
-  read for the lending fault `7f58a24` fixed in `hidden_page.rs`.
 - The open contract question: `commands.getAll` and the keymap's
   verdict need a defaulted `Engine` method in osmena.
 - The by-hand acceptance, the Windows run, the pull requests and

@@ -1030,9 +1030,10 @@ wrap_client! {
             // (bridge/pages.rs), or the store shim's request (store.rs).
             #[cfg(any(windows, target_os = "macos"))]
             {
-                let delegate = &self.handlers.view.delegate;
+                // The bridge is lent a clone, not this handler's own.
+                let delegate = self.handlers.view.delegate.clone();
                 if let (Some(lane), Some(browser)) = (delegate.page_lane(), browser.as_deref())
-                    && lane.receive(delegate, browser, frame, message)
+                    && lane.receive(&delegate, browser, frame, message)
                 {
                     return 1;
                 }
@@ -1809,17 +1810,20 @@ wrap_request_handler! {
             } else {
                 format!("The page's renderer process {what}: {detail} (code {error_code}).")
             };
-            log::warn!("tab {}: {reason}", self.view.label());
+            // A clone: this callback closes its own browser below, and
+            // nothing of `self` is read after that.
+            let view = self.view.clone();
+            log::warn!("tab {}: {reason}", view.label());
             log::error!("tab crashed: {reason}");
-            if self.view.is_panel() {
+            if view.is_panel() {
                 // The model closes a panel whose view crashed and sends
                 // no `CloseView` for it: the browser is closed here.
-                self.view.retire();
+                view.retire();
                 if let Some(host) = browser.and_then(|b| b.host()) {
                     host.close_browser(1);
                 }
             }
-            self.view.report(move |tab| EngineEvent::TabCrashed {
+            view.report(move |tab| EngineEvent::TabCrashed {
                 tab,
                 reason,
             });

@@ -2039,8 +2039,14 @@ mod native {
                 };
                 let status = request.response().map(|r| r.status()).unwrap_or(0);
                 let bytes = std::mem::take(&mut *self.bytes.borrow_mut());
-                let manager = &self.manager;
-                manager.inner.borrow_mut().downloads.clear();
+                // Copies, taken before the list is cleared: the list holds
+                // the request that owns this client, and nothing of
+                // `self` is read once it may have been let go
+                // (`CLAUDE.md`, "A CEF handler lends the bridge nothing of
+                // its own").
+                let (manager, id) = (self.manager.clone(), self.id.clone());
+                let downloads = std::mem::take(&mut manager.inner.borrow_mut().downloads);
+                drop(downloads);
                 if request.request_status() != UrlrequestStatus::SUCCESS || status != 200 {
                     let why = if status == 204 || status == 404 {
                         "the store has no such extension".to_string()
@@ -2049,13 +2055,10 @@ mod native {
                     } else {
                         format!("the download failed ({:?})", request.request_error())
                     };
-                    manager.report_error(format!(
-                        "cannot download extension {}: {why}",
-                        self.id
-                    ));
+                    manager.report_error(format!("cannot download extension {id}: {why}"));
                     return;
                 }
-                manager.store_download_finished(&self.id, bytes);
+                manager.store_download_finished(&id, bytes);
             }
         }
     }

@@ -309,8 +309,10 @@ mod native {
                 let (Some(browser), Some(frame), Some(message)) = (browser, frame, message) else {
                     return 0;
                 };
-                match self.delegate.page_lane() {
-                    Some(lane) if lane.receive(&self.delegate, browser, frame, message) => 1,
+                // The bridge is lent a clone, not this handler's own.
+                let delegate = self.delegate.clone();
+                match delegate.page_lane() {
+                    Some(lane) if lane.receive(&delegate, browser, frame, message) => 1,
                     _ => 0,
                 }
             }
@@ -356,17 +358,20 @@ mod native {
                 if let Some(browser) = browser {
                     self.delegate.forget_browser(browser);
                 }
-                let mut inner = self.inner.borrow_mut();
-                if inner.open.as_ref().is_some_and(|open| open.id == self.id)
+                // Copies: the popup's own window is closed below, and
+                // nothing of `self` is read after that.
+                let (state, id) = (self.inner.clone(), self.id.clone());
+                let mut inner = state.borrow_mut();
+                if inner.open.as_ref().is_some_and(|open| open.id == id)
                     && let Some(open) = inner.open.take()
                 {
                     open.window.close();
                 }
-                if let Some(at) = inner.closing.iter().position(|(id, _)| *id == self.id) {
+                if let Some(at) = inner.closing.iter().position(|(other, _)| *other == id) {
                     let (_, window) = inner.closing.remove(at);
                     window.close();
                 }
-                inner.closed = Some((self.id.clone(), Instant::now()));
+                inner.closed = Some((id, Instant::now()));
             }
         }
     }
