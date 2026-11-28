@@ -187,12 +187,18 @@
       );
       return undefined;
     };
-    Object.defineProperty(runtime, 'getContexts', {
-      value: getContexts,
-      configurable: true,
-      enumerable: true,
-      writable: true,
-    });
+    // Its own guard: the namespace is pinned already, and a failure here
+    // must not refuse it. It is logged, and getContexts stays Chromium's.
+    try {
+      Object.defineProperty(runtime, 'getContexts', {
+        value: getContexts,
+        configurable: true,
+        enumerable: true,
+        writable: true,
+      });
+    } catch (e) {
+      console.error('nautilus-bridge: cannot wrap runtime.getContexts: ' + e);
+    }
   }
 
   // window.close() in a page of an extension that has a side panel: a
@@ -204,13 +210,19 @@
   const CLOSE_WAIT = 500;
   if (native && typeof window !== 'undefined' && typeof window.close === 'function' && window === window.top) {
     const nativeClose = window.close.bind(window);
-    window.close = function () {
-      bounded(bridge.call('sidePanel', 'closeSelf', []), CLOSE_WAIT).then(
-        (closed) => {
-          if (closed === false) nativeClose();
-        },
-        () => nativeClose()
-      );
-    };
+    // Its own guard, as getContexts has: a failure is logged and window.close
+    // stays Chromium's, and the namespace is not refused for it.
+    try {
+      window.close = function () {
+        bounded(bridge.call('sidePanel', 'closeSelf', []), CLOSE_WAIT).then(
+          (closed) => {
+            if (closed === false) nativeClose();
+          },
+          () => nativeClose()
+        );
+      };
+    } catch (e) {
+      console.error('nautilus-bridge: cannot wrap window.close: ' + e);
+    }
   }
 })(self);

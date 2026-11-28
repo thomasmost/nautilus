@@ -1954,5 +1954,56 @@ for (const [answer, closes] of [[() => null, 0], [() => false, 1], [() => { thro
   assert.deepEqual(c.state.asked, []);
   assert.equal(c.sandbox.__nautilusBridge.installed.indexOf('sidePanel'), -1);
 }
+// side_panel.js inside its guard, as the engine composes it. Its getContexts
+// wrapping and its window.close wrapping come after the pin, so a failure of
+// either one must not refuse the namespace, which is pinned already: each is
+// logged and skipped, and the other still goes in.
+function sidePanelInGuard({ getContextsLocked = false, closeLocked = false }) {
+  const refusals = [];
+  const logged = [];
+  const nativeGetContexts = () => Promise.resolve([]);
+  const nativeClose = () => {};
+  const runtime = { id: 'x', getContexts: nativeGetContexts };
+  if (getContextsLocked) {
+    Object.defineProperty(runtime, 'getContexts', { value: nativeGetContexts, writable: false, configurable: false, enumerable: true });
+  }
+  const chrome = { runtime, sidePanel: { open() {} } };
+  const sandbox = {
+    chrome,
+    console: { error: (...a) => logged.push(a.map(String).join(' ')), log() {} },
+    setTimeout, clearTimeout, Promise, Object, Error,
+    __bridgeCall: () => Promise.resolve(null),
+    __bridgeOnEvent: () => {},
+    __nautilusRefuseNative: (names) => refusals.push(names === undefined ? null : names),
+  };
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  sandbox.top = sandbox;
+  Object.defineProperty(sandbox, 'close', { value: nativeClose, writable: !closeLocked, configurable: !closeLocked, enumerable: true });
+  vm.createContext(sandbox);
+  vm.runInContext(read('core.js'), sandbox);
+  vm.runInContext(guarded(read('side_panel.js'), 'sidePanel'), sandbox);
+  return { refusals, logged, sandbox, runtime, nativeGetContexts, nativeClose, chrome };
+}
+{
+  // getContexts cannot be wrapped: logged, nothing refused, the pin stays and
+  // window.close is still wrapped.
+  const s = sidePanelInGuard({ getContextsLocked: true });
+  assert.deepEqual(s.refusals, [], 'a failed getContexts wrapping refused the sidePanel namespace');
+  assert.ok(s.logged.some((line) => line.includes('nautilus-bridge:')), 'the failed wrapping was not logged');
+  assert.ok(s.sandbox.__nautilusBridge.installed.includes('sidePanel'), 'sidePanel was not pinned');
+  assert.equal(s.runtime.getContexts, s.nativeGetContexts, 'a locked getContexts was replaced');
+  assert.notEqual(s.sandbox.close, s.nativeClose, 'window.close was not wrapped after the getContexts failure');
+}
+{
+  // window.close cannot be wrapped: logged, nothing refused, the pin stays
+  // and getContexts is still wrapped.
+  const s = sidePanelInGuard({ closeLocked: true });
+  assert.deepEqual(s.refusals, [], 'a failed window.close wrapping refused the sidePanel namespace');
+  assert.ok(s.logged.some((line) => line.includes('nautilus-bridge:')), 'the failed wrapping was not logged');
+  assert.ok(s.sandbox.__nautilusBridge.installed.includes('sidePanel'), 'sidePanel was not pinned');
+  assert.equal(s.sandbox.close, s.nativeClose);
+  assert.notEqual(s.runtime.getContexts, s.nativeGetContexts, 'getContexts was not wrapped after the window.close failure');
+}
 
 console.log('bridge scripts: ok');
