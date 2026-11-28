@@ -773,7 +773,10 @@ mod native {
             };
             let mut window_delegate = ManagerWindowDelegate::new(browser_view, manager.clone());
             match cef::window_create_top_level(Some(&mut window_delegate)) {
-                Some(window) => manager.inner.borrow_mut().window = Some(window),
+                Some(window) => {
+                    let displaced = manager.inner.borrow_mut().window.replace(window);
+                    drop(displaced);
+                }
                 None => log::error!("Chromium could not create the extension manager window"),
             }
             manager
@@ -795,7 +798,7 @@ mod native {
                 inner.queued.push((script, request));
                 return;
             }
-            let Some(host) = inner.browser.as_ref().and_then(|b| b.host()) else {
+            let Some(browser) = inner.browser.clone() else {
                 log::warn!("extension manager has no browser for {request:?}");
                 return;
             };
@@ -805,7 +808,13 @@ mod native {
             inner.next_message_id += 1;
             log::debug!("extension manager evaluates {request:?} as message {id}");
             inner.pending.insert(id, request);
+            // The borrow ends before the host is asked for and the call made.
             drop(inner);
+            let Some(host) = browser.host() else {
+                let request = self.inner.borrow_mut().pending.remove(&id);
+                log::warn!("extension manager has no host for {request:?}");
+                return;
+            };
             if crate::devtools::evaluate(&host, id, &script).is_none() {
                 let request = self.inner.borrow_mut().pending.remove(&id);
                 log::warn!("extension manager could not evaluate {request:?}");
@@ -1193,7 +1202,8 @@ mod native {
                         .unwrap_or("?")
                 );
                 let bytes = message.to_string().into_bytes();
-                let host = self.inner.borrow().browser.as_ref().and_then(|b| b.host());
+                let browser = self.inner.borrow().browser.clone();
+                let host = browser.and_then(|b| b.host());
                 if host.is_none_or(|host| host.send_dev_tools_message(Some(&bytes)) == 0) {
                     log::warn!("TEST HOOK: command {number} could not be sent");
                 }
@@ -1273,16 +1283,26 @@ mod native {
         pub(crate) fn shutdown(&self) {
             log::debug!("extension manager shutting down");
             self.bridge.shutdown();
-            let mut inner = self.inner.borrow_mut();
-            inner.ready = false;
-            inner.queued.clear();
-            inner.pending.clear();
-            inner.downloads.clear();
-            inner.devtools = None;
-            if let Some(host) = inner.browser.take().and_then(|b| b.host()) {
+            // Taken out under the borrow; the host, the close and every drop
+            // of a CEF object happen after it has ended.
+            let (browser, devtools, downloads, window) = {
+                let mut inner = self.inner.borrow_mut();
+                inner.ready = false;
+                inner.queued.clear();
+                inner.pending.clear();
+                (
+                    inner.browser.take(),
+                    inner.devtools.take(),
+                    std::mem::take(&mut inner.downloads),
+                    inner.window.take(),
+                )
+            };
+            if let Some(host) = browser.and_then(|b| b.host()) {
                 host.close_browser(1);
             }
-            if let Some(window) = inner.window.take() {
+            drop(devtools);
+            drop(downloads);
+            if let Some(window) = window {
                 window.close();
             }
         }
@@ -1290,17 +1310,32 @@ mod native {
         /// The page loaded: hook the DevTools channel up, initialise,
         /// then run what waited.
         fn on_page_ready(self: &Rc<Self>) {
-            let queued = {
+            let (browser, queued) = {
                 let mut inner = self.inner.borrow_mut();
-                if inner.devtools.is_none()
-                    && let Some(host) = inner.browser.as_ref().and_then(|b| b.host())
-                {
-                    let mut observer = ManagerDevTools::new(self.clone());
-                    inner.devtools = host.add_dev_tools_message_observer(Some(&mut observer));
-                }
+                let browser = if inner.devtools.is_none() {
+                    inner.browser.clone()
+                } else {
+                    None
+                };
                 inner.ready = true;
-                std::mem::take(&mut inner.queued)
+                (browser, std::mem::take(&mut inner.queued))
             };
+            // The observer is registered with the borrow ended: it is a call
+            // into CEF, and the registration is stored after it.
+            if let Some(host) = browser.and_then(|b| b.host()) {
+                let mut observer = ManagerDevTools::new(self.clone());
+                let registration = host.add_dev_tools_message_observer(Some(&mut observer));
+                let unused = {
+                    let mut inner = self.inner.borrow_mut();
+                    if inner.devtools.is_none() {
+                        inner.devtools = registration;
+                        None
+                    } else {
+                        registration
+                    }
+                };
+                drop(unused);
+            }
             self.run(INIT_SCRIPT.to_string(), Request::Init);
             for (script, request) in queued {
                 self.run(script, request);
@@ -1838,9 +1873,14 @@ mod native {
 
             fn on_window_destroyed(&self, _window: Option<&mut CefWindow>) {
                 log::debug!("extension manager window destroyed");
-                let mut inner = self.manager.inner.borrow_mut();
-                inner.window_alive = false;
-                inner.window = None;
+                // The window is taken out under the borrow and let go of
+                // after it: dropping a CEF object is a call into CEF.
+                let window = {
+                    let mut inner = self.manager.inner.borrow_mut();
+                    inner.window_alive = false;
+                    inner.window.take()
+                };
+                drop(window);
             }
 
             fn initial_bounds(&self, _window: Option<&mut CefWindow>) -> Rect {
@@ -1892,17 +1932,31 @@ mod native {
         impl LifeSpanHandler {
             fn on_after_created(&self, browser: Option<&mut Browser>) {
                 self.manager.delegate.add_live(1);
-                self.manager.inner.borrow_mut().browser = browser.map(|b| b.clone());
+                let displaced = std::mem::replace(
+                    &mut self.manager.inner.borrow_mut().browser,
+                    browser.map(|b| b.clone()),
+                );
+                drop(displaced);
                 log::debug!("extension manager: browser created");
             }
 
             fn on_before_close(&self, _browser: Option<&mut Browser>) {
                 self.manager.delegate.add_live(-1);
-                let mut inner = self.manager.inner.borrow_mut();
-                inner.browser = None;
-                inner.devtools = None;
-                inner.ready = false;
-                inner.pending.clear();
+                // Taken out under the borrow, and let go of after it: the
+                // browser and the DevTools registration are CEF objects, and
+                // dropping either is a call into CEF.
+                let (browser, devtools, pending) = {
+                    let mut inner = self.manager.inner.borrow_mut();
+                    inner.ready = false;
+                    (
+                        inner.browser.take(),
+                        inner.devtools.take(),
+                        std::mem::take(&mut inner.pending),
+                    )
+                };
+                drop(browser);
+                drop(devtools);
+                drop(pending);
             }
         }
     }

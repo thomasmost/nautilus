@@ -495,7 +495,9 @@ impl DelegateState {
     fn request(&self, opener: TabId, tab: Pending, background: bool) {
         let pending = PendingTab(self.next_pending.get());
         self.next_pending.set(pending.0 + 1);
-        self.pending.borrow_mut().insert(pending, tab);
+        // A displaced entry holds a browser: let go of it after the borrow.
+        let displaced = self.pending.borrow_mut().insert(pending, tab);
+        drop(displaced);
         self.push(EngineEvent::NewTabRequested {
             opener,
             pending,
@@ -1288,13 +1290,18 @@ wrap_render_handler! {
                     None => frame.hide_drag_image(),
                 }
             }
-            *self.view.drag.borrow_mut() = Some(DragSession {
-                data,
-                allowed: allowed_ops,
-                entered: false,
-                operation: DragOperationsMask::default(),
-                hotspot,
-            });
+            // The session it replaces (CEF drag data) is let go of after the borrow.
+            let displaced = std::mem::replace(
+                &mut *self.view.drag.borrow_mut(),
+                Some(DragSession {
+                    data,
+                    allowed: allowed_ops,
+                    entered: false,
+                    operation: DragOperationsMask::default(),
+                    hotspot,
+                }),
+            );
+            drop(displaced);
             log::debug!("tab {}: drag started at ({x}, {y}), allowed {allowed_ops:?}", self.view.label());
             self.view.report(EngineEvent::FrameReady);
             1
@@ -1863,11 +1870,16 @@ wrap_context_menu_handler! {
                 return 1;
             }
             let (x, y) = (params.xcoord(), params.ycoord());
-            *self.view.context_menu.borrow_mut() = Some(MenuPoint {
-                frame: frame.map(|f| f.clone()),
-                x,
-                y,
-            });
+            // The menu it replaces holds a CEF frame: let go of it after the borrow.
+            let displaced = std::mem::replace(
+                &mut *self.view.context_menu.borrow_mut(),
+                Some(MenuPoint {
+                    frame: frame.map(|f| f.clone()),
+                    x,
+                    y,
+                }),
+            );
+            drop(displaced);
             let scale = self.view.scale.get();
             let context = page_context(params);
             self.view.report(move |tab| EngineEvent::ContextMenuRequested {
@@ -2238,17 +2250,18 @@ wrap_download_handler! {
             } else {
                 DownloadState::InProgress
             };
-            {
+            // What is displaced or removed is let go of after the borrow: it
+            // holds a CEF callback.
+            let displaced = {
                 let mut downloads = self.view.delegate.downloads.borrow_mut();
                 match (&state, callback) {
                     (DownloadState::InProgress | DownloadState::Paused, Some(callback)) => {
-                        downloads.insert(id, callback.clone());
+                        downloads.insert(id, callback.clone())
                     }
-                    _ => {
-                        downloads.remove(&id);
-                    }
+                    _ => downloads.remove(&id),
                 }
-            }
+            };
+            drop(displaced);
             let Ok(url) = Url::parse(&url_text) else {
                 return;
             };

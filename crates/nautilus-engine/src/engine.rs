@@ -1262,11 +1262,16 @@ wrap_life_span_handler! {
             if let Some(owner) = &owner {
                 owner.add_live(1);
             }
-            *self.owner.borrow_mut() = owner;
+            // The owner displaced is let go of after the borrow.
+            let displaced = std::mem::replace(&mut *self.owner.borrow_mut(), owner);
+            drop(displaced);
         }
 
         fn on_before_close(&self, _browser: Option<&mut Browser>) {
-            if let Some(owner) = self.owner.borrow_mut().take() {
+            // Taken out under the borrow: dropping the last handle drops the
+            // profile's state, which holds CEF objects.
+            let owner = self.owner.borrow_mut().take();
+            if let Some(owner) = owner {
                 owner.add_live(-1);
             }
         }

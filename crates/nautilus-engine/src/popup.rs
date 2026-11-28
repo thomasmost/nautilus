@@ -120,7 +120,7 @@ mod native {
         browser: Browser,
         anchor: ScreenRect,
         scale: f32,
-        window: platform::PopupWindow,
+        window: Rc<platform::PopupWindow>,
     }
 
     #[derive(Default)]
@@ -128,7 +128,7 @@ mod native {
         open: Option<Open>,
         /// Windows whose browser was told to close and has not reported
         /// `on_before_close` yet; each goes when its browser does.
-        closing: Vec<(String, platform::PopupWindow)>,
+        closing: Vec<(String, Rc<platform::PopupWindow>)>,
         /// The popup that closed last, and when, for the reopen debounce.
         closed: Option<(String, Instant)>,
     }
@@ -215,13 +215,15 @@ mod native {
             if let Some(host) = browser.host() {
                 host.set_focus(1);
             }
-            self.inner.borrow_mut().open = Some(Open {
+            let previous = self.inner.borrow_mut().open.replace(Open {
                 id: id.to_string(),
                 browser,
                 anchor,
                 scale,
-                window,
+                window: Rc::new(window),
             });
+            // Let go of it after the borrow: it holds a CEF browser.
+            drop(previous);
         }
 
         pub(crate) fn close_all(&self) {
@@ -262,11 +264,18 @@ mod native {
     }
 
     /// The page asked for `css_width` by `css_height`: resize the window.
-    fn resize(open: &Open, css_width: f32, css_height: f32) {
-        let width = (css_width.clamp(MIN_SIZE, MAX_WIDTH) * open.scale).round() as i32;
-        let height = (css_height.clamp(MIN_SIZE, MAX_HEIGHT) * open.scale).round() as i32;
-        let bounds = place(open.anchor, width, height);
-        platform::resize(&open.window, &open.browser, bounds, open.scale);
+    fn resize(
+        window: &platform::PopupWindow,
+        browser: &Browser,
+        anchor: ScreenRect,
+        scale: f32,
+        css_width: f32,
+        css_height: f32,
+    ) {
+        let width = (css_width.clamp(MIN_SIZE, MAX_WIDTH) * scale).round() as i32;
+        let height = (css_height.clamp(MIN_SIZE, MAX_HEIGHT) * scale).round() as i32;
+        let bounds = place(anchor, width, height);
+        platform::resize(window, browser, bounds, scale);
     }
 
     /// Escape closes the popup, as it does in other browsers.
@@ -358,20 +367,32 @@ mod native {
                 if let Some(browser) = browser {
                     self.delegate.forget_browser(browser);
                 }
-                // Copies: the popup's own window is closed below, and
-                // nothing of `self` is read after that.
-                let (state, id) = (self.inner.clone(), self.id.clone());
-                let mut inner = state.borrow_mut();
-                if inner.open.as_ref().is_some_and(|open| open.id == id)
-                    && let Some(open) = inner.open.take()
-                {
+                // What is closed or let go of is taken out under the borrow,
+                // and closed or dropped after it: a window's close and a
+                // browser's drop are calls into the platform and CEF.
+                let id = self.id.clone();
+                let (open, closing) = {
+                    let mut inner = self.inner.borrow_mut();
+                    let open = if inner.open.as_ref().is_some_and(|open| open.id == id) {
+                        inner.open.take()
+                    } else {
+                        None
+                    };
+                    let closing = inner
+                        .closing
+                        .iter()
+                        .position(|(other, _)| *other == id)
+                        .map(|at| inner.closing.remove(at).1);
+                    inner.closed = Some((id, Instant::now()));
+                    (open, closing)
+                };
+                if let Some(open) = open {
                     open.window.close();
+                    drop(open.browser);
                 }
-                if let Some(at) = inner.closing.iter().position(|(other, _)| *other == id) {
-                    let (_, window) = inner.closing.remove(at);
+                if let Some(window) = closing {
                     window.close();
                 }
-                inner.closed = Some((id, Instant::now()));
             }
         }
     }
@@ -413,9 +434,15 @@ mod native {
                 if let Some(size) = message.strip_prefix(PREFIX) {
                     if let Some((w, h)) = size.split_once(',')
                         && let (Ok(w), Ok(h)) = (w.trim().parse::<f32>(), h.trim().parse::<f32>())
-                        && let Some(open) = self.inner.borrow().open.as_ref()
                     {
-                        resize(open, w, h);
+                        // Copied out under the borrow; the resize calls into
+                        // the platform and CEF after it has ended.
+                        let target = self.inner.borrow().open.as_ref().map(|open| {
+                            (open.window.clone(), open.browser.clone(), open.anchor, open.scale)
+                        });
+                        if let Some((window, browser, anchor, scale)) = target {
+                            resize(&window, &browser, anchor, scale, w, h);
+                        }
                     }
                     return 1;
                 }
@@ -489,7 +516,7 @@ mod native {
         impl PopupWindow {
             pub(super) fn hide(&self) {}
 
-            pub(super) fn close(self) {}
+            pub(super) fn close(&self) {}
         }
 
         /// The `WindowInfo` for a popup at `bounds` (physical screen
@@ -589,7 +616,7 @@ mod native {
                 self.window.orderOut(None);
             }
 
-            pub(super) fn close(self) {
+            pub(super) fn close(&self) {
                 self.owner.removeChildWindow(&self.window);
                 self.window.orderOut(None);
                 self.window.close();

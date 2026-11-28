@@ -229,16 +229,17 @@ pub(crate) fn refusal_script() -> String {
     )
 }
 
-/// Takes the call `call` out of `calls` and returns it when its frame is still
-/// a page of the extension the call was made for: the frame's current address
-/// (`url_of`) decides, against the stored extension. The call is taken either
-/// way, so an answer is given at most once.
+/// The call taken out of `calls` (`reply` takes it under the borrow and
+/// calls this after it has ended, since reading a frame's address is a call
+/// into CEF), and returned when its frame is still a page of the extension
+/// the call was made for: the frame's current address (`url_of`) decides,
+/// against the stored extension. The call is taken either way, so an answer
+/// is given at most once.
 fn take_answer<F>(
-    calls: &mut HashMap<CallId, (F, u64, String)>,
-    call: CallId,
+    taken: Option<(F, u64, String)>,
     url_of: impl FnOnce(&F) -> String,
 ) -> Option<(F, u64, String)> {
-    let (frame, id, extension) = calls.remove(&call)?;
+    let (frame, id, extension) = taken?;
     let url = url_of(&frame);
     deliverable(&url, &extension).then_some((frame, id, extension))
 }
@@ -531,7 +532,9 @@ impl PageLane {
     /// Answer the page call `call`: the page's own number, in the frame
     /// that asked, if that frame is still a page of the extension that asked.
     pub(crate) fn reply(&self, call: CallId, result: Result<Value, String>) {
-        let answer = take_answer(&mut self.calls.borrow_mut(), call, frame_url);
+        // Taken under the borrow; the frame's address is read after it.
+        let taken = self.calls.borrow_mut().remove(&call);
+        let answer = take_answer(taken, frame_url);
         let Some((frame, id, extension)) = answer else {
             return;
         };
@@ -626,7 +629,7 @@ mod tests {
         let mut calls: HashMap<CallId, (String, u64, String)> = HashMap::new();
         calls.insert(1, (page.clone(), 7, ID.to_string()));
         assert_eq!(
-            take_answer(&mut calls, 1, |frame| frame.clone()),
+            take_answer(calls.remove(&1), |frame| frame.clone()),
             Some((page, 7, ID.to_string()))
         );
         assert!(calls.is_empty());
@@ -639,14 +642,14 @@ mod tests {
                 ID.to_string(),
             ),
         );
-        assert_eq!(take_answer(&mut calls, 2, |frame| frame.clone()), None);
+        assert_eq!(take_answer(calls.remove(&2), |frame| frame.clone()), None);
         assert!(calls.is_empty());
         // The frame navigated to the web.
         calls.insert(3, ("https://example.com/".to_string(), 9, ID.to_string()));
-        assert_eq!(take_answer(&mut calls, 3, |frame| frame.clone()), None);
+        assert_eq!(take_answer(calls.remove(&3), |frame| frame.clone()), None);
         assert!(calls.is_empty());
         // A call that is not pending has no answer.
-        assert_eq!(take_answer(&mut calls, 4, |frame| frame.clone()), None);
+        assert_eq!(take_answer(calls.remove(&4), |frame| frame.clone()), None);
     }
 
     #[test]

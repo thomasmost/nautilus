@@ -432,7 +432,9 @@ impl TabHostApi for TabHost {
             // press), so forget the buttons rather than stamp every
             // later move with one; a drag goes with its page.
             self.button_flags.set(0);
-            entry.view.drag.borrow_mut().take();
+            // Let go of the session after its borrow: it holds CEF drag data.
+            let session = entry.view.drag.borrow_mut().take();
+            drop(session);
             if let Some(host) = entry.browser.host() {
                 if host.has_dev_tools() != 0 {
                     host.close_dev_tools();
@@ -707,7 +709,11 @@ impl TabHostApi for TabHost {
         let Some(host) = entry.browser.host() else {
             return;
         };
-        if entry.view.drag.borrow().is_some() && self.drag_input(entry, &host, &input) {
+        // A named flag: the borrow of `drag` ends here. In the condition the
+        // guard of the left operand would outlive it, and `drag_input`
+        // borrows the same cell mutably.
+        let dragging = entry.view.drag.borrow().is_some();
+        if dragging && self.drag_input(entry, &host, &input) {
             return;
         }
         let scale = self.scale.get();
@@ -864,13 +870,18 @@ impl TabHostApi for TabHost {
         let Some(host) = entry.browser.host() else {
             return;
         };
-        let menu = entry.view.context_menu.borrow();
-        let point = menu.as_ref().map(|m| (m.x, m.y));
-        let Some(frame) = menu
-            .as_ref()
-            .and_then(|m| m.frame.clone())
-            .or_else(|| entry.browser.main_frame())
-        else {
+        // The menu's point and frame are copied out; the borrow ends here, so
+        // no CEF call below runs under it (a closed menu would need it).
+        let (point, frame) = {
+            let menu = entry.view.context_menu.borrow();
+            let point = menu.as_ref().map(|m| (m.x, m.y));
+            let frame = menu
+                .as_ref()
+                .and_then(|m| m.frame.clone())
+                .or_else(|| entry.browser.main_frame());
+            (point, frame)
+        };
+        let Some(frame) = frame else {
             return;
         };
         let cef_text = |s: &str| CefString::from(s);
@@ -914,7 +925,9 @@ impl TabHostApi for TabHost {
 
     fn context_menu_closed(&self, tab: TabId) {
         if let Some(entry) = self.tabs.get(tab) {
-            entry.view.context_menu.borrow_mut().take();
+            // Let go of the menu after its borrow: it holds a CEF frame.
+            let menu = entry.view.context_menu.borrow_mut().take();
+            drop(menu);
         }
     }
 
