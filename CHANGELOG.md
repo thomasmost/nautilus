@@ -246,6 +246,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- `tabGroups.update` with a title that has spaces around it answers at
+  once, with the title the folder gets (trimmed). It waited five
+  seconds and answered the title as it was written, which no folder
+  had.
+
 - An extension's worker that lists the tabs as it starts is answered
   with the ids Chromium knows them by. Started early (an extension
   installed into a running browser, or a quick worker at launch) it

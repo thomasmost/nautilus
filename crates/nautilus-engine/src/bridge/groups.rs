@@ -267,13 +267,13 @@ fn update(view: &GroupView, call: &GroupCall<'_>) -> Result<GroupRoute, String> 
         // Colour alone: folders have none.
         return Ok(GroupRoute::Answer(tab_group(window, folder)));
     }
+    // The name the folder will have: the model trims what it is given
+    // (`UpdateFolder`), and words a blank one itself. What is waited for
+    // on the strip, and answered, is that name, not the argument.
+    let named = title.map(str::trim).filter(|title| !title.is_empty());
     let mut after = folder.clone();
-    if let Some(title) = title {
-        after.name = if title.trim().is_empty() {
-            call.session_name.to_string()
-        } else {
-            title.to_string()
-        };
+    if title.is_some() {
+        after.name = named.unwrap_or(call.session_name).to_string();
     }
     if let Some(collapsed) = collapsed {
         after.expanded = !collapsed;
@@ -286,9 +286,7 @@ fn update(view: &GroupView, call: &GroupCall<'_>) -> Result<GroupRoute, String> 
         },
         then: GroupThen::Updated {
             folder: folder.id,
-            title: title
-                .filter(|title| !title.trim().is_empty())
-                .map(str::to_string),
+            title: named.map(str::to_string),
             collapsed,
             group: tab_group(window, &after),
         },
@@ -659,6 +657,41 @@ mod tests {
                         "title": "Research", "windowId": 1, "shared": false}),
                 },
             })
+        );
+    }
+
+    #[test]
+    fn a_title_with_spaces_around_it_is_awaited_and_answered_trimmed() {
+        // The model trims a folder's name (`UpdateFolder`), so the strip
+        // will show "Trip": a call that waited for "  Trip  " would wait
+        // its whole limit and then answer a title no folder has.
+        let view = two_windows();
+        let Some(GroupRoute::Request { request, then }) = ask(
+            &view,
+            "tabGroups",
+            "update",
+            json!([7, {"title": "  Trip \t"}]),
+        ) else {
+            panic!("not a request");
+        };
+        // The model is given the title as the extension wrote it.
+        assert_eq!(
+            request,
+            ExtensionRequest::UpdateFolder {
+                folder: FolderId(7),
+                name: Some("  Trip \t".to_string()),
+                expanded: None,
+            }
+        );
+        assert_eq!(
+            then,
+            GroupThen::Updated {
+                folder: FolderId(7),
+                title: Some("Trip".to_string()),
+                collapsed: None,
+                group: json!({"id": 7, "collapsed": false, "color": "grey",
+                    "title": "Trip", "windowId": 1, "shared": false}),
+            }
         );
     }
 
