@@ -506,12 +506,19 @@ Ninja on `PATH`:
   Chromium's order: the panel, the popup, `action.onClicked`. No user
   gesture is asked for (C20).
 - **A replaced namespace is pinned on `chrome` and on `browser`,
-  through `pin` and nothing else.** Chromium sets every API on both
+  through `pin` and nothing else; `commands` alone is replaced in
+  place.** Chromium sets every API on both
   globals and sets them again in live contexts when the extensions
   change, so a replacement is put in by `__nautilusBridge.pin` alone
   (`js/core.js`; `define` and `js/side_panel.js` call it): the same
   object on both, not configurable, not writable (C19). No namespace
-  script sets a property of `chrome` or `browser` itself. The rule is
+  script sets a property of `chrome` or `browser` itself. Every pinned
+  name stops Chromium's update of a live context's APIs at that name
+  (C19: an optional permission granted later gives no API that sorts
+  after it), so `commands`, which sorts before most, is not pinned:
+  `defineInPlace` replaces the members of Chromium's own object and
+  leaves the property. Do that only for a namespace none of whose own
+  functions does harm. The rule is
   fail-closed: a function of a replaced namespace the engine does not
   know rejects (`<namespace>.<name> is not supported.`) and is never
   forwarded, and a context whose bridge cannot be put in has `tabs`,
@@ -816,8 +823,6 @@ Not verified:
   gate and the real-extension runs. `panel.sh`, `phase5.py` and the
   `run.sh` modes were not run again; `run.sh reload` and `zombie` not
   since Phase 5.
-- C19's cost (an optional permission granted to a live context): read
-  in Chromium's source, not seen.
 
 Known and left:
 

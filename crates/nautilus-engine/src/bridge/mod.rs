@@ -339,10 +339,10 @@ mod tests {
             ("tabs", TABS_JS),
             ("windows", WINDOWS_JS),
             ("tabGroups", TAB_GROUPS_JS),
-            ("commands", COMMANDS_JS),
         ] {
             assert!(script.contains(&format!("bridge.define('{namespace}', {{")));
         }
+        assert!(COMMANDS_JS.contains("bridge.defineInPlace('commands', {"));
         // What the bridge wraps on Chromium's own runtime and debugger
         // objects holds for `browser` because the object is one.
         assert!(CORE_JS.contains("same('runtime');"));

@@ -1281,7 +1281,12 @@ so does the hand-written `sidePanel`; no namespace script sets a
 property of `chrome` or `browser` itself (a test holds them to that).
 So `browser.tabs === chrome.tabs` in a bridged context, and likewise
 `windows`, `tabGroups`, `commands` and `sidePanel`; a context without
-`browser` gains none. What the bridge wraps without replacing
+`browser` gains none. `commands` is the one namespace not pinned
+(`defineInPlace`, C19): the property stays Chromium's on both globals
+and Chromium's own object, one for both, has its members replaced in
+place, so Chromium's update of a live context's APIs does not stop at
+`commands`; where a member cannot be replaced it is pinned like the
+rest. What the bridge wraps without replacing
 (`runtime.getContexts`, `runtime.onMessage`, the worker's
 `runtime.onConnect`, `debugger.attach` and `detach`) it wraps on
 Chromium's own object, which is one object for both globals;

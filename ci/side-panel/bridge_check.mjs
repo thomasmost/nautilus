@@ -44,10 +44,11 @@ function guarded(script, refuses) {
 const namespacesScript = () => NAMESPACES.map(([file, refuses]) => guarded(read(file), refuses)).join('\n');
 
 // `frozen`: a namespace whose property `chrome` does not let go of and whose
-// object is frozen. `stuck`: [namespace, member], the same property holding
+// object is frozen. `sealed`: a namespace whose object is frozen under a
+// property that can be redefined. `stuck`: [namespace, member], the same property holding
 // an object one member of which cannot be replaced. `throwing`: a namespace
 // whose property throws when read.
-function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null, panels = null, browser = null, pinnedBrowser = false, runtimeApart = false, debuggerApi = false, frozen = null, stuck = null, throwing = null }) {
+function world({ viaPage, prime = null, sidePanel = true, pinned = false, commands = true, tabGroups = true, contexts = null, panels = null, browser = null, pinnedBrowser = false, runtimeApart = false, debuggerApi = false, frozen = null, sealed = null, stuck = null, throwing = null }) {
   const reached = []; // Chromium functions that were really called
   const calls = []; // what the engine was asked
   const answers = new Map(); // "ns.method" -> (args) => value | throws
@@ -187,6 +188,9 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
   if (frozen) {
     Object.defineProperty(chrome, frozen, { value: Object.freeze(chrome[frozen]), configurable: false, writable: false, enumerable: true });
   }
+  if (sealed) { Object.freeze(chrome[sealed]); }
+  // Chromium's own commands object, as it is before the bridge runs.
+  const ownCommands = chrome.commands;
   if (stuck) {
     const [name, member] = stuck;
     Object.defineProperty(chrome[name], member, { value: chrome[name][member], configurable: false, writable: false, enumerable: true });
@@ -241,7 +245,7 @@ function world({ viaPage, prime = null, sidePanel = true, pinned = false, comman
     sandbox.__nautilusTransport = { protocol: 1, portHidden: true };
   }
   vm.runInContext(namespacesScript(), sandbox);
-  return { chrome, natives, reached, calls, answers, messages, filters, debuggerState, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
+  return { chrome, natives, ownCommands, reached, calls, answers, messages, filters, debuggerState, errors: sandbox.errors, emit: (name, args) => handler(name, args), sandbox };
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -500,7 +504,43 @@ for (const viaPage of [false, true]) {
   w.emit('commands.onCommand', ['toggle-side-panel', { id: 7, index: 0, windowId: 1 }]);
   assert.deepEqual(pressed, [['toggle-side-panel', 7], 'second toggle-side-panel']);
   assert.deepEqual(w.reached, [], 'a commands call reached Chromium');
-  assert.throws(() => Object.defineProperty(chrome, 'commands', { value: { chromium: true }, writable: true, enumerable: true, configurable: true }), TypeError);
+  // commands is not pinned (docs/upstream-issues.md, C19): the property is
+  // left as Chromium made it, and the object is Chromium's own with its
+  // members replaced in place. So Chromium's update of the context's APIs,
+  // which walks them by name and stops at the first one it cannot define,
+  // does not stop at `commands`: it defines the property again, answering
+  // the context's one cached object, and the members are still the bridge's.
+  assert.equal(chrome.commands, w.ownCommands, 'chrome.commands is not Chromium\'s own object');
+  assert.equal(Object.getOwnPropertyDescriptor(chrome, 'commands').configurable, true, 'chrome.commands is pinned');
+  assert.ok(w.sandbox.__nautilusBridge.installed.includes('commands'));
+  Object.defineProperty(chrome, 'commands', { value: w.ownCommands, writable: true, enumerable: true, configurable: true });
+  w.calls.length = 0;
+  assert.equal((await chrome.commands.getAll()).length, 1);
+  assert.deepEqual(w.calls, [['commands', 'getAll', []]]);
+  w.emit('commands.onCommand', ['toggle-side-panel', { id: 9, index: 0, windowId: 1 }]);
+  assert.deepEqual(pressed.slice(-2), [['toggle-side-panel', 9], 'second toggle-side-panel'], 'onCommand is not the bridge\'s after an update');
+  assert.deepEqual(w.reached, [], 'a commands call reached Chromium after an update');
+  // No member can be put back.
+  for (const key of ['getAll', 'frobnicate', 'onCommand']) {
+    assert.throws(() => Object.defineProperty(chrome.commands, key, { value: () => {}, writable: true, enumerable: true, configurable: true }), TypeError, key);
+  }
+  // Where Chromium's object does not let its members go (frozen), the
+  // replacement is pinned as the other namespaces are, so that onCommand is
+  // the bridge's either way: a shortcut the browser took from the page must
+  // reach a listener.
+  {
+    const s = world({ viaPage, sealed: 'commands', browser: 'alias' });
+    const heard = [];
+    s.sandbox.chrome.commands.onCommand.addListener((command) => heard.push(command));
+    await tick();
+    assert.ok(s.calls.some(([ns, method, args]) => ns === 'bridge' && method === 'listen' && args[0] === 'commands.onCommand'));
+    s.emit('commands.onCommand', ['probe', { id: 1 }]);
+    assert.deepEqual(heard, ['probe']);
+    await s.sandbox.browser.commands.getAll();
+    assert.deepEqual(s.reached, []);
+    assert.equal(s.sandbox.browser.commands, s.sandbox.chrome.commands);
+    assert.equal(Object.getOwnPropertyDescriptor(s.sandbox.chrome, 'commands').configurable, false);
+  }
   // An extension that declares no commands has no chrome.commands.
   assert.equal(world({ viaPage, commands: false }).chrome.commands, undefined);
 
@@ -683,6 +723,14 @@ for (const viaPage of [false, true]) {
     for (const name of REPLACED) {
       assert.equal(browser[name], chrome[name], `browser.${name} is not chrome.${name} (${where})`);
       const d = Object.getOwnPropertyDescriptor(browser, name);
+      if (name === 'commands') {
+        // Not pinned on either global: Chromium's own object, one for
+        // both, with its members replaced.
+        assert.equal(browser.commands, w.ownCommands, `browser.commands is not Chromium's own object (${where})`);
+        assert.equal(d.configurable, true, `browser.commands is pinned (${where})`);
+        assert.equal(Object.getOwnPropertyDescriptor(chrome, 'commands').configurable, true, `chrome.commands is pinned (${where})`);
+        continue;
+      }
       assert.deepEqual([d.configurable, d.writable, d.enumerable], [false, false, true], `browser.${name} is not pinned (${where})`);
       // Chromium cannot put its own back on `browser` either.
       assert.throws(
@@ -917,6 +965,7 @@ for (const viaPage of [false, true]) {
     const everything = { direct: ['group', 'ungroup', 'query', 'create', 'update', 'get', 'getAll', 'move', 'open', 'getOptions', 'frobnicate', 'createSplit'] };
     for (const name of ['tabs', 'windows', 'tabGroups', 'commands', 'sidePanel']) {
       try { if (typeof bridge.define === 'function') bridge.define(name, everything); } catch { /* refused */ }
+      try { if (typeof bridge.defineInPlace === 'function') bridge.defineInPlace(name, everything); } catch { /* refused */ }
       try { if (typeof bridge.pin === 'function') bridge.pin(name, {}); } catch { /* refused */ }
     }
     for (const api of [w.sandbox.chrome, w.sandbox.browser].filter(Boolean)) {

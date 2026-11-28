@@ -485,11 +485,12 @@ or the two `blink` lists. Re-check on a CEF bump by running with
 The bridge replaces `chrome.tabs`, `chrome.windows`, `chrome.tabGroups`,
 `chrome.commands` and `chrome.sidePanel` in every context of a bridged
 extension, and the same names on `browser` (below), and makes each
-property non-configurable (`pin` in `bridge/js/core.js`, for `define`
-and `js/side_panel.js`), because Chromium defines every
+property but `commands` non-configurable (`pin` in `bridge/js/core.js`,
+for `define` and `js/side_panel.js`), because Chromium defines every
 API on `chrome` again in each live context whenever the set of
 extensions or an extension's permissions change, and a configurable
-property would be Chromium's own once more.
+property would be Chromium's own once more. `commands` is replaced
+another way, which costs nothing (below, "`commands` is not pinned").
 
 **Read in Chromium's source** (tag `156.0.8078.100`, the milestone of
 the `cef` pin; `extensions/renderer/native_extension_bindings_system.cc`,
@@ -511,24 +512,61 @@ if (!set_accessor(accessor_name)) {
 (line 769, the line the browser's log names). `SetLazyDataProperty`
 fails on an own property that is not configurable. So in a context the
 bridge has been put into, every later update redefines the APIs whose
-names sort before the first pinned one and stops there: with the
-`commands` namespace replaced that is `commands` (after `action`,
-`alarms`, `bookmarks`, ...), else `sidePanel`, `tabGroups` or `tabs`.
+names sort before the first pinned one and stops there: `sidePanel`
+where the extension has that permission, else `tabGroups`, else `tabs`
+(until 2026-11-27 `commands` was pinned too, and for every extension
+that declares a command the update stopped there, after `action`,
+`alarms`, `bookmarks`, ...).
 The loop over the developer-mode-restricted features and the
 `browser.devtools` accessor, both after it in the function, are not
 reached either, nor is `browser`'s own property of the pinned name
 (each API is set on `chrome` first, and the function returns there). What a context already had is untouched: the lazy
 properties set when the context was created stay.
 
-**Inferred, not seen:** an API that becomes available to a live context
-later (an optional permission granted through `permissions.request`,
-whose name sorts at or after the first pinned namespace, which is nearly
-all of them: `cookies`, `debugger`, `downloads`, `history`, `scripting`,
-`storage`, `webNavigation`, ...) does not appear on `chrome` in that
-context until the context is made again (the worker restarts, the page
-reloads). No run here granted a permission to a live context. The log
-line itself is in the scripted runs' browser logs
+**Seen (2026-11-27, `panel.sh groups`, the bundle on CEF 156):** an API
+that becomes available to a live context later (an optional permission
+granted through `permissions.request`) appears on `chrome` in that
+context only when its name sorts before the first pinned namespace;
+one that sorts after it does not appear until the context is made again
+(the worker restarts, the page reloads). The test extension
+(`ci/side-panel/panel-ext`: `sidePanel`, `tabGroups`, a command, and
+`"optional_permissions": ["cookies", "storage"]`, neither of which has a
+permission warning, so Chromium asks the user nothing) asked for both.
+From its worker the request was refused: `This function must be called
+during a user gesture`. From one of its pages (`grant.html`, in a tab)
+it was granted, in the handler of a click the worker sent that page
+through the extension's own `chrome.debugger`
+(`Input.dispatchMouseEvent`, which Chromium takes for a user's:
+`event.isTrusted` was true). Afterwards `permissions.contains` answered
+true for both, and in the live worker and in the live page
+`chrome.cookies` was an object (`cookies` sorts after `commands` and
+before `sidePanel`) and `chrome.storage` was `undefined` (`storage`
+sorts after `sidePanel`). With `commands` pinned, as it was until that
+day, `cookies` would have been cut off too. The log line itself is in
+the scripted runs' browser logs
 (`native_extension_bindings_system.cc:769`).
+
+**`commands` is not pinned (2026-11-27).** `js/commands.js` calls the
+core's `defineInPlace`: the property is left as Chromium made it, on
+both globals, and Chromium's own `chrome.commands` object (which
+`browser.commands` also is) has every member replaced in place, each
+not configurable and not writable. On an update Chromium defines the
+property again and goes on to the next name; the property then answers
+the context's one cached object for the API (`BindingAccessor`, below),
+which is that same object with the bridge's members in it. Seen in the
+same run, in the test extension's worker: the property configurable on
+`chrome` and on `browser` before and after a second extension was
+installed mid-run, `browser.commands === chrome.commands`, the object
+and its `getAll` and `onCommand` identical before and after,
+`commands.getAll` answered by the bridge, and the declared command
+delivered to `commands.onCommand` both before and after. Chromium's
+object let every member be replaced: no fallback was taken. The
+fallback is the pin (`defineInPlace` calls `install` when a member
+cannot be replaced), because `onCommand` must be the bridge's or a
+shortcut the browser took from the page reaches nobody. Only `commands`
+is done this way: none of its own functions does harm if one were left,
+which is not true of `tabs`, `windows`, `tabGroups` and `sidePanel`
+(C11 to C13), whose replacement stays one pinned object.
 
 **`browser` is bridged with `chrome` (read, seen, fixed 2026-11-27).**
 The same function defines every API a second time on a global `browser`
@@ -583,23 +621,25 @@ page before and after a second extension is installed mid-run
 script has `browser` and `chrome`, and neither has any of the five
 namespaces (seen in the same run), so nothing is replaced there.
 
-**Blocks:** optional permissions taking effect in a live bridged
-context without a restart of that context (inferred). **Workaround:**
-none in place for that. A different pin was looked for in the source
-and there is none on `chrome` itself: only a non-configurable own
-property makes `SetLazyDataProperty` leave a property alone, and
-exactly that is the failure the function returns on. What the source
-does allow: leave `chrome.<name>` and `browser.<name>` configurable and
-replace the members of Chromium's own namespace object in place (what
-`pin` already does where a property cannot be redefined).
-`BindingAccessor` answers the context's cached object on every
-redefinition, so the replaced members would survive an update and no
-`SetLazyDataProperty` would fail. Not implemented and not tried: it
-rests on Chromium's namespace objects accepting `Object.defineProperty`
-on their members, which the fallback path has only ever met in
-`ci/side-panel/bridge_check.mjs`'s stand-in. Re-check on a CEF bump: the
-early `return`, the sort, that `chrome` is set before `browser`, and
-that the two share one object per API.
+**Blocks:** an optional permission taking effect in a live bridged
+context without a restart of that context, when its API's name sorts
+after the extension's first pinned namespace: after `sidePanel` for an
+extension with that permission (`storage`, `system.*`, `tabCapture`,
+`topSites`, `tts`, `webNavigation`, `webRequest`, ...), after
+`tabGroups` or `tabs` for the others (seen for `storage`).
+**Workaround:** `commands` is out of the way (above). A different pin
+was looked for in the source and there is none on `chrome` itself: only
+a non-configurable own property makes `SetLazyDataProperty` leave a
+property alone, and exactly that is the failure the function returns
+on. The in-place replacement used for `commands` would lift the cut for
+the other four as well, since Chromium's namespace objects accept
+`Object.defineProperty` on their members (seen for `commands`); it is
+not done for them, because a member of theirs that could not be
+replaced would be a function of Chromium's left callable, and the
+refusal would then have to pin after all. Re-check on a CEF bump: the
+early `return`, the sort, that `chrome` is set before `browser`, that
+the two share one object per API, and that the object survives a
+redefinition of its property.
 
 ### C4: Chromium's extension dialogs crash a windowless browser
 

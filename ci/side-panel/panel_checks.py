@@ -393,6 +393,8 @@ class Harness:
                     self.note("getContexts({}) as the worker got it: " + json.dumps(data))
                 elif kind == "browser-facts":
                     self.browser_facts(data)
+                elif kind == "grant":
+                    self.grant(data)
                 elif kind == "sidepanel-info":
                     self.note("chrome.sidePanel in %s: %s" % (data.get("context"), json.dumps(data.get("info"))))
                 elif kind == "checkpoint":
@@ -435,11 +437,17 @@ class Harness:
         apart = [name for name in there if spaces[name].get("same") is not True]
         self.check(f"in {context} browser.<name> is chrome.<name> for every bridged namespace", bool(there) and not apart,
                    {"apart": apart, "present": there})
-        loose = [name for name in there
-                 if (spaces[name].get("onBrowser") or {}).get("kind") != "data"
-                 or (spaces[name].get("onBrowser") or {}).get("configurable") is not False]
-        self.check(f"in {context} each of them is pinned on browser as on chrome", bool(there) and not loose,
+        # `commands` is replaced in place and left unpinned on both globals
+        # (docs/upstream-issues.md, C19); every other one is pinned.
+        loose = [name for name in there if name != "commands"
+                 and ((spaces[name].get("onBrowser") or {}).get("kind") != "data"
+                      or (spaces[name].get("onBrowser") or {}).get("configurable") is not False)]
+        self.check(f"in {context} each of them but commands is pinned on browser as on chrome", bool(there) and not loose,
                    {name: spaces[name].get("onBrowser") for name in loose})
+        if "commands" in there:
+            both = [(spaces["commands"].get(side) or {}).get("configurable") for side in ("onChrome", "onBrowser")]
+            self.check(f"in {context} commands is not pinned, on chrome or on browser", both == [True, True],
+                       {side: spaces["commands"].get(side) for side in ("onChrome", "onBrowser")})
         runtime = facts.get("runtime") or {}
         members = ("getContexts", "onConnect", "onMessage", "sendMessage", "connect")
         unlike = [m for m in members if (runtime.get(m) or {}).get("same") is not True]
@@ -449,6 +457,30 @@ class Harness:
             and query["browser"] == query.get("chrome") \
             and all(isinstance(t[1], int) and t[1] >= 0 and isinstance(t[2], int) and t[2] >= 1 for t in query["browser"])
         self.check(f"in {context} browser.tabs.query is answered by the bridge, with the strip's tabs", ours, query)
+
+    def grant(self, data):
+        """What chrome.permissions.request did in the live worker
+        (panel-ext, grantCheck): docs/upstream-issues.md, C19."""
+        self.note("permissions.request for cookies and storage in the live worker: " + json.dumps(data, sort_keys=True))
+        refused = (data.get("fromWorker") or {}).get("error")
+        self.check("permissions.request from the worker is refused for want of a user gesture",
+                   "user gesture" in str(refused), data.get("fromWorker"))
+        answer = (data.get("page") or {}).get("answer")
+        answer = answer if isinstance(answer, dict) else {}
+        self.check("from a page, in the handler of a click sent through chrome.debugger, it is granted",
+                   answer.get("granted") is True and answer.get("trusted") is True
+                   and (data.get("contains") or {}).get("value") is True,
+                   {"page": data.get("page"), "contains": data.get("contains")})
+        # `cookies` sorts after `commands`, which is not pinned, and before
+        # `sidePanel`, the first pinned name of this extension.
+        self.check("the granted chrome.cookies appears in the live worker and in the live page (commands does not cut the update)",
+                   (data.get("before") or {}).get("cookies") == "undefined"
+                   and (data.get("after") or {}).get("cookies") == "object"
+                   and (answer.get("after") or {}).get("cookies") == "object",
+                   {"before": data.get("before"), "after": data.get("after"), "page": answer.get("after")})
+        # `storage` sorts after `sidePanel`: C19's cut, as documented.
+        self.note("chrome.storage, granted with it and sorting after sidePanel, is %s in the live worker (C19: undefined until the worker starts again)"
+                  % (data.get("after") or {}).get("storage"))
 
     def finish(self):
         """Wait for the browser to end by itself and judge the launch."""
@@ -817,25 +849,37 @@ def groups_checks(h):
     def ungrouped():
         h.shot("2-ungrouped")
 
+    def bystander():
+        # A second extension, installed while the worker is alive: Chromium
+        # defines every API again in the worker's context.
+        h.send({"load": str(POPUP_EXT)})
+        listed = wait(lambda: h.installed_id("Nautilus Popup Close Test"), 30)
+        h.check("a second extension is installed while the worker is alive", listed is not None)
+        time.sleep(2)  # the renderers hear of it after the browser does
+
     handlers = {
         "grouped": grouped,
         "action-command": lambda: h.send({"extension_command": {"extension": h.ext_id, "name": "_execute_action"}}),
         "ungrouped": ungrouped,
         "joined": lambda: h.shot("3-joined"),
+        "bystander": bystander,
+        "command-again": lambda: h.send({"extension_command": {"extension": h.ext_id, "name": "probe-command"}}),
     }
-    h.launch(EXT, "https://example.com/ https://example.org/", 90, suite_name="groups", hold=0)
+    h.launch(EXT, "https://example.com/ https://example.org/", 150, suite_name="groups", hold=0)
     h.find_window()
-    if h.pump(handlers, 80):
+    if h.pump(handlers, 140):
         h.check("the suite ran to its end", True)
     log = h.log_text()
     sent = re.findall(r"TEST HOOK: command \d+: extension_command .*", log)
-    h.check("the control handed the declared command to the bridge",
-            len(sent) == 2 and '"probe-command"' in sent[0] and sent[0].endswith("handed to the bridge"), sent)
+    h.check("the control handed the declared command to the bridge, before and after the second extension",
+            len(sent) == 3 and all('"probe-command"' in sent[at] and sent[at].endswith("handed to the bridge") for at in (0, 2)), sent)
     h.check("the control's action command was the click, sent to the bridge",
-            len(sent) == 2 and '"_execute_action"' in sent[1] and sent[1].endswith("sent to the bridge"), sent)
+            len(sent) == 3 and '"_execute_action"' in sent[1] and sent[1].endswith("sent to the bridge"), sent)
     delivered = re.findall(r'extension \S+: command "probe-command" for TabId\(\d+\).*', log)
-    h.check("the engine sent the command to a context that listens",
-            len(delivered) == 1 and "no context listens" not in delivered[0], delivered)
+    h.check("the engine sent the command to a context that listens, both times",
+            len(delivered) == 2 and not any("no context listens" in line for line in delivered), delivered)
+    fallback = [line for line in log.splitlines() if "cannot replace the members of commands" in line]
+    h.check("Chromium's commands object let its members be replaced (no fallback to the pin)", not fallback, fallback[:2])
     chords = re.findall(r'extension \S+: command "probe-command" on (\S+)', log)
     h.note("the chord the shell is told for the command: " + json.dumps(sorted(set(chords))))
     h.finish()

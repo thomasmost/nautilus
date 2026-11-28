@@ -246,6 +246,15 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- An extension that declares a keyboard command and is granted an
+  optional permission while it runs (`permissions.request`) gets the
+  new API in its running worker and pages for most APIs, as it did
+  before commands were bridged: `cookies`, `downloads`,
+  `notifications`, `scripting` and the others whose names sort before
+  `sidePanel` (or `tabs`, for an extension without a side panel).
+  Replacing `chrome.commands` had stopped Chromium's update of a
+  running extension's APIs at `commands`.
+
 - An extension's own scripts can no longer reach Chromium's `tabs`,
   `windows`, `tabGroups` or `sidePanel` functions through the
   bridge's object. `__nautilusBridge` carried them as a member

@@ -926,9 +926,13 @@ Upstream causes and the features they block are tracked in
     too, which knows nothing of the pins here (read in the code, not
     seen to matter).
   - An optional permission granted while an extension runs
-    (`permissions.request`) is not expected to give its API to the
-    worker or page that asked until that context starts again (C19;
-    read in Chromium's source, not seen).
+    (`permissions.request`) gives its API to the extension's running
+    worker and pages only when the API's name sorts before `sidePanel`
+    (for an extension with the side panel permission; else before
+    `tabGroups`, else before `tabs`): `cookies`, `downloads`,
+    `notifications` and `scripting` arrive, `storage` and
+    `webNavigation` only when the worker or page starts again (C19;
+    seen for `cookies` and `storage`).
   - An event for an extension's worker (a command among them) that is
     queued while the worker is being replaced is dropped; a click is
     not.

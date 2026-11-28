@@ -297,9 +297,9 @@
     }
   }
 
-  // Replace the namespace on `chrome` and on `browser` (`install`), keeping
-  // Chromium's own functions, bound, for the calls the engine forwards.
-  function define(namespace, spec) {
+  // Chromium's own members of `namespace`, its functions bound, as `build`
+  // reads them and as the forwarded calls use them.
+  function sourceOf(namespace) {
     var original = chrome[namespace];
     var source = {};
     if (original) {
@@ -309,7 +309,41 @@
       });
     }
     native[namespace] = source;
+    return source;
+  }
+
+  // Replace the namespace on `chrome` and on `browser` (`install`), keeping
+  // Chromium's own functions, bound, for the calls the engine forwards.
+  function define(namespace, spec) {
+    var source = sourceOf(namespace);
     if (install(namespace, build(namespace, spec, source))) { bridge.installed.push(namespace); }
+  }
+
+  // Replace the namespace without pinning it: the property stays as Chromium
+  // made it, on both globals, and Chromium's own object has its members
+  // replaced in place. Chromium's update of a live context's APIs walks them
+  // by name and stops at the first property it cannot define (C19 in
+  // docs/upstream-issues.md), so every pinned name cuts the update short for
+  // the names after it; it defines an unpinned one again and goes on, and
+  // the property then answers the context's one cached object for that API,
+  // which is this object with the bridge's members in it. Only for a
+  // namespace none of whose own functions does harm: where the members
+  // cannot be replaced, the replacement is pinned after all (`install`), so
+  // that its events are the bridge's either way.
+  function defineInPlace(namespace, spec) {
+    var own = chrome[namespace];
+    var replacement = build(namespace, spec, sourceOf(namespace));
+    try {
+      replaceMembers(namespace, own, replacement);
+      // One object for both globals, as Chromium has it; a `browser` that
+      // keeps another has that one's members replaced too.
+      same(namespace);
+      if (twin && twin[namespace] && twin[namespace] !== own) { replaceMembers(namespace, twin[namespace], replacement); }
+      bridge.installed.push(namespace);
+    } catch (e) {
+      console.error('nautilus-bridge: cannot replace the members of ' + namespace + ', which is pinned instead: ' + e);
+      if (install(namespace, replacement)) { bridge.installed.push(namespace); }
+    }
   }
 
   // The bridge's own listeners, by event name: run before the extension's,
@@ -331,6 +365,7 @@
     call: call,
     tap: tap,
     define: define,
+    defineInPlace: defineInPlace,
     pin: install,
     BridgeEvent: BridgeEvent,
     installed: []

@@ -466,6 +466,41 @@
     chrome.tabs.onUpdated.addListener((id, info) => {
       if ('groupId' in info) events.push(['tabs.onUpdated', { id, groupId: info.groupId }]);
     });
+    // chrome.commands is not pinned (docs/upstream-issues.md, C19): it is
+    // Chromium's own object, left under the property Chromium made, with
+    // every member replaced by the bridge's. Read before anything is asked
+    // of it.
+    const member = (name) => {
+      const d = Object.getOwnPropertyDescriptor(chrome.commands, name) || {};
+      return { type: typeof d.value, configurable: d.configurable === true, writable: d.writable === true };
+    };
+    const property = (holder) => {
+      const d = Object.getOwnPropertyDescriptor(holder, 'commands') || {};
+      return { kind: 'value' in d ? 'data' : 'get' in d ? 'accessor' : 'none', configurable: d.configurable === true };
+    };
+    const commandsAre = () => ({
+      onChrome: property(chrome),
+      onBrowser: typeof browser === 'object' && browser ? property(browser) : null,
+      same: typeof browser === 'object' && !!browser && browser.commands === chrome.commands,
+      getAll: member('getAll'),
+      onCommand: member('onCommand'),
+      keys: Object.keys(chrome.commands).sort(),
+      // The bridge's events are plain objects of its own; Chromium's are not.
+      bridgeEvent: Object.getPrototypeOf(chrome.commands.onCommand) !== Object.prototype &&
+        typeof chrome.commands.onCommand.dispatch === 'function' && Array.isArray(chrome.commands.onCommand.listeners),
+      native: /\[native code\]/.test(Function.prototype.toString.call(chrome.commands.getAll)),
+    });
+    const unpinned = (facts) =>
+      facts.onChrome.configurable && facts.onBrowser && facts.onBrowser.configurable && facts.same &&
+      facts.getAll.type === 'function' && !facts.getAll.configurable && !facts.getAll.writable &&
+      facts.onCommand.type === 'object' && !facts.onCommand.configurable && !facts.onCommand.writable &&
+      facts.bridgeEvent && !facts.native;
+    const held = { object: chrome.commands, getAll: chrome.commands.getAll, onCommand: chrome.commands.onCommand };
+    step(
+      "chrome.commands is Chromium's own object with the bridge's members, not pinned, and browser.commands is the same object",
+      unpinned(commandsAre()),
+      commandsAre()
+    );
     const commands = [];
     chrome.commands.onCommand.addListener((command, tab) => commands.push({ command, tab: tab && tab.id, window: tab && tab.windowId }));
     const clicks = [];
@@ -611,8 +646,74 @@
       { out, left: Array.isArray(left) ? left.map((t) => [t.id, t.groupId]) : left, loose: loose && loose.groupId }
     );
     await chrome.tabs.ungroup([active.id]).catch(() => {});
+
+    // Another extension is installed while this worker is alive (the
+    // harness loads one at this checkpoint): Chromium then defines every
+    // API on `chrome` and `browser` again in this context. `commands` is
+    // not pinned, so its property is defined again; it must answer the
+    // same object, with the bridge's members still in it, and a shortcut
+    // must still reach the listener added before.
+    await checkpoint('bystander');
+    const still = await chrome.commands.getAll().catch(message);
+    step(
+      "after another extension is installed chrome.commands is the same object, with the bridge's getAll and onCommand, and still not pinned",
+      chrome.commands === held.object && chrome.commands.getAll === held.getAll && chrome.commands.onCommand === held.onCommand &&
+        unpinned(commandsAre()) && Array.isArray(still) && still.length === 1 && still[0].name === 'probe-command',
+      { facts: commandsAre(), sameObject: chrome.commands === held.object, getAll: still }
+    );
+    await reportBrowser('worker, after another extension was installed');
+    await checkpoint('command-again');
+    step(
+      'and the declared command still reaches commands.onCommand',
+      await until(() => commands.length >= 2, 10) && commands.length === 2 && commands[1].command === 'probe-command',
+      commands
+    );
+
+    await grantCheck();
     // Awaited: the suite's `done` follows, and must not overtake it.
     await step('no group is left', same(await tg.query({}), []));
+  }
+
+  // docs/upstream-issues.md, C19: an API granted to this live worker
+  // through chrome.permissions.request. `cookies` sorts between `commands`
+  // (not pinned) and `sidePanel` (the first pinned name of this extension),
+  // `storage` after it. Neither has a permission warning, so Chromium asks
+  // the user nothing. The request needs a user gesture: asked first from
+  // here, where there is none, then from grant.html in the handler of a
+  // click this worker sends through chrome.debugger. What happened is
+  // posted for the harness, which judges it.
+  const grant = { ready: null, answer: null };
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message && message.grantReady && grant.ready) grant.ready();
+    if (message && message.grantAnswer && grant.answer) grant.answer(message.grantAnswer);
+  });
+  async function grantCheck() {
+    const what = { permissions: ['cookies', 'storage'] };
+    const has = () => ({ cookies: typeof chrome.cookies, storage: typeof chrome.storage });
+    const said = (promise) => promise.then((value) => ({ value }), (error) => ({ error: String((error && error.message) || error) }));
+    const out = { before: has(), held: await said(chrome.permissions.contains(what)) };
+    out.fromWorker = await said(chrome.permissions.request(what));
+    out.afterWorker = has();
+    if (!(out.fromWorker.value === true)) {
+      const ready = new Promise((resolve) => { grant.ready = resolve; });
+      const answer = new Promise((resolve) => { grant.answer = resolve; });
+      const tab = await chrome.tabs.create({ url: chrome.runtime.getURL('grant.html'), active: true });
+      out.page = { tab: tab.id, ready: await Promise.race([ready.then(() => true), sleep(10000).then(() => false)]) };
+      const target = { tabId: tab.id };
+      out.page.attach = await said(chrome.debugger.attach(target, '1.3'));
+      if (!out.page.attach.error) {
+        const click = (type) => chrome.debugger.sendCommand(target, 'Input.dispatchMouseEvent', { type, x: 60, y: 60, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 });
+        out.page.click = await said(click('mousePressed').then(() => click('mouseReleased')));
+        out.page.answer = await Promise.race([answer, sleep(10000).then(() => 'no answer in 10 s')]);
+        await said(chrome.debugger.detach(target));
+      }
+      await chrome.tabs.remove(tab.id).catch(() => {});
+    }
+    // The renderer hears of a grant after the browser has made it.
+    await sleep(2000);
+    out.contains = await said(chrome.permissions.contains(what));
+    out.after = has();
+    await post('grant', out);
   }
 
   const suites = { panel: panelSuite, behavior: behaviorSuite, groups: groupsSuite };
