@@ -246,6 +246,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- `tabGroups.update` on a group that is removed while the call is
+  under way rejects at once with Chrome's `No group with id`, where it
+  waited five seconds and then answered a group that no longer
+  existed.
+
 - `tabGroups.update` with a title that has spaces around it answers at
   once, with the title the folder gets (trimmed). It waited five
   seconds and answered the title as it was written, which no folder

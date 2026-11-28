@@ -171,7 +171,7 @@ pub(crate) fn route(view: &GroupView, call: &GroupCall<'_>) -> Option<GroupRoute
     Some(routed.unwrap_or_else(GroupRoute::Reject))
 }
 
-fn no_group(id: i64) -> String {
+pub(crate) fn no_group(id: i64) -> String {
     format!("No group with id: {id}.")
 }
 

@@ -970,7 +970,10 @@ pub(crate) fn settle(
                 // The group as asked for, once the strip's folder has the
                 // title and the collapsed state. With neither to look for
                 // (a blank title, which the model words), a strip after
-                // the reply, or a moment.
+                // the reply, or a moment. A folder the strip no longer
+                // holds was removed meanwhile (the call was routed with it
+                // there, and the model took the update): Chrome's words
+                // for a group that is gone, at once.
                 (
                     groups::GroupThen::Updated {
                         folder,
@@ -980,16 +983,17 @@ pub(crate) fn settle(
                     },
                     ExtensionReply::Done,
                 ) => {
-                    let shown = view
+                    let Some(found) = view
                         .snapshot
                         .windows
                         .iter()
                         .flat_map(|window| &window.folders)
                         .find(|candidate| candidate.id == *folder)
-                        .is_some_and(|found| {
-                            title.as_ref().is_none_or(|title| found.name == *title)
-                                && collapsed.is_none_or(|collapsed| found.expanded != collapsed)
-                        });
+                    else {
+                        return Settled::Now(Err(groups::no_group(group_id(Some(*folder)))));
+                    };
+                    let shown = title.as_ref().is_none_or(|title| found.name == *title)
+                        && collapsed.is_none_or(|collapsed| found.expanded != collapsed);
                     let looked_for = title.is_some() || collapsed.is_some();
                     if (shown && (looked_for || ready)) || last_chance {
                         Settled::Now(Ok(group.clone()))
@@ -2197,6 +2201,21 @@ mod tests {
             settle(&titled, &done, &grouped.view(), true, SETTLE_LIMIT),
             Settled::Now(Ok(group.clone()))
         );
+        // The group is removed meanwhile (its last tab was ungrouped
+        // before the strip with the change was published): the strip
+        // shows no such folder, and the update rejects as Chrome does for
+        // a group that is gone, at once, not after the limit with a group
+        // that no longer exists.
+        for then in [&titled, &collapse, &update(None, None)] {
+            assert_eq!(
+                settle(then, &done, &loose.view(), true, Duration::ZERO),
+                Settled::Now(Err("No group with id: 7.".to_string()))
+            );
+            assert_eq!(
+                settle(then, &done, &loose.view(), false, SETTLE_LIMIT),
+                Settled::Now(Err("No group with id: 7.".to_string()))
+            );
+        }
         // A blank title is the model's to word: with nothing to look for,
         // a strip after the reply, or a moment.
         let blank = update(None, None);
