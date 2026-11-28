@@ -788,8 +788,11 @@ own after `e511c37`, the tests written first):
   the page's holds; the bridge's `debugger.onDetach` listener is
   hidden; a debugger outlives the page that attached it, so the engine
   keeps it (measured, no code change); four handlers take clones
-  before they let go of their owner; the Rust tests that only read a
-  script's text are gone.
+  before they let go of their owner; a Rust test reads a script's text
+  only where Rust generates that text (the worker's loader, the refusal's
+  composition, the order of the scripts in a page's and a worker's
+  composition), and every script in `bridge/js/` is run by
+  `ci/side-panel/bridge_check.mjs`.
 
 Verified, all on the Mac (Apple silicon, CEF 156), every launch on a
 scratch `--data-dir`:

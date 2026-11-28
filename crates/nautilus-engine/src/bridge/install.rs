@@ -858,7 +858,6 @@ mod tests {
         let key = standard_base64(manifest["key"].as_str().unwrap());
         assert_eq!(crate::crx::id_for_key(&key), HELPER_ID);
         assert_eq!(manifest["permissions"], serde_json::json!(["debugger"]));
-        assert!(HELPER_JS.contains("chrome.debugger.getTargets"));
     }
 
     #[test]
@@ -1267,15 +1266,5 @@ mod tests {
             "{:?}",
             names_in(store.path())
         );
-    }
-
-    #[test]
-    fn the_scripts_agree_on_the_port_and_the_page_names() {
-        assert!(BRIDGE_JS.contains("'nautilus-bridge-1'"));
-        assert!(RELAY_JS.contains("'nautilus-bridge-1'"));
-        assert!(BRIDGE_JS.contains("self.__nautilusTransport"));
-        assert!(RELAY_JS.contains("window.nautilusRelay"));
-        assert!(RELAY_HTML.contains("relay.js"));
-        assert!(HELPER_HTML.contains("helper.js"));
     }
 }

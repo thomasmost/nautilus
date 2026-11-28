@@ -764,19 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn the_namespaces_run_once_at_the_first_change_of_the_document() {
-        let script = deferred_namespaces("NAMESPACES");
-        assert!(script.starts_with("(function (root, install) {\n"));
-        assert!(script.contains("new root.MutationObserver("));
-        assert!(
-            script.contains("observer.observe(root.document, { childList: true, subtree: true });")
-        );
-        assert!(script.contains("observer.disconnect();"));
-        assert!(script.contains("no document to wait for in this context"));
-        assert!(script.ends_with("(self, function () {\nNAMESPACES\n});"));
-    }
-
-    #[test]
     fn a_reply_is_one_call_of_the_page_s_delivery_function() {
         assert_eq!(
             delivery(&json!({ "id": 3, "ok": { "title": "a \"quoted\" </script> title" } })),

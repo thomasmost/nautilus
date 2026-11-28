@@ -2044,4 +2044,36 @@ function sidePanelInGuard({ getContextsLocked = false, closeLocked = false }) {
   assert.notEqual(s.runtime.getContexts, s.nativeGetContexts, 'getContexts was not wrapped after the window.close failure');
 }
 
+{
+  // The helper page's script: the engine evaluates nautilusHelper.targets(),
+  // which asks chrome.debugger for the targets and keeps the fields the engine
+  // joins on (the Rust side's old text check, now behaviour).
+  const calls = [];
+  const chromeHelper = { debugger: { getTargets: () => { calls.push('getTargets'); return Promise.resolve([{ id: 't1', tabId: 9, type: 'page', url: 'https://web.example/', title: 'x', extra: 1 }]); } } };
+  const sandbox = { chrome: chromeHelper, console: { error() {}, log() {} }, Promise, Object, Array, JSON, Error, String };
+  sandbox.self = sandbox;
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read('helper/helper.js'), sandbox);
+  assert.deepEqual(JSON.parse(JSON.stringify(await sandbox.nautilusHelper.targets())), [{ id: 't1', tabId: 9, type: 'page', url: 'https://web.example/', title: 'x' }]);
+  assert.deepEqual(calls, ['getTargets']);
+}
+{
+  // The pages' HTML: each page loads the script the engine calls there, and
+  // the script is there to load (a page that names a missing script is a
+  // page that never answers).
+  const pages = [['relay.html', 'nautilusRelay'], ['helper/helper.html', 'nautilusHelper']];
+  for (const [page, global] of pages) {
+    const html = read(page);
+    const match = html.match(/<script src="([^"]+)"><\/script>/);
+    assert.ok(match, `${page} loads no script`);
+    const script = read(page.includes('/') ? page.slice(0, page.lastIndexOf('/') + 1) + match[1] : match[1]);
+    const sandbox = { chrome: { runtime: { onConnect: { addListener() {} }, onMessage: { addListener() {} }, connect() { return { onMessage: { addListener() {} }, onDisconnect: { addListener() {} }, postMessage() {} }; } }, debugger: { getTargets: () => Promise.resolve([]) } }, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, setTimeout, clearTimeout };
+    sandbox.self = sandbox;
+    sandbox.window = sandbox;
+    vm.createContext(sandbox);
+    vm.runInContext(script, sandbox);
+    assert.equal(typeof sandbox[global], 'object', `${page}'s script does not define ${global}`);
+  }
+}
 console.log('bridge scripts: ok');
