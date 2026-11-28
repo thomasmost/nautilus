@@ -866,7 +866,13 @@ pub(crate) fn settle(
         }
         Then::CreatedTab => match reply {
             ExtensionReply::Tab(tab) => match view.snapshot.locate(*tab) {
-                Some((window, index)) => Settled::Now(Ok(view.tab_json(window, index))),
+                // A tab not yet reported has a synthetic id, which the report
+                // replaces (tabs.onReplaced; a removal names the Chromium id).
+                // The answer waits for the report, bounded by the settle limit.
+                Some((window, index)) if view.ids.is_live(*tab) || last_chance => {
+                    Settled::Now(Ok(view.tab_json(window, index)))
+                }
+                Some(_) => Settled::Wait,
                 None if last_chance => Settled::Now(Err(
                     "The tab was closed before it could be reported.".to_string(),
                 )),
@@ -1559,6 +1565,31 @@ mod tests {
         assert_eq!(created["id"], 109);
         assert_eq!(created["index"], 2);
         assert_eq!(created["windowId"], 1);
+        // A tab the page has not reported has a synthetic id, which the report
+        // replaces (tabs.onReplaced, and the removal names the Chromium id). The
+        // answer waits for the report, so the extension is not given an id that
+        // stops being the tab's. Tab 3 is deferred in `two_windows`. After the
+        // settle bound the answer is given with the id the tab has.
+        assert_eq!(
+            settle(
+                &Then::CreatedTab,
+                &ExtensionReply::Tab(TabId(3)),
+                &world.view(),
+                true,
+                Duration::ZERO
+            ),
+            Settled::Wait
+        );
+        assert!(matches!(
+            settle(
+                &Then::CreatedTab,
+                &ExtensionReply::Tab(TabId(3)),
+                &world.view(),
+                true,
+                SETTLE_LIMIT
+            ),
+            Settled::Now(Ok(_))
+        ));
         // A tab that never appears is given up on.
         assert_eq!(
             settle(&Then::CreatedTab, &reply, &world.view(), true, SETTLE_LIMIT),
