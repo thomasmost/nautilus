@@ -1939,6 +1939,26 @@ function loadWorker(runtime) {
   assert.deepEqual(await sent, { heard: 'before close' });
   assert.ok(p.sent.some((m) => m.ns === 'sidePanel' && m.method === 'closeSelf'), 'the close was not asked of the engine');
 }
+{
+  // While held, a call Chromium refuses by its argument shapes throws at once,
+  // as Chromium does (probed in Chromium 156: a TypeError with this message,
+  // synchronously, after the hold), and is not held. A valid call is held.
+  const p = pageContext({ sidePanel: true });
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50 });
+  p.mutate();
+  const runtime = p.sandbox.chrome.runtime;
+  const message = 'Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function callback): No matching signature.';
+  const id = 'abcdefghijklmnopabcdefghijklmnop';
+  const refused = [[], [42, 'x'], [{}, 'x'], [id, 'x', 'nope'], [id, 'x', 42], [id, 'x', 42, () => {}], [id, 'x', null, () => {}, 'extra'], [42, 'x', {}]];
+  for (const args of refused) {
+    assert.throws(() => runtime.sendMessage(...args), (e) => e.name === 'TypeError' && e.message === message, JSON.stringify(args.map(String)));
+  }
+  assert.deepEqual(p.messages, [], 'a call Chromium refuses was held');
+  const ok = runtime.sendMessage('fine');
+  p.tell('bridge.reported', [{ panel: false }]);
+  assert.deepEqual(p.messages, [['fine']]);
+  assert.deepEqual(await ok, { heard: 'fine' });
+}
 // window.close() in an extension page. An extension with the "sidePanel"
 // permission asks the engine first, for at most half a second: a side
 // panel's page is closed by the model (the engine answers nothing), any

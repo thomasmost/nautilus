@@ -589,6 +589,14 @@ def frames_check(h):
             (seen.get("namespaces") or {}).get(name) == "undefined" for name in names)
         h.check(f"an extension page's {frame} frame has no bridged namespace and no bridge",
                 bare, seen)
+    # Chromium refuses each bad argument shape by a synchronous TypeError; the
+    # bridge's held sendMessage copies that (page_report.js, refusedShape).
+    shapes = latest("send-shapes", lambda d: d.get("page") == "panel.html")
+    answers = (shapes["data"]["shapes"] if shapes else {}) or {}
+    h.check("Chromium refuses each bad sendMessage argument shape with a TypeError, at once",
+            len(answers) == 7 and all(text.startswith("threw TypeError: Error in invocation of runtime.sendMessage(")
+                                      and text.endswith("No matching signature.") for text in answers.values()),
+            answers)
     parent = data.get("parent") or {}
     h.check("the extension page itself has the bridge and its bridged namespaces",
             parent.get("bridge") == "object" and parent.get("namespaces", {}).get("tabs") == "object",

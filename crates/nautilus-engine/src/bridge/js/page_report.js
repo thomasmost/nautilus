@@ -74,9 +74,26 @@
     waiting = [];
     sends.forEach(function (send) { send(); });
   }
+  // Chromium's signature of runtime.sendMessage, and its refusal by shape.
+  // A call the shape refuses throws here at once, as Chromium's does (probed
+  // in Chromium 156 with the same TypeError), and is not held. Only the shapes
+  // the probe refused are checked: any other argument error is Chromium's,
+  // after the hold (bridge-protocol.md, the hold).
+  var SIGNATURE_ERROR = 'Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function callback): No matching signature.';
+  function refusedShape(args) {
+    var n = args.length;
+    if (n > 0 && typeof args[n - 1] === 'function') { n -= 1; }
+    if (n === 0 || n > 3) { return true; }
+    if (n === 2) { return typeof args[0] !== 'string' && (args[1] === null || typeof args[1] !== 'object'); }
+    if (n === 3) {
+      return typeof args[0] !== 'string' || (args[2] !== undefined && args[2] !== null && typeof args[2] !== 'object');
+    }
+    return false;
+  }
   function heldSend() {
     var args = arguments;
     if (!holding) { return ownSend.apply(runtime, args); }
+    if (refusedShape(args)) { throw new TypeError(SIGNATURE_ERROR); }
     if (typeof args[args.length - 1] === 'function') {
       // The callback is Chromium's to call, with its lastError.
       waiting.push(function () {

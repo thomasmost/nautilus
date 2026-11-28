@@ -1161,8 +1161,16 @@ panel's page then for `bridge.told`, for at most 1 s more
 arguments it was given, in order, and its answer is Chromium's own: the
 promise settles as Chromium's does, a callback is Chromium's to call
 with `runtime.lastError`. From then on the property holds Chromium's
-function again, identically. The state forgets a wait nobody reported
-on after `PUBLISH_WAIT`. Seen in `panel.sh panel`: the at-load message
+function again, identically. While the holder stands, a call whose
+argument shape Chromium refuses throws at once, as Chromium's TypeError
+does, and is not held (`refusedShape` in `js/page_report.js`: no
+argument; more than three without a trailing callback; a first argument
+that is not a string where an extension id is read; options that are
+not an object). Any other argument error is Chromium's own, after the
+hold: a rejection or `runtime.lastError`, not a throw. The held messages
+also go at the page's `pagehide`, and before its own `window.close()`
+asks the engine to close it (2026-11-27). The state forgets a wait nobody
+reported on after `PUBLISH_WAIT`. Seen in `panel.sh panel`: the at-load message
 of each of the run's panel pages reached the worker without
 `sender.tab`, the word coming within the same second as the report.
 

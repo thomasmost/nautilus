@@ -770,6 +770,12 @@ disabled in it. A rerun of a workflow run replaces that run's release.
 
 ### Known limitations
 
+- A side panel's page holds `runtime.sendMessage` for its first messages
+  (the hold in `docs/bridge-protocol.md`). A call Chromium refuses by its
+  argument shape throws at once, as Chromium's does; any other argument
+  error is reported after the hold, as a rejection or `runtime.lastError`,
+  not as a throw.
+
 - A page may use the microphone and the camera after you allow it, for
   that run only: there is no list of allowed sites and nothing is
   remembered after a quit. Screen sharing (`getDisplayMedia`) and the
