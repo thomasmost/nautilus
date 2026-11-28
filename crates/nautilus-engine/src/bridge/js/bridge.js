@@ -394,11 +394,33 @@
     define(chrome.debugger, 'attach', reporting(nativeAttach, chrome.debugger, 'debugger.attached'));
     define(chrome.debugger, 'detach', reporting(nativeDetach, chrome.debugger, 'debugger.detached'));
     // A detach the extension did not make: its tab closed, or the user
-    // cancelled the debugger's infobar.
-    if (chrome.debugger.onDetach) {
-      chrome.debugger.onDetach.addListener(function (source) {
+    // cancelled the debugger's infobar. The listener is the bridge's own,
+    // hidden from the extension as the onConnect listener above is:
+    // `hasListeners()` counts the extension's listeners only.
+    var onDetach = chrome.debugger.onDetach;
+    if (onDetach) {
+      var detachListener = function (source) {
         if (source) { report('debugger.detached', source); }
+      };
+      var detachAdd = onDetach.addListener.bind(onDetach);
+      var detachRemove = onDetach.removeListener.bind(onDetach);
+      var detachHas = onDetach.hasListener.bind(onDetach);
+      var theirs = [];
+      define(onDetach, 'addListener', function (listener) {
+        if (typeof listener === 'function' && theirs.indexOf(listener) === -1) { theirs.push(listener); }
+        return detachAdd.apply(undefined, arguments);
       });
+      define(onDetach, 'removeListener', function (listener) {
+        if (listener === detachListener) { return undefined; }
+        var at = theirs.indexOf(listener);
+        if (at !== -1) { theirs.splice(at, 1); }
+        return detachRemove(listener);
+      });
+      define(onDetach, 'hasListener', function (listener) {
+        return listener !== detachListener && detachHas(listener);
+      });
+      define(onDetach, 'hasListeners', function () { return theirs.length > 0; });
+      detachAdd(detachListener);
     }
   }
 

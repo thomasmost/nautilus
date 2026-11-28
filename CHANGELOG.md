@@ -246,6 +246,11 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- `chrome.debugger.onDetach.hasListeners()` answers for the
+  extension's own listeners. It was always true in an extension with
+  the `debugger` permission, in its worker and in its pages, because
+  the browser's own listener was counted.
+
 - `chrome.debugger.attach` and `detach` called from an extension's
   page (a side panel's among them) no longer wait behind that page's
   other calls to the browser, which could hold them for seconds while

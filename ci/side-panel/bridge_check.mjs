@@ -18,6 +18,7 @@ function nativeEvent() {
     addListener: (fn) => fns.push(fn),
     removeListener: (fn) => fns.splice(fns.indexOf(fn), 1),
     hasListener: (fn) => fns.includes(fn),
+    hasListeners: () => fns.length > 0,
     fire: (...args) => fns.map((fn) => fn(...args)),
     count: () => fns.length,
   };
@@ -1089,6 +1090,51 @@ for (const twin of [null, 'alias']) {
   w.reached.length = 0;
   await api.sendCommand({ tabId: 8 }, 'Runtime.evaluate', {});
   assert.deepEqual(w.reached, ['debugger.sendCommand']);
+  // The bridge's own onDetach listener is not the extension's to see: an
+  // extension that asks whether anybody listens is told of its own
+  // listeners only, as with the transport's onConnect listener.
+  assert.equal(api.onDetach.count(), 1, 'the bridge does not listen for detaches');
+  assert.equal(api.onDetach.hasListeners(), false, 'the bridge\'s onDetach listener shows in hasListeners()');
+  const mine = [];
+  const listener = (source, reason) => mine.push([source.tabId, reason]);
+  assert.equal(api.onDetach.hasListener(listener), false);
+  api.onDetach.addListener(listener);
+  assert.equal(api.onDetach.hasListeners(), true);
+  assert.equal(api.onDetach.hasListener(listener), true);
+  w.calls.length = 0;
+  api.onDetach.fire({ tabId: 9 }, 'canceled_by_user');
+  await tick();
+  assert.deepEqual(mine, [[9, 'canceled_by_user']], 'the extension\'s listener was not called');
+  assert.deepEqual(w.calls, [['debugger', 'detached', [9]]], 'the bridge stopped reporting detaches');
+  api.onDetach.removeListener(listener);
+  assert.equal(api.onDetach.hasListeners(), false, 'hasListeners() counts the bridge\'s listener once the extension\'s is gone');
+  assert.equal(api.onDetach.hasListener(listener), false);
+  assert.equal(api.onDetach.count(), 1, 'removing the extension\'s listener removed the bridge\'s');
+}
+{
+  // The worker's transport listens for detaches too (bridge.js), and hides
+  // its listener the same way.
+  const w = workerWorld();
+  w.pages.push(listeningRelay(w.served));
+  const onDetach = nativeEvent();
+  const own = () => Promise.resolve();
+  const sandbox = { chrome: { runtime: w.runtime, debugger: { attach: own, detach: own, onDetach } }, console: { error() {}, log() {} }, Promise, Map, Set, JSON, Object, Array, Error, String, Date, setTimeout, clearTimeout };
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(read('bridge.js'), sandbox);
+  assert.equal(onDetach.count(), 1, 'the worker\'s transport does not listen for detaches');
+  assert.equal(onDetach.hasListeners(), false, 'the transport\'s onDetach listener shows in hasListeners()');
+  const listener = () => {};
+  onDetach.addListener(listener);
+  assert.equal(onDetach.hasListeners(), true);
+  assert.equal(onDetach.hasListener(listener), true);
+  onDetach.removeListener(listener);
+  assert.equal(onDetach.hasListeners(), false);
+  assert.equal(onDetach.count(), 1);
+  // A detach Chromium makes is still reported by the transport.
+  onDetach.fire({ tabId: 9 }, 'target_closed');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(w.served, ['debugger.detached']);
 }
 {
   // A worker: bridge.js has wrapped chrome.debugger over its own port, and

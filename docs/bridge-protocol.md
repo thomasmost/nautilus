@@ -392,8 +392,11 @@ cannot track.
 a page in a tab) makes the same two reports through the page lane:
 `js/debugger.js`, one of the namespace scripts, wraps `chrome.debugger`'s
 `attach` and `detach` on Chromium's own object (which is `browser`'s
-too) and listens to `onDetach`, exactly as the worker's transport does,
-and calls `debugger.attached` / `debugger.detached` with the same
+too) and listens to `onDetach`, exactly as the worker's transport does
+(in both the listener is the bridge's own and hidden from the extension:
+`onDetach.hasListeners()` counts the listeners the extension added and
+`hasListener` never answers for the bridge's, as with the transport's
+`onConnect` listener), and calls `debugger.attached` / `debugger.detached` with the same
 `debuggee`. It does nothing in a worker (`__nautilusTransport` is the
 mark) and nothing where the page has no `chrome.debugger`. The state
 hands the call over as `Effect::Debugger` at once, ahead of the page's

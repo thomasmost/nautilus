@@ -70,11 +70,45 @@
     console.error('nautilus-bridge: cannot wrap chrome.debugger in this page; a tab it debugs is not kept painted');
   }
   // A detach the page did not make: its tab closed, or the user cancelled
-  // the debugger's infobar.
-  if (api.onDetach && typeof api.onDetach.addListener === 'function') {
-    api.onDetach.addListener(function (source) {
+  // the debugger's infobar. The listener is the bridge's own, and the
+  // extension does not see it: `hasListeners()` counts the listeners the
+  // extension added, and `hasListener` never answers for this one, as with
+  // the transport's onConnect listener (bridge.js).
+  var onDetach = api.onDetach;
+  if (onDetach && typeof onDetach.addListener === 'function') {
+    var ownListener = function (source) {
       if (source) { report('detached', source); }
+    };
+    var eventAdd = onDetach.addListener.bind(onDetach);
+    var eventRemove = typeof onDetach.removeListener === 'function' ? onDetach.removeListener.bind(onDetach) : null;
+    var eventHas = typeof onDetach.hasListener === 'function' ? onDetach.hasListener.bind(onDetach) : null;
+    var theirs = [];
+    var hide = function (name, value) {
+      try {
+        Object.defineProperty(onDetach, name, { value: value, writable: true, configurable: true });
+      } catch (e) {
+        console.error('nautilus-bridge: cannot hide the bridge\'s debugger.onDetach listener (' + name + '): ' + e);
+      }
+    };
+    hide('addListener', function (listener) {
+      if (typeof listener === 'function' && theirs.indexOf(listener) === -1) { theirs.push(listener); }
+      return eventAdd.apply(undefined, arguments);
     });
+    if (eventRemove) {
+      hide('removeListener', function (listener) {
+        if (listener === ownListener) { return undefined; }
+        var at = theirs.indexOf(listener);
+        if (at !== -1) { theirs.splice(at, 1); }
+        return eventRemove(listener);
+      });
+    }
+    if (eventHas) {
+      hide('hasListener', function (listener) {
+        return listener !== ownListener && eventHas(listener);
+      });
+    }
+    hide('hasListeners', function () { return theirs.length > 0; });
+    eventAdd(ownListener);
   }
   bridge.installed.push('debugger.reports');
 })(self);
