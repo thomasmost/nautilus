@@ -755,10 +755,13 @@ for (const viaPage of [false, true]) {
     const never = new Promise(() => {});
     s.answers.set('tabs.stripOf', ([id]) => (id === 7 ? { index: 3, windowId: 1, groupId: -1, active: true } : id === 52 || id === 53 ? { panel: true } : id === 60 ? never : null));
     const seen = [];
+    // The 'later' listener answers when the check says so, not after a time:
+    // a timer here raced the ticks below where timers are coarse (Windows).
+    let answerLater = null;
     const listener = (message, sender, respond) => {
       seen.push([message, 'tab' in sender ? Object.assign({}, sender.tab) : 'none', sender.origin]);
       if (message === 'ask') { respond('answer'); }
-      if (message === 'later') { setTimeout(() => respond('late answer'), 5); return true; }
+      if (message === 'later') { answerLater = () => respond('late answer'); return true; }
       return undefined;
     };
     const external = s.chrome.runtime.onMessageExternal;
@@ -799,7 +802,7 @@ for (const viaPage of [false, true]) {
     await tick(); await tick(); await tick();
     assert.equal(seen.at(-1)[1], 'none');
     assert.equal(answers.length, mark, 'a held message whose listener keeps the channel was answered early');
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    answerLater();
     assert.deepEqual(answers.slice(mark), [['later', 'late answer']]);
     // A tab this context has not learnt: held, then delivered with its tab
     // and the strip's fields, from its first message.
