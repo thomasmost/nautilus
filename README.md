@@ -771,10 +771,15 @@ disabled in it. A rerun of a workflow run replaces that run's release.
 ### Known limitations
 
 - A side panel's page holds `runtime.sendMessage` for its first messages
-  (the hold in `docs/bridge-protocol.md`). A call Chromium refuses by its
-  argument shape throws at once, as Chromium's does; any other argument
-  error is reported after the hold, as a rejection or `runtime.lastError`,
-  not as a throw.
+  (the hold in `docs/bridge-protocol.md`). A call whose argument shape
+  Chromium refuses throws at once, as Chromium's TypeError does: the refused
+  shapes are the ones measured in Chromium 156 (`refusal` in
+  `js/page_report.js`). Any other argument error comes after the hold: a
+  promise rejects with it, and a callback form logs it to the console, not
+  as a throw. A message flushed when the page goes away (`pagehide`, or the
+  page's own `window.close()`) may arrive without `sender.tab`, because the
+  worker may not yet have been told the panel's id; that is accepted so the
+  message is not lost.
 
 - A page may use the microphone and the camera after you allow it, for
   that run only: there is no list of allowed sites and nothing is

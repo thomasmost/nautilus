@@ -198,13 +198,19 @@ extension page opened as a tab gets its own Alloy tab id from
 browser process inside Chromium, after the page's other native calls return.
 An id no tab has gets `No tab with id`, and a page with no script does not
 crash. The crash is there with the bridge's code never called.
-**Checked 2026-11-27 (real bundle, Chromium 156):** an extension page's
-`about:blank` and `about:srcdoc` iframes are extension contexts to Chromium
-(`getContexts` lists them as `TAB` contexts of the extension), but their
-`chrome` has no `tabs`, `tabGroups`, `windows`, `sidePanel`, `commands` or
-`debugger`, and no bridge, so `tabs.group` is not reachable from them. The
-scripted panel suite checks this (`frames_check` in `ci/side-panel/panel_checks.py`).
-`window.open('about:blank')` from an extension page is not checked yet.
+**Checked 2026-11-27 (real bundle, Chromium 156):** in both of the panel
+suite's extension pages (`panel.html`, a window's panel, and `panel-tab.html`,
+a tab's), four kinds of frame are extension contexts to Chromium (`getContexts`
+lists them as `TAB` contexts of the extension): an `about:blank` frame with no
+`src`, one with `src="about:blank"`, a `srcdoc` frame, and an `about:blank`
+frame nested in the first. Each frame's `chrome` has no bridge and none of
+`tabs`, `tabGroups`, `windows`, `sidePanel`, `commands` or `debugger`, so
+`tabs.group` is not reachable from any of them. The same holds for the window
+that `window.open('about:blank')` opens from the test extension's closer tab
+(`closer.html`): no bridge and none of those namespaces; the window is closed
+again. Not measured: a `window.open('about:blank')` from the panel pages, and a
+frame inside a `srcdoc` frame. The panel suite checks the frames in
+`frames_check` in `ci/side-panel/panel_checks.py`.
 
 **Workaround:** a script ahead of each extension's service worker, and the
 namespaces of each extension page, replace `chrome.tabs`, `tabGroups`,
