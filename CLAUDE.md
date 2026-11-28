@@ -6,7 +6,7 @@ pages; the model, the egui chrome, and the winit application come from
 with Paladin (Servo). This repository holds only what is Chromium's: the
 engine crate and the binary that brands it.
 
-_Last updated: 2026-11-27 (extension side panels, tab groups as folders and extension shortcuts: a side panel is one more view of the tab host (`panel.rs`, `TabHost::create_view`), `chrome.sidePanel`, `chrome.tabGroups` and `chrome.commands` are answered by the bridge, every replaced namespace is pinned on `chrome` and on `browser` (`pin` in `js/core.js`, C19), a debugger attached from an extension's page is reported, `ci/side-panel/panel.sh` is the scripted run, and the Claude extension's panel opened in a real run, see the status section of 2026-11-27, the extension side panel; before that, 2026-11-24, Chromium's own PDF viewer is not bridged: `pages::CHROMIUM_OWN`, see the status section of 2026-11-24, the PDF viewer; before that, 2026-11-23, Chromium 156: the `cef` pin is 156.7.0, see the status section of 2026-11-23, Chromium 156; before that, the same day, three Chromium features are off after Thorium's defaults, and a feature list is added to, never replaced: `DISABLED_FEATURES` and `add_to_list_switch` in `engine.rs`, C18, see the status section of 2026-11-23, the performance review; before that, the same day, the default profile is pinned to `Default/`: `--profile-directory=Default`, or Chromium hands the global context the profile used last, see the status section of 2026-11-23, the shared cookies, and C17; before that, the same day, a tab shown again is given a new surface: every way of showing a view goes through `delegate::show_view`, and the bridge's hidden pages are told they are hidden for as long as they live, see the status section of 2026-11-23, the frozen tabs, and C16; before that, the same day, a `<select>` opens with a second window open and an extension installed, see the status section of 2026-11-23, `<select>` with two windows and an extension, whose pausing of the bridge's pages the later change replaced; before that, 2026-11-22, a `<select>` opens with more than one window open: `popup_pause.rs` tells the other tab views they are hidden while a popup widget is open, see the status section of 2026-11-22 and C15; before that, 2026-11-19, every profile in one process: one `Runtime` (CEF) per process and an `Engine` per open profile, each profile but the default one a request context under the default profile's `chromium/`, see the status section of 2026-11-19, one process; before that, the relay and the tab probe choose their own DevTools message ids, see the status section of 2026-11-19, the message ids; before that, the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
+_Last updated: 2026-11-27 (the last round on the side panel branch: each namespace is installed in its own guard and refused when it cannot be put in (`js/refuse.js`), `commands` is replaced in place and not pinned (`defineInPlace`, C19 now seen), a panel's first message is held until its worker knows the panel (`js/page_report.js`, `bridge.told`), a worker's tab calls wait for the tabs' real ids (`BridgeState::worker_call`), and the scripts' behaviour is checked in `bridge_check.mjs`, not by reading their text; before that, the same day, extension side panels, tab groups as folders and extension shortcuts: a side panel is one more view of the tab host (`panel.rs`, `TabHost::create_view`), `chrome.sidePanel`, `chrome.tabGroups` and `chrome.commands` are answered by the bridge, every replaced namespace but `commands` is pinned on `chrome` and on `browser` (`pin` in `js/core.js`, C19), a debugger attached from an extension's page is reported, `ci/side-panel/panel.sh` is the scripted run, and the Claude extension's panel opened in a real run, see the status section of 2026-11-27, the extension side panel; before that, 2026-11-24, Chromium's own PDF viewer is not bridged: `pages::CHROMIUM_OWN`, see the status section of 2026-11-24, the PDF viewer; before that, 2026-11-23, Chromium 156: the `cef` pin is 156.7.0, see the status section of 2026-11-23, Chromium 156; before that, the same day, three Chromium features are off after Thorium's defaults, and a feature list is added to, never replaced: `DISABLED_FEATURES` and `add_to_list_switch` in `engine.rs`, C18, see the status section of 2026-11-23, the performance review; before that, the same day, the default profile is pinned to `Default/`: `--profile-directory=Default`, or Chromium hands the global context the profile used last, see the status section of 2026-11-23, the shared cookies, and C17; before that, the same day, a tab shown again is given a new surface: every way of showing a view goes through `delegate::show_view`, and the bridge's hidden pages are told they are hidden for as long as they live, see the status section of 2026-11-23, the frozen tabs, and C16; before that, the same day, a `<select>` opens with a second window open and an extension installed, see the status section of 2026-11-23, `<select>` with two windows and an extension, whose pausing of the bridge's pages the later change replaced; before that, 2026-11-22, a `<select>` opens with more than one window open: `popup_pause.rs` tells the other tab views they are hidden while a popup widget is open, see the status section of 2026-11-22 and C15; before that, 2026-11-19, every profile in one process: one `Runtime` (CEF) per process and an `Engine` per open profile, each profile but the default one a request context under the default profile's `chromium/`, see the status section of 2026-11-19, one process; before that, the relay and the tab probe choose their own DevTools message ids, see the status section of 2026-11-19, the message ids; before that, the scripted runs' hooks are behind the `test-hooks` cargo feature and in no packaged build, see the status section of 2026-11-19, the test hooks; before that, a worker's tab cache follows the tabs the engine opens, renames and closes, `js/runtime.js` with `js/core.js` `tap`, so `sender.tab` carries the strip's fields from an extension page's first message; see the status section of 2026-11-19, the sender's strip; before that, review 1 of Phase 5: extensions without a worker are served through their pages, listeners are kept per context, the bridge's ports are taken by address, the copy replacement and the migration are ordered, the capture reads only web and extension pages, page calls and screenshots are bounded; see the status section of 2026-11-19, review 1 of Phase 5; before that, an extension page reports its own Chromium tab id to the engine, `bridge/js/page_report.js` and `bridge/table.rs` `report`, so its row exists and `sender.tab` carries the strip's fields; a worker's call that finds no listener is sent again, `bridge/js/bridge.js` `resend`, so the restored launch's first call is answered; an extension page's namespaces are installed at its first document change, `bridge/js/page_defer.js`, because Chromium defines `chrome` in the page after its context is created; the browser no longer traps on the page; a page's calls are held for their tab and for their extension (`BridgeState::page_call`), so the scripted run passes 66 of its checks, see the status section of 2026-11-18 (page-call holds); before that, Phase 5, Task 13: the scripted run `ci/side-panel/phase5.py` is a command; its two passes stop at an extension page opened as a tab (no bridge in it, and a SIGTRAP in the browser process); the regression modes pass on the Phase 5 build, and a delivered event starts a stopped listening worker; before that, Phase 5, Task 12: extension pages are bridged on their own page lane (`bridge/pages.rs`), not the relay page or the helper's pages; the page's port is not hidden and its `chrome.debugger` calls are not reported; before that, review cycle 6 of the side panel's Phase 1: a worker-target change asks its relay which worker it reaches, and the answer decides (`policy::asks_on`, `policy::after_ask`); the two-refresh grace is gone; `identify` rejects in a zombie page; before that, review cycle 5 of the side panel's Phase 1: a worker-target change waits for a hello received after it (`policy::WorkerWatch`), the "hidden again" line on every forget, the hello's whole chain bounded at 2 s; before that, review cycle 4 of the side panel's Phase 1: the debugger rule (uncertainty never forgets), the three-state hello, the worker-target detector with its grace, the list hold and `relay_eval` controls, the zombie, idle and stop provocations; before that, review cycle 3 of the side panel's Phase 1: a worker's identity and debugger sessions, a hidden page given up after five openings, the harness's reload, stop and broken provocations; before that, review cycle 2 of the side panel's Phase 1: the harness judges each launch, relays reopen on the engine's turn, page loss and debugger reports by targetId, the Windows control-directory rule, the test extension probes onConnect; before that, 2026-11-17 the extension bridge's spike (a loader ahead of an extension's worker, a relay page, the tab-id table) and the message pump's fallback tick; before that a page's request for the microphone or the
 camera is answered through osmena's dialog; popups are browsers
 Chromium creates, so `window.open` keeps its opener; before that blocked sites over Chromium's before-browse
 hook (osmena's list and block page); before that osmena's restored tabs warmed one by one
@@ -107,7 +107,7 @@ Ninja on `PATH`:
   captures of the launched browser's own window (found by its pid,
   `window_id.swift`) land in `ci/side-panel/out/`, which is ignored.
   `HOLD` (default 180) is how long the browser stays open after the
-  checks, `BUDGET` (150) the `panel` suite's time. Run `panel`,
+  checks, `BUDGET` (170) the `panel` suite's time. Run `panel`,
   `groups`, `phase5.py` and `run.sh pump` after any change to a script
   under `bridge/js/`: a changed script is rewritten into every bridged
   extension at its next listing.
@@ -759,8 +759,54 @@ user sees):
   closed inside the call (the convention "A CEF handler lends the
   bridge nothing of its own").
 
+The last round before the branch ships (2026-11-27, after a code
+review and the run with the two real extensions; each a commit of its
+own after `e511c37`, the tests written first):
+
+- **One failed install no longer leaves the rest Chromium's.** Each
+  namespace is installed in its own guard and refused when it cannot
+  be put in (`js/refuse.js`, `install` in `js/core.js`, `NAMESPACES`
+  in `bridge/mod.rs`), in a worker as in a page.
+- **`__nautilusBridge` hands out nothing of Chromium's.** `native`
+  stays in the core's closure; the page's report takes
+  `takeCurrentTab` once; the worker's click takes `tabs.get` itself.
+- **`commands` is replaced in place, not pinned** (`defineInPlace`),
+  and C19 is seen, not inferred: `panel.sh groups` grants `cookies`
+  and `storage` to the live worker and only `cookies` arrives.
+- **`runtime.getContexts` answers for the moment of the call**
+  (`runtime.openPanels` first).
+- **A panel's first message has no `sender.tab`**: held in the page
+  until the engine says the worker took the panel's id
+  (`js/page_report.js`, `bridge.reported`, `bridge.told`,
+  `Effect::EmitTold`).
+- **A worker's tab calls wait for the real ids** at its first start
+  (`BridgeState::worker_call`, `Hold::Ids`, `table_joined`), which was
+  also `run.sh pump`'s occasional failure.
+- Smaller: `tabGroups.update` awaits the trimmed title and rejects for
+  a group that went; the shortcut parser follows Chromium's
+  (`commands::parse_shortcut`); a page's debugger report goes ahead of
+  the page's holds; the bridge's `debugger.onDetach` listener is
+  hidden; a debugger outlives the page that attached it, so the engine
+  keeps it (measured, no code change); four handlers take clones
+  before they let go of their owner; the Rust tests that only read a
+  script's text are gone.
+
 Verified, all on the Mac (Apple silicon, CEF 156), every launch on a
 scratch `--data-dir`:
+
+- At the last commit of that round: the gate (`cargo fmt --all`,
+  clippy with and without `--all-features`, `cargo build --workspace`,
+  `cargo test --workspace`: 361 and 3; 374 and 3 with all features;
+  `node ci/side-panel/bridge_check.mjs`), and every scripted mode on
+  the bundle with `test-hooks`, each judged by its exit status:
+  `phase5.py` (76 checks), `run.sh spike` (54), `pump` (7), `reload`
+  (7), `zombie` (21), `stop` (17), `idle` (9), `broken` (14),
+  `panel.sh panel` (127), `groups` (59) and `behavior` (23, two
+  launches), each exit 0 with no check failing.
+  `run.sh pump` also ran five times in a row at `daa044c`, each exit 0
+  with 7 checks, the worker's first `tabs.query` answered with
+  Chromium's ids every time. Outputs, logs and captures are in
+  `evidence/final/` beside the worktrees.
 
 - Unit tests and the gate at `79eb6c4`: `cargo fmt --all --check`,
   clippy with and without `--all-features`, `cargo build --workspace`,
@@ -839,10 +885,13 @@ Not verified:
   messaging did not run here. Raindrop.io: not run at all.
 - Windows: nothing of this has been built or run there locally (the
   bridge has no platform code; CI builds and tests it).
-- After the pin moved to `13b073b` and `main` was merged: only the
-  gate and the real-extension runs. `panel.sh`, `phase5.py` and the
-  `run.sh` modes were not run again; `run.sh reload` and `zombie` not
-  since Phase 5.
+- The two real extensions were not run again after the last round;
+  what is above about them is as of `7f58a24`. `panel.sh
+  sample-global` and `sample-site` were not run again either.
+- The refusal's last resort (the global replaced by a stand-in) and
+  `defineInPlace`'s fallback to the pin have only met
+  `bridge_check.mjs`'s stand-in: Chromium's own objects let every
+  property be redefined in the runs here.
 
 Known and left:
 

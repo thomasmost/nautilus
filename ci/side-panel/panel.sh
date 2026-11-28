@@ -11,7 +11,7 @@
 # extension reports to it, and exits with the checks' status: judge the run
 # by that, never through a pipe. HOLD (default 180) is how long the browser
 # stays open after the checks' time, for the steps by hand; BUDGET (default
-# 150) is the panel suite's time. Output: ci/side-panel/out/.
+# 170) is the panel suite's time. Output: ci/side-panel/out/.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$here/out"

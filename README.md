@@ -290,20 +290,26 @@ under `<dir>` instead, for a second Nautilus beside the first.
   and captures the launched browser's window into
   `ci/side-panel/out/shots-<mode>/`, to be looked at. Every launch is
   judged as `run.sh` judges one (exit status, crash and leak markers).
-  `panel` (about 150 s, then `HOLD` seconds, default 180, with the
+  `panel` (about 170 s, then `HOLD` seconds, default 180, with the
   window panel left open for the steps by hand) checks
   `chrome.sidePanel` for a window and for a tab, its rejections,
   `getContexts`, the page's and the panel's widths, a tab's panel
-  showing only with its tab, `setOptions` and `window.close()` closing
-  a panel, the action's click through the test control, a second
-  window's panel, `browser.*` against `chrome.*`, a second extension
-  (`ci/side-panel/popup-ext`) installed mid-run, and a debugger
-  attached from the panel's page to a background tab. `groups` checks
-  `tabs.group`, `tabGroups.update`, `get`, `query` and `tabs.ungroup`
-  with the calls an extension makes as it opens its panel, each read
-  straight after the call before it, the group events' order, and a
-  declared command and `_execute_action` through the control's
-  `extension_command`. `behavior` launches twice on one kept data
+  showing only with its tab, that the message a panel's page sends as
+  it loads reaches the worker without `sender.tab`, `setOptions` and
+  `window.close()` closing a panel, the action's click through the
+  test control, a second window's panel, `browser.*` against
+  `chrome.*`, a second extension (`ci/side-panel/popup-ext`) installed
+  mid-run, a debugger attached from the panel's page to a background
+  tab, and that it outlives that page when the panel is closed under
+  it. `groups` checks `tabs.group`, `tabGroups.update`, `get`, `query`
+  and `tabs.ungroup` with the calls an extension makes as it opens its
+  panel, each read straight after the call before it, the group
+  events' order, a declared command and `_execute_action` through the
+  control's `extension_command`, that `chrome.commands` is Chromium's
+  own object with the bridge's members and not pinned, before and
+  after a second extension is installed mid-run, and what an optional
+  permission granted to the running extension gives its live worker
+  (C19). `behavior` launches twice on one kept data
   directory: the first sets `setPanelBehavior` and reads
   `side-panel-behavior.json`, the second calls nothing and a click
   must still open the panel. `sample-global` and `sample-site` take
@@ -313,9 +319,12 @@ under `<dir>` instead, for a second Nautilus beside the first.
   `cookbook.sidepanel-site-specific`; run at its commit `7314683`),
   copy it with a probe added to its page, and click its action three
   times; `sample-site` needs `www.google.com` to load. **Status:** on
-  2026-11-27 (`79eb6c4`) `panel` passed 116 checks, `groups` 44 and
-  `behavior` 23, none failing; the two samples last ran earlier that
-  day, before the groups and commands work, with 11 and 22. Not in CI.
+  2026-11-27, at the end of the branch's last round of fixes, `panel`
+  passed 127 checks, `groups` 59 and `behavior` 23, none failing, and
+  on the same bundle `phase5.py` 76, `run.sh spike` 54, `pump` 7,
+  `reload` 7, `zombie` 21, `stop` 17, `idle` 9 and `broken` 14; the
+  two samples last ran earlier that day, before the groups and
+  commands work, with 11 and 22. Not in CI.
   No run presses a key or moves the pointer: the toolbar's button, a
   shortcut's keys and everything inside a panel are checklist item 25.
 - **`NAUTILUS_TEST_CONTROL` is for scripted runs only.** It makes the

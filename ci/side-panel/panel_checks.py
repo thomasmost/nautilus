@@ -998,7 +998,7 @@ def main():
     parser.add_argument("source", nargs="?", help="the cookbook directory (sample modes)")
     parser.add_argument("--hold", type=int, default=int(os.environ.get("HOLD", "180")),
                         help="seconds the browser stays open after the checks' time, for the steps by hand")
-    parser.add_argument("--budget", type=int, default=int(os.environ.get("BUDGET", "150")),
+    parser.add_argument("--budget", type=int, default=int(os.environ.get("BUDGET", "170")),
                         help="seconds the panel suite may take")
     parser.add_argument("--out", default=str(HERE / "out"))
     args = parser.parse_args()
