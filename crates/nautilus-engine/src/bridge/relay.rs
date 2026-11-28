@@ -208,7 +208,13 @@ mod delivery_tests {
         // A relay that closes, or a page that is gone, with an event's
         // delivery in flight gives it up: the hub is told by its token, so
         // the one who waits is not left waiting. A click has no token.
-        let deliver = |payload| Pending::Deliver(Delivery { id: 9, attempt: 0, payload });
+        let deliver = |payload| {
+            Pending::Deliver(Delivery {
+                id: 9,
+                attempt: 0,
+                payload,
+            })
+        };
         let event = |told| Payload::Event {
             event: "tabs.onCreated".to_string(),
             args: Vec::new(),
@@ -217,7 +223,10 @@ mod delivery_tests {
         };
         assert_eq!(told_of_pending(&deliver(event(Some(4)))), Some(4));
         assert_eq!(told_of_pending(&deliver(event(None))), None);
-        assert_eq!(told_of_pending(&deliver(Payload::Click { tab: TabId(3) })), None);
+        assert_eq!(
+            told_of_pending(&deliver(Payload::Click { tab: TabId(3) })),
+            None
+        );
         assert_eq!(told_of_pending(&Pending::Poll), None);
     }
 }

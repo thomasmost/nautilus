@@ -1291,16 +1291,13 @@ wrap_render_handler! {
                 }
             }
             // The session it replaces (CEF drag data) is let go of after the borrow.
-            let displaced = std::mem::replace(
-                &mut *self.view.drag.borrow_mut(),
-                Some(DragSession {
-                    data,
-                    allowed: allowed_ops,
-                    entered: false,
-                    operation: DragOperationsMask::default(),
-                    hotspot,
-                }),
-            );
+            let displaced = self.view.drag.borrow_mut().replace(DragSession {
+                data,
+                allowed: allowed_ops,
+                entered: false,
+                operation: DragOperationsMask::default(),
+                hotspot,
+            });
             drop(displaced);
             log::debug!("tab {}: drag started at ({x}, {y}), allowed {allowed_ops:?}", self.view.label());
             self.view.report(EngineEvent::FrameReady);
@@ -1871,14 +1868,11 @@ wrap_context_menu_handler! {
             }
             let (x, y) = (params.xcoord(), params.ycoord());
             // The menu it replaces holds a CEF frame: let go of it after the borrow.
-            let displaced = std::mem::replace(
-                &mut *self.view.context_menu.borrow_mut(),
-                Some(MenuPoint {
-                    frame: frame.map(|f| f.clone()),
-                    x,
-                    y,
-                }),
-            );
+            let displaced = self.view.context_menu.borrow_mut().replace(MenuPoint {
+                frame: frame.map(|f| f.clone()),
+                x,
+                y,
+            });
             drop(displaced);
             let scale = self.view.scale.get();
             let context = page_context(params);
