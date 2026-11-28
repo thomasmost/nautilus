@@ -903,6 +903,11 @@ Upstream causes and the features they block are tracked in
     a window it opens becomes a tab without an opener.
   - A tab's `setOptions({tabId, enabled: false})` cannot hide the
     window's panel on that tab alone.
+  - An extension that lists `sidePanel` only under
+    `optional_permissions` cannot use a side panel, even after the
+    permission is granted: Nautilus reads the permission from the
+    manifest's `permissions` alone, shows no panel for such an
+    extension and opens none on a click of its button.
   - A panel is not restored after a restart, and a panel's page loads
     again each time the panel is opened. Options set with `setOptions`
     last for the run; only `setPanelBehavior` is kept.
