@@ -841,13 +841,6 @@ Known and left:
   each, and said hello only when a click started it. A plain restart
   does not do this. Not looked into further: it is the scripted way
   in, not a user's.
-- `runtime.getContexts` is answered from the engine's state when
-  Chromium's own answer has come back, which can be after a
-  `sidePanel.open` made later in the same turn. The Claude extension
-  asks, then opens, then reads the answer to decide between opening
-  and closing; in every run here the answer was the state before the
-  open. If it ever is not, the extension skips its grouping for that
-  open. Not seen.
 - The other DevTools observers and handlers of the crate
   (`extensions.rs`, `relay.rs`'s tab probes, `popup.rs`) were not
   read for the lending fault `7f58a24` fixed in `hidden_page.rs`.

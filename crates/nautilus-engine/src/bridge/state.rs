@@ -88,7 +88,7 @@ pub(crate) enum Effect {
         quality: i64,
     },
     /// A call the side panel's stores answer (`chrome.sidePanel`, and
-    /// `runtime.getContexts`): the hub routes it (`Hub::side_panel_call`),
+    /// `runtime.getContexts` with its `runtime.openPanels`): the hub routes it (`Hub::side_panel_call`),
     /// because those stores live in `DelegateState` and a call may change
     /// them. It comes out of `call` like any other effect, so a page's
     /// call is held, ordered and refused as the rest are.
@@ -115,7 +115,9 @@ pub(crate) const PANELS_EVENT: &str = "bridge.panels";
 
 /// Whether `call` is one the side panel's stores answer, not the router.
 fn side_panel_call(call: &BridgeCall) -> bool {
-    call.namespace == "sidePanel" || (call.namespace == "runtime" && call.method == "getContexts")
+    call.namespace == "sidePanel"
+        || (call.namespace == "runtime"
+            && matches!(call.method.as_str(), "getContexts" | "openPanels"))
 }
 
 /// Whether `call` is a report of an extension's own debugger, which the
@@ -1437,13 +1439,16 @@ mod tests {
             state.call(contexts.clone()),
             vec![Effect::SidePanel(contexts)]
         );
+        // And the question getContexts asks first, as it is called.
+        let panels = call(5, EXT, "runtime", "openPanels", json!([]));
+        assert_eq!(state.call(panels.clone()), vec![Effect::SidePanel(panels)]);
         // A method of `sidePanel` nobody knows is the hub's to reject too.
         let unknown = call(3, EXT, "sidePanel", "frobnicate", json!([]));
         assert_eq!(
             state.call(unknown.clone()),
             vec![Effect::SidePanel(unknown)]
         );
-        // Only that one method of `runtime` is: the rest is the router's,
+        // Only those two methods of `runtime` are: the rest is the router's,
         // which serves no `runtime`.
         assert_eq!(
             state.call(call(4, EXT, "runtime", "sendMessage", json!([]))),

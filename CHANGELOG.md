@@ -246,6 +246,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- `runtime.getContexts` in an extension with a side panel answers for
+  the moment it was called. The side panels in the answer were read
+  only once Chromium's part had come back, so an extension that asks
+  for its contexts, opens its panel and then reads the answer could be
+  told the panel was already open (the Claude extension decides by
+  that whether to put the tab in its group). Not seen to happen.
+
 - An extension that declares a keyboard command and is granted an
   optional permission while it runs (`permissions.request`) gets the
   new API in its running worker and pages for most APIs, as it did

@@ -261,7 +261,12 @@ impl Hub {
                 ids: &state.ids,
             };
             let panels = delegate.panels.borrow();
-            if call.namespace == "runtime" {
+            if call.namespace == "runtime" && call.method == "openPanels" {
+                // Asked as `getContexts` is called, before Chromium is
+                // asked: the panels of that moment.
+                let open = side_panel::open_panels(&panels, &world, &call.extension);
+                side_panel::Routed::answer(side_panel::panels_json(&open))
+            } else if call.namespace == "runtime" {
                 let empty = serde_json::json!({});
                 let filter = call.args.first().unwrap_or(&empty);
                 let originals = call
@@ -270,8 +275,16 @@ impl Hub {
                     .and_then(Value::as_array)
                     .cloned()
                     .unwrap_or_default();
+                // The panels the script was told when the call was made; a
+                // script that hands none back (one written before
+                // `openPanels`) is answered from the panels open now.
+                let open = call
+                    .args
+                    .get(2)
+                    .and_then(side_panel::panels_of)
+                    .unwrap_or_else(|| side_panel::open_panels(&panels, &world, &call.extension));
                 let contexts =
-                    side_panel::get_contexts(&panels, &world, &call.extension, filter, originals);
+                    side_panel::get_contexts(&open, &world, &call.extension, filter, originals);
                 side_panel::Routed::answer(Value::Array(contexts))
             } else {
                 // The window a panel's page is in is the registry's to say:

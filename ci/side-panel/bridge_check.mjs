@@ -408,17 +408,51 @@ for (const viaPage of [false, true]) {
   w.emit('tabs.onCreated', [{ id: 12 }]);
   assert.deepEqual(created.slice(-1), ['second 12'], 'the side panel script took the event handler');
 
-  // runtime.getContexts: Chromium is asked for every context, and the
-  // engine gets the filter with Chromium's answer.
+  // runtime.getContexts: the engine is asked for its open panels at the
+  // moment of the call, before Chromium is asked for every context; then
+  // the engine gets the filter with Chromium's answer and with the panels
+  // it named, so the answer is of the moment the call was made.
   w.calls.length = 0;
   w.reached.length = 0;
-  w.answers.set('runtime.getContexts', ([filter, originals]) => originals.concat([{ contextType: 'SIDE_PANEL', windowId: 1 }]));
-  const contexts = await chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL'] });
+  w.answers.set('runtime.openPanels', () => [{ view: 20, page: 'panel.html', windowId: 1 }]);
+  w.answers.set('runtime.getContexts', ([filter, originals, panels]) => originals.concat(panels.map((p) => ({ contextType: 'SIDE_PANEL', windowId: p.windowId }))));
+  const asking = chrome.runtime.getContexts({ contextTypes: ['SIDE_PANEL'] });
+  assert.deepEqual(w.calls, [['runtime', 'openPanels', []]], 'the engine was not asked for its panels as getContexts was called');
+  const contexts = await asking;
   assert.deepEqual(contexts.map((c) => c.contextType), ['BACKGROUND', 'SIDE_PANEL']);
   assert.deepEqual(w.reached, ['runtime.getContexts']);
-  assert.deepEqual(w.calls, [['runtime', 'getContexts', [{ contextTypes: ['SIDE_PANEL'] }, [{ contextType: 'BACKGROUND', tabId: -1 }]]]]);
+  assert.deepEqual(w.calls, [
+    ['runtime', 'openPanels', []],
+    ['runtime', 'getContexts', [{ contextTypes: ['SIDE_PANEL'] }, [{ contextType: 'BACKGROUND', tabId: -1 }], [{ view: 20, page: 'panel.html', windowId: 1 }]]],
+  ]);
   assert.throws(() => chrome.runtime.getContexts('all'), /runtime\.getContexts: No matching signature\./);
   w.reached.length = 0;
+  // An extension asks for its contexts, opens its panel, and then reads the
+  // answer to learn whether a panel was open: the answer must not show the
+  // panel it opened after it asked. The engine stand-in here opens the panel
+  // between the two requests, and answers the second as the engine does:
+  // from the panels the first one named, or, for a script that names none,
+  // from the panels open when the second arrives.
+  {
+    const e = world({ viaPage });
+    const open = [];
+    e.answers.set('runtime.openPanels', () => open.slice());
+    e.answers.set('sidePanel.open', () => { open.push({ view: 20, page: 'panel.html', windowId: 1 }); return null; });
+    e.answers.set('runtime.getContexts', ([filter, originals, panels]) =>
+      originals.concat((Array.isArray(panels) ? panels : open).map((p) => ({ contextType: 'SIDE_PANEL', windowId: p.windowId }))));
+    const asked = e.chrome.runtime.getContexts({});
+    const opening = e.chrome.sidePanel.open({ windowId: 1 });
+    assert.deepEqual((await asked).map((c) => c.contextType), ['BACKGROUND'], 'getContexts shows a panel opened after it was called');
+    await opening;
+    // Asked again, it shows the panel.
+    assert.deepEqual((await e.chrome.runtime.getContexts({})).map((c) => c.contextType), ['BACKGROUND', 'SIDE_PANEL']);
+    // An engine that refuses the first question is not asked the second:
+    // the answer is Chromium's own.
+    e.answers.set('runtime.openPanels', () => { throw new Error('the extension is not bridged.'); });
+    e.calls.length = 0;
+    assert.deepEqual((await e.chrome.runtime.getContexts({})).map((c) => c.contextType), ['BACKGROUND']);
+    assert.deepEqual(e.calls.map(([ns, method]) => method), ['openPanels']);
+  }
 
   // Tab groups: what an extension calls when it opens its side panel, with
   // its argument shapes. Every call asks the engine and none reaches

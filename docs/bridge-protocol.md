@@ -979,7 +979,21 @@ channel, on both lanes, and no new kind of message. The script is
 | `sidePanel.close` | `[{tabId?, windowId?}]` | `ExtensionRequest::CloseSidePanel` when this extension's panel is open there, else `null` at once |
 | `sidePanel.getLayout` | `[]` | `{side: "right"}` |
 | `sidePanel.closeSelf` | `[]` | internal, and not a `chrome.sidePanel` member: what the script's `window.close` asks. From a side panel's own page it is `CloseSidePanel` for that panel (answered `null` when the model is done); from any other page it is `false`, and the script then calls Chromium's `window.close` (as it does when the call fails, or is not answered within 500 ms). |
-| `runtime.getContexts` | `[filter, originals]` | the contexts: `originals` is Chromium's own answer for `{}`, which the script asks first; the engine leaves out the bridge's own relay page (Chromium lists it as a `TAB` of the extension's), retypes or adds each open panel's entry as `SIDE_PANEL` in its window and applies `filter` |
+| `runtime.openPanels` | `[]` | internal: the extension's open panels now, `[{view, page, windowId}]`. The script asks it at the moment `getContexts` is called, before it asks Chromium, and hands the answer back as the third argument below |
+| `runtime.getContexts` | `[filter, originals, panels]` | the contexts: `originals` is Chromium's own answer for `{}` and `panels` the answer to `openPanels`; the engine leaves out the bridge's own relay page (Chromium lists it as a `TAB` of the extension's), retypes or adds an entry as `SIDE_PANEL` in its window for each panel in `panels` and applies `filter`. Without a third argument that is a list (a worker script written before 2026-11-27, until its extension is rewritten) the panels are the ones open when this call arrives |
+
+**`getContexts` answers for the moment it was called.** Chromium's own
+answer takes a turn of the event loop or more, and until 2026-11-27 the
+engine was asked only when it had come back, so the engine's part could
+describe a later moment than the call: an extension that asks for its
+contexts, calls `sidePanel.open` and then reads the answer to learn
+whether its panel was open (the Claude extension does, to decide whether
+to group the tab) could be told of the panel it had just opened. The
+panels are now read first (`openPanels`, sent as the call is made and
+ahead of any later call on the same lane) and travel back to the engine
+with Chromium's answer. They are the calling extension's own word about
+its own answer, so `side_panel::panels_of` reads them and nothing else
+depends on them.
 
 **Only an extension with a side panel pays for this** (review of Phase
 6, I1). The script takes Chromium's `chrome.sidePanel` in the context as
@@ -990,8 +1004,9 @@ caller's own filter with the relay page filtered out in the script: the
 engine is never asked. With it, neither call waits on the engine for
 long: `getContexts` falls back to Chromium's `originals`, less the relay
 page and with the `ContextFilter` applied by the script (the rule of
-`side_panel::passes`), when the engine rejects or has not answered
-within 1 s (`GET_CONTEXTS_WAIT`), and `window.close` closes the page
+`side_panel::passes`), when the engine rejects either of its two
+questions or has not answered one within 1 s (`GET_CONTEXTS_WAIT`, each;
+the first runs while Chromium answers), and `window.close` closes the page
 natively on a rejection at once and after 500 ms without an answer
 (`CLOSE_WAIT`). In the fallback an open panel's entry keeps the type
 Chromium gave it. Known: a panel's own page that calls `getContexts`

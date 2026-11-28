@@ -136,11 +136,16 @@
   // asked with the caller's filter and the engine not at all. For one with
   // a side panel Chromium is asked for everything and the engine applies
   // the filter, since an open panel's entry changes type on the way
-  // (SIDE_PANEL, in its window); an engine that rejects, or has not
-  // answered within GET_CONTEXTS_WAIT, is not waited for, and the answer is
-  // then Chromium's own with the filter applied here (`passes`, the same
-  // rule as `side_panel::passes`), which is what the call was before the
-  // bridge.
+  // (SIDE_PANEL, in its window). The engine is asked twice: for its open
+  // panels at once, as the call is made and before Chromium is asked
+  // (`openPanels`), and then, with Chromium's answer and those panels, for
+  // the contexts. So the answer is of the moment of the call: an extension
+  // that asks, opens its panel and then reads the answer does not find the
+  // panel it opened afterwards in it. An engine that rejects either
+  // question, or has not answered one within GET_CONTEXTS_WAIT, is not
+  // waited for, and the answer is then Chromium's own with the filter
+  // applied here (`passes`, the same rule as `side_panel::passes`), which
+  // is what the call was before the bridge.
   const GET_CONTEXTS_WAIT = 1000;
   const runtime = chrome.runtime;
   if (runtime && typeof runtime.getContexts === 'function') {
@@ -160,10 +165,19 @@
         if (filter === null || typeof filter !== 'object' || Array.isArray(filter)) {
           throw new TypeError('Error in invocation of runtime.getContexts: No matching signature.');
         }
+        // Settled either way, so a failure waits to be read below and is
+        // never an unhandled rejection.
+        const panels = bounded(bridge.call('runtime', 'openPanels', []), GET_CONTEXTS_WAIT).then(
+          (open) => ({ open }),
+          (error) => ({ error })
+        );
         promise = nativeGetContexts({}).then((originals) =>
-          bounded(bridge.call('runtime', 'getContexts', [filter, originals]), GET_CONTEXTS_WAIT).catch(() =>
-            originals.filter(notRelay).filter((context) => passes(context, filter))
-          )
+          panels
+            .then((now) => {
+              if (now.error) throw now.error;
+              return bounded(bridge.call('runtime', 'getContexts', [filter, originals, now.open]), GET_CONTEXTS_WAIT);
+            })
+            .catch(() => originals.filter(notRelay).filter((context) => passes(context, filter)))
         );
       }
       if (typeof callback !== 'function') return promise;

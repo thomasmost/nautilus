@@ -700,16 +700,73 @@ fn context_id(view: TabId) -> String {
     format!("00000000-0000-4000-8000-{:012x}", view.0)
 }
 
-/// `chrome.runtime.getContexts(filter)` for `extension`: `originals` is
-/// what Chromium answered for no filter at all. Chromium knows nothing
-/// of the panel as a side panel: it lists the panel's page as some
-/// other kind of context, or not at all. Each open panel takes over the
-/// entry Chromium has for its document (same URL, no strip tab behind
-/// it, not the worker or an offscreen document) or gets one made; then
-/// the filter is applied. The bridge's own relay page, which Chromium
-/// lists as a tab of the extension's, is the browser's and is left out.
-pub(crate) fn get_contexts(
+/// An open panel as `runtime.getContexts` reads it: its view, its page
+/// and its window's id as extensions know it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PanelAt {
+    pub view: TabId,
+    pub page: String,
+    pub window: i64,
+}
+
+/// The panels `extension` has open now: the answer to `runtime.openPanels`,
+/// which the script asks as `getContexts` is called, and hands back with
+/// Chromium's answer (`get_contexts`).
+pub(crate) fn open_panels(
     panels: &PanelRegistry,
+    world: &dyn World,
+    extension: &str,
+) -> Vec<PanelAt> {
+    panels
+        .of_extension(extension)
+        .map(|open| PanelAt {
+            view: open.view,
+            page: open.page.clone(),
+            window: world.window_id(open.window),
+        })
+        .collect()
+}
+
+/// `open` as it travels to the script and back.
+pub(crate) fn panels_json(open: &[PanelAt]) -> Value {
+    Value::Array(
+        open.iter()
+            .map(|at| json!({ "view": at.view.0, "page": at.page, "windowId": at.window }))
+            .collect(),
+    )
+}
+
+/// The panels a script handed back; `None` when it handed back no list.
+/// The list is the calling extension's own word about its own answer, so
+/// it is read, not believed beyond that: an entry that is not a panel is
+/// left out.
+pub(crate) fn panels_of(value: &Value) -> Option<Vec<PanelAt>> {
+    let list = value.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(|entry| {
+                Some(PanelAt {
+                    view: TabId(entry.get("view")?.as_u64()?),
+                    page: entry.get("page")?.as_str()?.to_string(),
+                    window: entry.get("windowId")?.as_i64()?,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// `chrome.runtime.getContexts(filter)` for `extension`: `originals` is
+/// what Chromium answered for no filter at all, and `open` the panels the
+/// extension had open when the call was made (`open_panels`). Chromium
+/// knows nothing of the panel as a side panel: it lists the panel's page
+/// as some other kind of context, or not at all. Each open panel takes
+/// over the entry Chromium has for its document (same URL, no strip tab
+/// behind it, not the worker or an offscreen document) or gets one made;
+/// then the filter is applied. The bridge's own relay page, which
+/// Chromium lists as a tab of the extension's, is the browser's and is
+/// left out.
+pub(crate) fn get_contexts(
+    open: &[PanelAt],
     world: &dyn World,
     extension: &str,
     filter: &Value,
@@ -720,9 +777,9 @@ pub(crate) fn get_contexts(
     contexts.retain(|context| {
         context.get("documentUrl").and_then(Value::as_str) != Some(relay.as_str())
     });
-    for open in panels.of_extension(extension) {
+    for open in open {
         let url = format!("chrome-extension://{extension}/{}", open.page);
-        let window = world.window_id(open.window);
+        let window = open.window;
         let theirs = contexts.iter_mut().find(|context| {
             let kind = context.get("contextType").and_then(Value::as_str);
             let tab = context.get("tabId").and_then(Value::as_i64).unwrap_or(-1);
@@ -1697,7 +1754,13 @@ mod tests {
         let panel_url = format!("chrome-extension://{EXT}/panel.html");
 
         // Chromium does not list the panel's page: one is made.
-        let made = get_contexts(&panels, &world, EXT, &json!({}), vec![worker.clone()]);
+        let made = get_contexts(
+            &open_panels(&panels, &world, EXT),
+            &world,
+            EXT,
+            &json!({}),
+            vec![worker.clone()],
+        );
         assert_eq!(
             made,
             [
@@ -1726,7 +1789,7 @@ mod tests {
         real_tab["tabId"] = json!(101);
         real_tab["contextId"] = json!("bbbbbbbb-0000-4000-8000-000000000002");
         let taken = get_contexts(
-            &panels,
+            &open_panels(&panels, &world, EXT),
             &world,
             EXT,
             &json!({ "contextTypes": ["SIDE_PANEL"] }),
@@ -1745,13 +1808,58 @@ mod tests {
 
         // No panel open: Chromium's answer, filtered.
         let none = get_contexts(
-            &PanelRegistry::default(),
+            &[],
             &world,
             EXT,
             &json!({ "contextTypes": ["SIDE_PANEL"] }),
             vec![worker.clone()],
         );
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn get_contexts_answers_for_the_panels_open_when_it_was_called() {
+        // An extension asks for its contexts, opens its panel, and reads
+        // the answer to learn whether a panel was open. The script asks
+        // for the open panels as the call is made (`runtime.openPanels`)
+        // and hands them back with Chromium's answer, which comes later:
+        // a panel opened in between is not in the answer.
+        let mut panels = PanelRegistry::default();
+        let world = Fake::default();
+        let before = open_panels(&panels, &world, EXT);
+        assert_eq!(panels_json(&before), json!([]));
+        open_panel(&mut panels, 20, 1, None, "panel.html");
+        let kinds = |open: &[PanelAt]| -> Vec<Value> {
+            get_contexts(open, &world, EXT, &json!({}), Vec::new())
+                .iter()
+                .map(|context| context["contextType"].clone())
+                .collect()
+        };
+        assert!(kinds(&panels_of(&panels_json(&before)).unwrap()).is_empty());
+        // Asked again, the panel is named, and survives the wire.
+        let after = open_panels(&panels, &world, EXT);
+        assert_eq!(
+            panels_json(&after),
+            json!([{ "view": 20, "page": "panel.html", "windowId": 11 }])
+        );
+        assert_eq!(panels_of(&panels_json(&after)), Some(after.clone()));
+        assert_eq!(kinds(&after), [json!("SIDE_PANEL")]);
+        // Another extension's panel is not this one's to name.
+        assert!(open_panels(&panels, &world, "ponmlkjihgfedcbaponmlkjihgfedcba").is_empty());
+        // What is no list of panels is none (the caller then reads the
+        // registry, as for a script that names none); an entry that is
+        // not a panel is left out.
+        assert_eq!(panels_of(&json!(null)), None);
+        assert_eq!(panels_of(&json!({ "view": 20 })), None);
+        assert_eq!(
+            panels_of(&json!([
+                { "view": 20, "page": "panel.html", "windowId": 11 },
+                { "view": "20", "page": "panel.html", "windowId": 11 },
+                { "view": 21, "windowId": 11 },
+                "panel.html",
+            ])),
+            Some(after)
+        );
     }
 
     #[test]
@@ -1781,23 +1889,23 @@ mod tests {
                 Vec::new()
             };
             assert_eq!(
-                get_contexts(
-                    &PanelRegistry::default(),
-                    &world,
-                    EXT,
-                    &filter,
-                    originals.clone()
-                ),
+                get_contexts(&[], &world, EXT, &filter, originals.clone()),
                 wanted,
                 "{filter}"
             );
         }
         let mut panels = PanelRegistry::default();
         open_panel(&mut panels, 20, 1, None, "panel.html");
-        let kinds: Vec<Value> = get_contexts(&panels, &world, EXT, &json!({}), originals)
-            .iter()
-            .map(|context| context["contextType"].clone())
-            .collect();
+        let kinds: Vec<Value> = get_contexts(
+            &open_panels(&panels, &world, EXT),
+            &world,
+            EXT,
+            &json!({}),
+            originals,
+        )
+        .iter()
+        .map(|context| context["contextType"].clone())
+        .collect();
         assert_eq!(kinds, [json!("BACKGROUND"), json!("SIDE_PANEL")]);
         // Another extension's page of the same name is not this one's relay.
         let other = json!({
@@ -1807,13 +1915,7 @@ mod tests {
             "frameId": 0, "incognito": false, "tabId": 778, "windowId": -1
         });
         assert_eq!(
-            get_contexts(
-                &PanelRegistry::default(),
-                &world,
-                EXT,
-                &json!({}),
-                vec![other.clone()]
-            ),
+            get_contexts(&[], &world, EXT, &json!({}), vec![other.clone()]),
             [other]
         );
     }
@@ -1824,7 +1926,16 @@ mod tests {
         open_panel(&mut panels, 20, 1, None, "panel.html");
         open_panel(&mut panels, 21, 2, None, "panel.html");
         let world = Fake::default();
-        let count = |filter: Value| get_contexts(&panels, &world, EXT, &filter, Vec::new()).len();
+        let count = |filter: Value| {
+            get_contexts(
+                &open_panels(&panels, &world, EXT),
+                &world,
+                EXT,
+                &filter,
+                Vec::new(),
+            )
+            .len()
+        };
         assert_eq!(count(json!({})), 2);
         assert_eq!(count(json!({ "windowIds": [12] })), 1);
         assert_eq!(count(json!({ "windowIds": [11, 12], "tabIds": [-1] })), 2);
