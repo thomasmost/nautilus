@@ -198,6 +198,14 @@ extension page opened as a tab gets its own Alloy tab id from
 browser process inside Chromium, after the page's other native calls return.
 An id no tab has gets `No tab with id`, and a page with no script does not
 crash. The crash is there with the bridge's code never called.
+**Checked 2026-11-27 (real bundle, Chromium 156):** an extension page's
+`about:blank` and `about:srcdoc` iframes are extension contexts to Chromium
+(`getContexts` lists them as `TAB` contexts of the extension), but their
+`chrome` has no `tabs`, `tabGroups`, `windows`, `sidePanel`, `commands` or
+`debugger`, and no bridge, so `tabs.group` is not reachable from them. The
+scripted panel suite checks this (`frames_check` in `ci/side-panel/panel_checks.py`).
+`window.open('about:blank')` from an extension page is not checked yet.
+
 **Workaround:** a script ahead of each extension's service worker, and the
 namespaces of each extension page, replace `chrome.tabs`, `tabGroups`,
 `windows`, `commands` and `sidePanel`, on `chrome` and on `browser` (C19),

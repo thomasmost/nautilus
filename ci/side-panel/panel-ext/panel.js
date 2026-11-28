@@ -120,6 +120,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 (async () => {
   const page = location.pathname.slice(1);
+  self.framesProbe();
   describe(page);
   chrome.runtime.sendMessage({ whoami: page }).catch(() => {});
   // Again, once the engine has had this page's report and told the worker

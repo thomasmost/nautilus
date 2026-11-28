@@ -549,6 +549,7 @@ def panel_checks(h):
     h.launch(EXT, "https://example.com/ https://example.org/", h.args.budget, suite_name="panel")
     h.find_window()
     h.pump(handlers, h.args.budget - 10)
+    frames_check(h)
     gone = latest("closer-gone")
     if gone is not None:
         asked = latest("closer")
@@ -572,6 +573,26 @@ def panel_checks(h):
     stray = [line for line in log.splitlines() if "no engine tab for" in line and any(view in line for view in views)]
     h.check("no input or command went to a panel's view after it closed", not stray, stray[:3])
     h.finish()
+
+
+def frames_check(h):
+    # C11 and C19: an about:blank or srcdoc frame of an extension page is an
+    # extension context to Chromium (getContexts lists it), but it must not
+    # hold the bridged namespaces: Chromium's tabs.group in such a frame ends
+    # the browser process. The frames are read, never called.
+    probe = latest("frames-probe", lambda d: d.get("page") == "panel.html")
+    data = probe["data"] if probe else {}
+    names = ["tabs", "tabGroups", "windows", "sidePanel", "commands", "debugger"]
+    for frame in ("blank", "srcdoc"):
+        seen = data.get(frame) or {}
+        bare = seen.get("bridge") == "undefined" and all(
+            (seen.get("namespaces") or {}).get(name) == "undefined" for name in names)
+        h.check(f"an extension page's {frame} frame has no bridged namespace and no bridge",
+                bare, seen)
+    parent = data.get("parent") or {}
+    h.check("the extension page itself has the bridge and its bridged namespaces",
+            parent.get("bridge") == "object" and parent.get("namespaces", {}).get("tabs") == "object",
+            parent)
 
 
 def start(h):
