@@ -61,8 +61,14 @@
     holding = false;
     clearTimeout(toldTimer);
     clearTimeout(answerTimer);
+    // Restored only while the holder is still what the page has: a page that
+    // replaced it during the hold (a library's wrapper) keeps its own value,
+    // and the holder, which passes everything on from now, is its target.
     try {
-      Object.defineProperty(runtime, 'sendMessage', ownDescriptor || { value: ownSend, writable: true, enumerable: true, configurable: true });
+      var current = Object.getOwnPropertyDescriptor(runtime, 'sendMessage');
+      if (current && current.value === heldSend) {
+        Object.defineProperty(runtime, 'sendMessage', ownDescriptor || { value: ownSend, writable: true, enumerable: true, configurable: true });
+      }
     } catch (e) { /* the holder stays, and passes everything on */ }
     var sends = waiting;
     waiting = [];

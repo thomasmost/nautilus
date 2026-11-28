@@ -1778,6 +1778,31 @@ function loadWorker(runtime) {
   assert.deepEqual(p.errors, []);
 }
 {
+  // A library wraps runtime.sendMessage while the hold is in place (the
+  // page's own load does this): the engine's word must not discard the
+  // wrapper. The hold passes straight through for good, and the wrapper's
+  // calls reach Chromium through it.
+  const p = pageContext({ sidePanel: true });
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50, windowId: -1 });
+  p.mutate();
+  const runtime = p.sandbox.chrome.runtime;
+  const orig = runtime.sendMessage;
+  const seen = [];
+  const wrapper = (...a) => { seen.push(a[0]); return orig(...a); };
+  runtime.sendMessage = wrapper;
+  const first = runtime.sendMessage({ n: 1 });
+  await tick(); await tick();
+  p.tell('bridge.reported', [{ panel: true }]);
+  p.tell('bridge.told', []);
+  assert.deepEqual(p.messages, [[{ n: 1 }]], 'the held message did not go with the engine\'s word');
+  assert.deepEqual(await first, { heard: { n: 1 } });
+  assert.equal(runtime.sendMessage, wrapper, 'the page\'s wrapper was discarded by the hold\'s end');
+  assert.deepEqual(await runtime.sendMessage({ n: 2 }), { heard: { n: 2 } });
+  assert.deepEqual(seen, [{ n: 1 }, { n: 2 }], 'the wrapper did not see the calls');
+  assert.deepEqual(p.messages, [[{ n: 1 }], [{ n: 2 }]]);
+  assert.deepEqual(p.errors, []);
+}
+{
   // A failure is the caller's as Chromium gave it: a rejection, or
   // runtime.lastError inside the callback.
   const p = pageContext({ sidePanel: true });

@@ -286,7 +286,9 @@ has no releases yet; `Unreleased` holds everything on `main`.
   as in Chrome, where an extension tells its panel from its content
   scripts by that. The page now holds `runtime.sendMessage` for a
   moment, until the worker has been told which Chromium tab the panel
-  is; before, the message got there first.
+  is; before, the message got there first. A script that wraps
+  `runtime.sendMessage` while that hold is in place (a library does it
+  at load) keeps its wrapper once the hold ends.
 
 - `runtime.getContexts` in an extension with a side panel answers for
   the moment it was called. The side panels in the answer were read
