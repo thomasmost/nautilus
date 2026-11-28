@@ -924,7 +924,11 @@ Upstream causes and the features they block are tracked in
   - `commands.getAll` reports the shortcut a command declares even
     when a Nautilus shortcut has the keys and the command can never
     fire (Settings shows which are not active). An extension's
-    shortcut cannot be assigned or changed.
+    shortcut cannot be assigned or changed. A command declared
+    `"global"` is an ordinary shortcut of the window, with whatever
+    keys it suggests (Chrome gives a global command only Ctrl+Shift
+    and a digit, Command+Shift on macOS, and none to a toolbar
+    button's command).
   - What an extension sets on its toolbar button is not shown: the
     badge and its colours, a title, an icon set at run time.
     `chrome.action` is Chromium's own and Nautilus draws the button

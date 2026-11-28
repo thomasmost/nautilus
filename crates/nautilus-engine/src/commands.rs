@@ -42,7 +42,7 @@ pub(crate) fn commands_from(
             let chord = fact
                 .suggested_key
                 .as_deref()
-                .and_then(|key| parse_shortcut(key, platform))
+                .and_then(|key| parse_shortcut(key, platform, !is_action_command(&fact.name)))
                 .filter(|chord| !taken.contains(chord));
             taken.extend(chord);
             ExtensionCommand {
@@ -178,17 +178,44 @@ fn key_name(code: Code) -> String {
         .unwrap_or_else(|| code.to_string())
 }
 
+/// The most tokens a shortcut has: two modifiers and a key
+/// (`ui::Command::ParseImpl`: `kMaxTokenSize` less one, since Chrome's
+/// manifest parser does not allow Ctrl+Alt).
+const MAX_TOKENS: usize = 3;
+
 /// A manifest shortcut (`Ctrl+Shift+Y`, `Command+E`, `MediaStop`) as a
 /// chord on `platform`, or `None` for text Chrome would not accept as
-/// one: an unknown key or modifier, no key or two, a modifier twice,
-/// only Shift, `Ctrl+Alt`, a media key with modifiers. On macOS `Ctrl`
-/// is Command (in the `mac` entry too) and `MacCtrl` is Control;
-/// `Command`, `MacCtrl` and `Option` mean nothing elsewhere.
-pub(crate) fn parse_shortcut(text: &str, platform: KeyPlatform) -> Option<KeyChord> {
+/// one. The rules are Chromium's own parser's
+/// (`ui/base/accelerators/command.cc`, `ParseImpl`, as
+/// `extensions/common/command.cc` calls it; tag 156.0.8078.100): the
+/// tokens are split at `+` and trimmed of white space; there are three
+/// at most; a modifier may be named twice; there is exactly one key (a
+/// letter A to Z, a digit, or a named key, in that case); every key but
+/// a media key needs Ctrl, Alt or Command, and Shift alone is none; Alt
+/// with Ctrl or with Command is refused (AltGr, and Option with Command
+/// on macOS); a media key takes no modifier, and is a shortcut only
+/// with `media_keys`, which is false for the action commands. On macOS
+/// `Ctrl` is Command (in the `mac` entry too), `MacCtrl` is Control and
+/// `Option` is Alt; `Command`, `MacCtrl` and `Option` mean nothing
+/// elsewhere.
+pub(crate) fn parse_shortcut(
+    text: &str,
+    platform: KeyPlatform,
+    media_keys: bool,
+) -> Option<KeyChord> {
     let mac = platform == KeyPlatform::Mac;
+    // `base::TRIM_WHITESPACE` for a narrow string: the six ASCII ones.
+    let blank = |c: char| matches!(c, ' ' | '\t'..='\r');
+    let tokens: Vec<&str> = text
+        .split('+')
+        .map(|token| token.trim_matches(blank))
+        .collect();
+    if tokens.len() > MAX_TOKENS {
+        return None;
+    }
     let mut modifiers = Modifiers::empty();
     let mut code = None;
-    for token in text.split('+') {
+    for token in tokens {
         let modifier = match token {
             "Ctrl" if mac => Some(Modifiers::META),
             "Ctrl" => Some(Modifiers::CONTROL),
@@ -200,12 +227,7 @@ pub(crate) fn parse_shortcut(text: &str, platform: KeyPlatform) -> Option<KeyCho
             _ => None,
         };
         match modifier {
-            Some(modifier) => {
-                if modifiers.contains(modifier) {
-                    return None;
-                }
-                modifiers |= modifier;
-            }
+            Some(modifier) => modifiers |= modifier,
             None => {
                 if code.is_some() {
                     return None;
@@ -216,14 +238,17 @@ pub(crate) fn parse_shortcut(text: &str, platform: KeyPlatform) -> Option<KeyCho
     }
     let code = code?;
     if is_media(code) {
-        return modifiers.is_empty().then(|| KeyChord::new(modifiers, code));
+        return (media_keys && modifiers.is_empty()).then(|| KeyChord::new(modifiers, code));
     }
     let leading = Modifiers::CONTROL | Modifiers::ALT | Modifiers::META;
     if !modifiers.intersects(leading) {
         return None;
     }
-    // AltGr on Windows keyboards is Ctrl+Alt.
-    if modifiers.contains(Modifiers::CONTROL | Modifiers::ALT) {
+    // AltGr on Windows keyboards is Ctrl+Alt; Chrome refuses Alt with
+    // Command the same way.
+    if modifiers.contains(Modifiers::ALT)
+        && modifiers.intersects(Modifiers::CONTROL | Modifiers::META)
+    {
         return None;
     }
     Some(KeyChord::new(modifiers, code))
@@ -308,36 +333,36 @@ mod tests {
     fn ctrl_is_command_on_macos_and_control_elsewhere() {
         let shift = Modifiers::SHIFT;
         assert_eq!(
-            parse_shortcut("Ctrl+Shift+Y", KeyPlatform::Mac),
+            parse_shortcut("Ctrl+Shift+Y", KeyPlatform::Mac, true),
             chord(Modifiers::META | shift, Code::KeyY)
         );
         assert_eq!(
-            parse_shortcut("Ctrl+Shift+Y", KeyPlatform::Windows),
+            parse_shortcut("Ctrl+Shift+Y", KeyPlatform::Windows, true),
             chord(Modifiers::CONTROL | shift, Code::KeyY)
         );
         assert_eq!(
-            parse_shortcut("Ctrl+Shift+Y", KeyPlatform::Linux),
+            parse_shortcut("Ctrl+Shift+Y", KeyPlatform::Linux, true),
             chord(Modifiers::CONTROL | shift, Code::KeyY)
         );
         // The Mac's own names, in a `mac` key.
         assert_eq!(
-            parse_shortcut("Command+E", KeyPlatform::Mac),
+            parse_shortcut("Command+E", KeyPlatform::Mac, true),
             chord(Modifiers::META, Code::KeyE)
         );
         assert_eq!(
-            parse_shortcut("MacCtrl+E", KeyPlatform::Mac),
+            parse_shortcut("MacCtrl+E", KeyPlatform::Mac, true),
             chord(Modifiers::CONTROL, Code::KeyE)
         );
         assert_eq!(
-            parse_shortcut("MacCtrl+Command+E", KeyPlatform::Mac),
+            parse_shortcut("MacCtrl+Command+E", KeyPlatform::Mac, true),
             chord(Modifiers::CONTROL | Modifiers::META, Code::KeyE)
         );
         assert_eq!(
-            parse_shortcut("Option+Shift+1", KeyPlatform::Mac),
+            parse_shortcut("Option+Shift+1", KeyPlatform::Mac, true),
             chord(Modifiers::ALT | shift, Code::Digit1)
         );
         assert_eq!(
-            parse_shortcut("Alt+Period", KeyPlatform::Windows),
+            parse_shortcut("Alt+Period", KeyPlatform::Windows, true),
             chord(Modifiers::ALT, Code::Period)
         );
     }
@@ -365,7 +390,7 @@ mod tests {
             ("Right", Code::ArrowRight),
         ] {
             assert_eq!(
-                parse_shortcut(&format!("Alt+{key}"), KeyPlatform::Windows),
+                parse_shortcut(&format!("Alt+{key}"), KeyPlatform::Windows, true),
                 chord(Modifiers::ALT, code),
                 "{key}"
             );
@@ -377,7 +402,7 @@ mod tests {
             ("MediaStop", Code::MediaStop),
         ] {
             assert_eq!(
-                parse_shortcut(key, KeyPlatform::Windows),
+                parse_shortcut(key, KeyPlatform::Windows, true),
                 chord(Modifiers::empty(), code),
                 "{key}"
             );
@@ -393,7 +418,6 @@ mod tests {
             ("Ctrl+Alt+Y", KeyPlatform::Windows),
             ("Ctrl+Shift", KeyPlatform::Windows),
             ("Ctrl+Y+U", KeyPlatform::Windows),
-            ("Ctrl+Ctrl+Y", KeyPlatform::Windows),
             ("ctrl+y", KeyPlatform::Windows),
             ("Ctrl+y", KeyPlatform::Windows),
             ("Ctrl+F13", KeyPlatform::Windows),
@@ -405,8 +429,191 @@ mod tests {
             ("Option+E", KeyPlatform::Windows),
             ("Search+E", KeyPlatform::Mac),
         ] {
-            assert_eq!(parse_shortcut(text, platform), None, "{text:?}");
+            assert_eq!(parse_shortcut(text, platform, true), None, "{text:?}");
         }
+    }
+
+    // The rules below follow Chromium's own parser at tag 156.0.8078.100:
+    // `ui/base/accelerators/command.cc` (`ui::Command::ParseImpl`, "ui"
+    // below) as `extensions/common/command.cc` (`Command::Parse`, "ext")
+    // calls it, after `NormalizeShortcutSuggestion` (ext, lines 45 to 67).
+
+    #[test]
+    fn spaces_around_a_token_are_trimmed() {
+        // ui, lines 229 and 230: `base::SplitStringPiece(accelerator, "+",
+        // base::TRIM_WHITESPACE, base::SPLIT_WANT_ALL)`.
+        let wanted = chord(Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyY);
+        for text in [
+            "Ctrl + Shift + Y",
+            " Ctrl+Shift+Y ",
+            "Ctrl+\tShift+Y\n",
+            "Ctrl +Shift+ Y",
+        ] {
+            assert_eq!(
+                parse_shortcut(text, KeyPlatform::Windows, true),
+                wanted,
+                "{text:?}"
+            );
+        }
+        // A space inside a token is not around it.
+        assert_eq!(
+            parse_shortcut("Ctrl+Page Up", KeyPlatform::Windows, true),
+            None
+        );
+        // An empty token is no key and no modifier (ui, lines 336 to 339).
+        assert_eq!(parse_shortcut("Ctrl+ +Y", KeyPlatform::Windows, true), None);
+    }
+
+    #[test]
+    fn a_shortcut_has_three_tokens_at_most() {
+        // ui, lines 227 to 234: `kMaxTokenSize` is 4 and one less when
+        // Ctrl+Alt is not allowed, which is how ext calls it (ext, lines
+        // 257 to 259; the default of `allow_ctrl_alt` is false,
+        // `ui/base/accelerators/command.h` line 90). So two modifiers and
+        // a key: a third modifier is refused whatever it is.
+        assert_eq!(
+            parse_shortcut("MacCtrl+Command+E", KeyPlatform::Mac, true),
+            chord(Modifiers::CONTROL | Modifiers::META, Code::KeyE)
+        );
+        for (text, platform) in [
+            ("MacCtrl+Command+Shift+E", KeyPlatform::Mac),
+            ("Ctrl+Shift+Alt+Y", KeyPlatform::Windows),
+            // Counted as written, before a repeat is folded.
+            ("Ctrl+Ctrl+Shift+Y", KeyPlatform::Windows),
+            ("Ctrl+Shift+Y+", KeyPlatform::Windows),
+        ] {
+            assert_eq!(parse_shortcut(text, platform, true), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_modifier_named_twice_is_that_modifier() {
+        // ui, lines 240 and 241, 271 to 274: each modifier token is
+        // `modifiers |= ...`, with no check that it was not set.
+        assert_eq!(
+            parse_shortcut("Ctrl+Ctrl+Y", KeyPlatform::Windows, true),
+            chord(Modifiers::CONTROL, Code::KeyY)
+        );
+        assert_eq!(
+            parse_shortcut("Shift+Alt+Alt", KeyPlatform::Windows, true),
+            None,
+            "no key"
+        );
+        // On macOS `Ctrl` is Command (ext, lines 58 and 59), so the two
+        // names of one modifier are one.
+        assert_eq!(
+            parse_shortcut("Ctrl+Command+Y", KeyPlatform::Mac, true),
+            chord(Modifiers::META, Code::KeyY)
+        );
+        assert_eq!(
+            parse_shortcut("Option+Alt+Y", KeyPlatform::Mac, true),
+            chord(Modifiers::ALT, Code::KeyY)
+        );
+    }
+
+    #[test]
+    fn alt_with_ctrl_or_command_is_refused_on_every_platform() {
+        // ui, lines 55 to 60: `!allow_ctrl_alt && accelerator.IsAltDown()
+        // && (accelerator.IsCtrlDown() || accelerator.IsCmdDown())`. On
+        // macOS that is Option with Command (which `Ctrl` is there) as
+        // well as Option with Control (`MacCtrl`).
+        for (text, platform) in [
+            ("Ctrl+Alt+Y", KeyPlatform::Windows),
+            ("Alt+Ctrl+Y", KeyPlatform::Linux),
+            ("Ctrl+Alt+Y", KeyPlatform::Mac),
+            ("Command+Option+X", KeyPlatform::Mac),
+            ("Command+Alt+X", KeyPlatform::Mac),
+            ("MacCtrl+Option+X", KeyPlatform::Mac),
+            ("MacCtrl+Alt+X", KeyPlatform::Mac),
+        ] {
+            assert_eq!(parse_shortcut(text, platform, true), None, "{text:?}");
+        }
+        // Option alone, and with Shift, is a shortcut (ui, lines 62 to 65).
+        assert_eq!(
+            parse_shortcut("Option+X", KeyPlatform::Mac, true),
+            chord(Modifiers::ALT, Code::KeyX)
+        );
+        assert_eq!(
+            parse_shortcut("Alt+Shift+X", KeyPlatform::Mac, true),
+            chord(Modifiers::ALT | Modifiers::SHIFT, Code::KeyX)
+        );
+    }
+
+    #[test]
+    fn a_media_key_is_no_shortcut_for_an_action_command() {
+        // ui, lines 320 to 327: a media key is taken only with
+        // `should_parse_media_keys`, which ext passes as
+        // `!IsActionRelatedCommand(command_name)` (ext, line 258).
+        for key in [
+            "MediaNextTrack",
+            "MediaPrevTrack",
+            "MediaPlayPause",
+            "MediaStop",
+        ] {
+            assert!(
+                parse_shortcut(key, KeyPlatform::Mac, true).is_some(),
+                "{key}"
+            );
+            assert_eq!(parse_shortcut(key, KeyPlatform::Mac, false), None, "{key}");
+        }
+        // Any other shortcut is the same for both.
+        assert_eq!(
+            parse_shortcut("Ctrl+Shift+U", KeyPlatform::Windows, false),
+            chord(Modifiers::CONTROL | Modifiers::SHIFT, Code::KeyU)
+        );
+        let manifest = json!({"commands": {
+            "_execute_action": {"suggested_key": "MediaStop"},
+            "_execute_browser_action": {"suggested_key": "MediaPlayPause"},
+            "stop": {"suggested_key": "MediaStop", "description": "Stop"}
+        }});
+        let commands = manifest_commands(&manifest, None, KeyPlatform::Mac);
+        assert_eq!(
+            commands
+                .iter()
+                .map(|c| (c.name.as_str(), c.chord))
+                .collect::<Vec<_>>(),
+            [
+                ("_execute_action", None),
+                ("_execute_browser_action", None),
+                ("stop", chord(Modifiers::empty(), Code::MediaStop)),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_rules_chromiums_parser_shares_with_this_one_hold() {
+        // A key of one character is A to Z or 0 to 9 (ui, lines 275 and
+        // 328 to 335): a dot or a comma is written `Period` or `Comma`.
+        for text in ["Alt+.", "Alt+,", "Alt+;", "Alt+a", "Alt+é"] {
+            assert_eq!(
+                parse_shortcut(text, KeyPlatform::Windows, true),
+                None,
+                "{text:?}"
+            );
+        }
+        assert_eq!(
+            parse_shortcut("Alt+Comma", KeyPlatform::Windows, true),
+            chord(Modifiers::ALT, Code::Comma)
+        );
+        // A media key takes no modifier (ui, lines 349 to 354).
+        assert_eq!(
+            parse_shortcut("Ctrl+MediaStop", KeyPlatform::Windows, true),
+            None
+        );
+        // Shift needs Ctrl, Alt or Command beside it (ui, lines 62 to 65),
+        // and every other key needs a modifier (ui, lines 50 to 53).
+        assert_eq!(
+            parse_shortcut("Shift+Tab", KeyPlatform::Windows, true),
+            None
+        );
+        assert_eq!(parse_shortcut("Tab", KeyPlatform::Windows, true), None);
+        // Two keys (ui, lines 286 to 290).
+        assert_eq!(parse_shortcut("Ctrl+Y+U", KeyPlatform::Windows, true), None);
+        // The key may stand anywhere among the tokens (ui, line 239).
+        assert_eq!(
+            parse_shortcut("Y+Ctrl", KeyPlatform::Windows, true),
+            chord(Modifiers::CONTROL, Code::KeyY)
+        );
     }
 
     #[test]

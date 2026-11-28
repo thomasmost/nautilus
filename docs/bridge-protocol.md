@@ -1218,6 +1218,28 @@ from several windows into one group gets the rejection; one that groups
 the tab it works on (the Claude extension) never meets it. Decided, not
 planned to change.
 
+**A shortcut is read by Chromium's rules** (`commands::parse_shortcut`,
+checked on 2026-11-27 against `ui/base/accelerators/command.cc`,
+`ui::Command::ParseImpl`, as `extensions/common/command.cc` calls it, at
+tag `156.0.8078.100`; each rule has a test that names its lines). The
+text is split at `+` and each token trimmed of white space; three tokens
+at most (two modifiers and a key); a modifier named twice is that
+modifier; exactly one key, a letter `A` to `Z`, a digit, or one of the
+named keys (`Comma`, `Period`, `Home`, `End`, `PageUp`, `PageDown`,
+`Space`, `Insert`, `Delete`, the arrows, `Tab`, the four media keys), in
+that case, so `Alt+.` is no shortcut and `Alt+Period` is; every key but
+a media key needs Ctrl, Alt or Command, and Shift alone is not one; Alt
+with Ctrl or with Command is refused (on macOS that is Option with
+Command, which `Ctrl` means there, and Option with `MacCtrl`); a media
+key takes no modifier and is no shortcut for `_execute_action` and its
+two older names. What Chrome decides after parsing is not the parser's
+and is not followed: more than four shortcuts in one manifest is a
+manifest error there (`commands_handler.cc`), so no such extension
+loads; and `CommandService::CanAutoAssign` gives a `global` command only
+Ctrl+Shift and a digit and gives none of Chrome's own shortcuts away,
+where here a `global` command is an ordinary shortcut of the window and
+osmena's keymap decides which chord an extension keeps.
+
 **When a group call resolves** (`router::settle`, `Then::Group`). Each
 resolves on the published strip that shows its own change, so a read
 made straight after the promise sees it; a strip published since the

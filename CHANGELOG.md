@@ -246,6 +246,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- An extension's keyboard shortcut is read as Chrome reads it. One
+  written with spaces around its parts (`Ctrl + Shift + Y`) or with a
+  modifier named twice was not taken as a shortcut at all; and three
+  kinds Chrome refuses were taken: Option with Command on macOS (as
+  Ctrl+Alt elsewhere), more than two modifiers, and a media key for
+  the toolbar button's own command.
+
 - `tabGroups.update` on a group that is removed while the call is
   under way rejects at once with Chrome's `No group with id`, where it
   waited five seconds and then answered a group that no longer
