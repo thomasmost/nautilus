@@ -321,7 +321,35 @@
     chrome.runtime.sendMessage({ command: 'debugger-check', tabId: other.id }).catch(() => {});
     await Promise.race([finished, sleep(40000)]);
     await checkpoint('debugger-done');
+
+    // The page that attached goes without detaching (its panel is closed
+    // under it): does the extension's debugger session on the tab go with
+    // the page? Asked of Chromium from this worker: a command through the
+    // session, and the target list's own word. The harness reads the
+    // engine's log for what it did with the tab meanwhile.
+    const said = (promise) => promise.then(() => 'ok', (error) => 'rejected: ' + error.message);
+    const target = { tabId: other.id };
+    const sessionListed = async () => {
+      const found = (await chrome.debugger.getTargets()).find((t) => t.tabId === other.id);
+      return found ? found.attached : null;
+    };
+    const orphan = { tab: other.id };
+    orphan.attach = await chrome.runtime.sendMessage({ command: 'debugger-attach-and-stay', tabId: other.id }).catch((error) => 'no answer: ' + error.message);
+    orphan.attachedBefore = await sessionListed();
     let before = seen();
+    await sp.close({ windowId: window });
+    orphan.panelClosed = await until(() => closed.length === before.closed + 1, 10);
+    await checkpoint('orphan-closed');
+    orphan.command = await said(chrome.debugger.sendCommand(target, 'Runtime.evaluate', { expression: '1', returnByValue: true }));
+    orphan.attachedAfter = await sessionListed();
+    await post('orphan-debugger', orphan);
+    await checkpoint('orphan-asked');
+    // The session is this extension's to end, if it is still there.
+    orphan.detach = await said(chrome.debugger.detach(target));
+    await post('orphan-debugger', orphan);
+    await sp.open({ windowId: window });
+    await checkpoint('orphan-done');
+    before = seen();
     await sp.setOptions({ path: 'panel-tab.html' });
     step(
       'setOptions({path}) on the open window panel closes the old page and opens the new',

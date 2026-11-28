@@ -868,7 +868,9 @@ Upstream causes and the features they block are tracked in
   debuggers are kept (the browser forgets a debugger only on the worker's
   own word, or when the extension is off or its tab closes). A page's
   report of a debugger on a tab the browser cannot name yet is dropped, not
-  kept for later. A symlink in an
+  kept for later. A debugger attached from a page stays on its tab when
+  that page closes, as in Chrome, and the tab stays painted until the
+  extension detaches. A symlink in an
   unpacked extension is not copied: it is skipped with a warning that
   names it, and a worker entry that is a link or missing fails the load.
   Dot-files and dot-directories (`.git`, `.DS_Store`) are not copied

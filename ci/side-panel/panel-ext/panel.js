@@ -107,6 +107,17 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message && message.command === 'debugger-check') debuggerCheck(message.tabId);
 });
 
+// Attach and stay attached: the worker then closes this panel, so the page
+// goes without a detach, and asks Chromium whether the session went with it.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.command !== 'debugger-attach-and-stay') return undefined;
+  chrome.debugger.attach({ tabId: message.tabId }, '1.3').then(
+    () => sendResponse('ok'),
+    (error) => sendResponse('rejected: ' + error.message)
+  );
+  return true;
+});
+
 (async () => {
   const page = location.pathname.slice(1);
   describe(page);

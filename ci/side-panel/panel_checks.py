@@ -526,6 +526,9 @@ def panel_checks(h):
         "bystander-page": lambda: bystander_page(h),
         "debugger-held": lambda: debugger_held(h),
         "debugger-done": lambda: debugger_done(h),
+        "orphan-closed": lambda: orphan_closed(h),
+        "orphan-asked": lambda: orphan_asked(h),
+        "orphan-done": lambda: orphan_done(h),
         "path-changed": lambda: path_changed(h),
         "path-restored": lambda: h.check(
             "setOptions({path}) back shows the first page again",
@@ -560,7 +563,7 @@ def panel_checks(h):
            % (len(firsts), sum(1 for d in firsts if d.get("hasTab"))))
     log = h.log_text()
     h.check("the log has a 'side panel TabId(..): chrome-extension://' line for each open",
-            len(re.findall(r"side panel TabId\(\d+\): chrome-extension://", log)) == 10,
+            len(re.findall(r"side panel TabId\(\d+\): chrome-extension://", log)) == 11,
             re.findall(r"side panel TabId\(\d+\): chrome-extension://\S+", log))
     clicks = re.findall(r"TEST HOOK: command \d+: click on \S+ for .*", log)
     h.check("both clicks of the control opened or closed the side panel",
@@ -755,6 +758,39 @@ def debugger_done(h):
             data.get("error") or detach)
     hidden = wait(lambda: len(debugger_lines(h)[1]) == 1, 5)
     h.check("after the detach the log shows the tab hidden again", hidden, debugger_lines(h))
+
+
+def orphan_closed(h):
+    """The panel whose page attached a debugger is closed under it: the page
+    goes without a detach."""
+    h.check("the panel whose page holds a debugger closed", wait(lambda: h.closed("panel.html"), 10),
+            [h.panel("panel.html"), h.view_closed("panel.html")])
+    time.sleep(1.5)  # the page's process is gone, and whatever follows from it
+
+
+def orphan_asked(h):
+    said = wait(lambda: latest("orphan-debugger"), 5)
+    data = said["data"] if said else {}
+    shown, hidden = debugger_lines(h)
+    h.note("a debugger whose attaching page closed without a detach: " + json.dumps(data, sort_keys=True)
+           + "; the log's shown lines: %d, hidden-again lines: %d" % (len(shown), len(hidden)))
+    # Chromium's session is the extension's, not the page's: it outlives
+    # the page that opened it, so the engine must not forget the debugger
+    # (and hide the tab) because that page is gone.
+    h.check("the debugger session outlives the page that attached it: the worker still commands the tab through it",
+            data.get("attach") == "ok" and data.get("panelClosed") is True and data.get("command") == "ok"
+            and data.get("attachedAfter") is True, data)
+    h.check("and the engine keeps that tab shown for it",
+            len(shown) == 2 and len(hidden) == 1, [shown, hidden])
+
+
+def orphan_done(h):
+    said = wait(lambda: latest("orphan-debugger", lambda d: "detach" in d), 5)
+    data = said["data"] if said else {}
+    h.note("after it: " + json.dumps(data, sort_keys=True))
+    h.check("the worker's detach ends the session the page left, and the tab is hidden again",
+            data.get("detach") == "ok" and wait(lambda: len(debugger_lines(h)[1]) == 2, 5), [data, debugger_lines(h)])
+    h.check("the window panel is open again after it", wait(lambda: h.alive("panel.html"), 15))
 
 
 def path_changed(h):

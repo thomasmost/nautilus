@@ -419,6 +419,20 @@ session attached and forgets nothing, and a detach by either context
 ends it for both. Both contexts hear `onDetach` and both report it;
 the second report changes nothing.
 
+**A debugger outlives the page that attached it** (measured in
+`panel.sh panel`, 2026-11-27: a panel's page attached to the tab behind
+the active one and its panel was closed under it, so the page went
+without a detach; afterwards the worker's `sendCommand` on that tab was
+answered, `debugger.getTargets` listed the tab as attached, and the
+worker's own `detach` ended it). The session is the extension's, not the
+page's, so the engine does not forget a debugger when the page that
+reported it goes: the tab is still debugged, and stays painted until the
+extension detaches, its worker's hello says the session is gone, the tab
+closes or the extension goes. A detach report that never arrives because
+the page closed while detaching is covered by the same rule the other
+way round: Chromium's own `onDetach` reaches the extension's other
+contexts, and the worker reports it.
+
 **A painted tab the window does not show redraws nothing.** A tab kept
 painted for a debugger paints behind the active one. `on_paint` keeps
 its frame and raises `FrameReady` only for a view the shell is showing
