@@ -1168,6 +1168,7 @@ for (const twin of [null, 'alias']) {
 function pageContext({ bindingsAtChange = true, hasDocument = true, answers = true, browser = false, sidePanel = false }) {
   const observers = [];
   const messages = []; // what Chromium's own runtime.sendMessage was given
+  const rawMessages = []; // the same, unchanged (undefined kept, the callback left out)
   const messageState = { fail: null };
   const errors = [];
   const sent = [];
@@ -1184,6 +1185,7 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
       sendMessage(...args) {
         const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
         messages.push(JSON.parse(JSON.stringify(args)));
+        rawMessages.push(args.slice());
         const fail = messageState.fail;
         messageState.fail = null;
         if (callback) {
@@ -1253,7 +1255,7 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
   const listeners = {};
   sandbox.addEventListener = (type, listener) => { (listeners[type] = listeners[type] || []).push(listener); };
   const fire = (type) => { for (const listener of listeners[type] || []) listener({ type }); };
-  return { sandbox, observers, errors, sent, reports, events, reached, chrome, mutate, messages, messageState, nativeSendMessage, tell, fire };
+  return { sandbox, observers, errors, sent, reports, events, reached, chrome, mutate, messages, rawMessages, messageState, nativeSendMessage, tell, fire };
 }
 
 {
@@ -1941,23 +1943,69 @@ function loadWorker(runtime) {
 }
 {
   // While held, a call Chromium refuses by its argument shapes throws at once,
-  // as Chromium does (probed in Chromium 156: a TypeError with this message,
-  // synchronously, after the hold), and is not held. A valid call is held.
+  // as Chromium does (probed in Chromium 156, after the hold, synchronously:
+  // "No matching signature", or for a lone function "Could not serialize
+  // message."), and is not held. Each shape below was measured refused by the
+  // live probe (ci/side-panel/panel-ext/frames-probe.js, `shapes`).
   const p = pageContext({ sidePanel: true });
   p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50 });
   p.mutate();
   const runtime = p.sandbox.chrome.runtime;
-  const message = 'Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function callback): No matching signature.';
+  const signature = 'Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function callback): No matching signature.';
+  const serialize = 'Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function callback): Could not serialize message.';
   const id = 'abcdefghijklmnopabcdefghijklmnop';
-  const refused = [[], [42, 'x'], [{}, 'x'], [id, 'x', 'nope'], [id, 'x', 42], [id, 'x', 42, () => {}], [id, 'x', null, () => {}, 'extra'], [42, 'x', {}]];
-  for (const args of refused) {
-    assert.throws(() => runtime.sendMessage(...args), (e) => e.name === 'TypeError' && e.message === message, JSON.stringify(args.map(String)));
+  const fn = () => {};
+  const refused = [
+    [[], signature], [[fn], serialize],
+    [[42, 'x'], signature], [[{}, 'x'], signature], [[true, 'x'], signature], [[['a'], 'x'], signature], [[fn, 'x'], signature], [[{}, 42], signature],
+    [[id, 'x', 'nope'], signature], [[id, 'x', 42], signature], [[id, 'x', true], signature],
+    [[42, 'x', {}], signature], [[{}, 'x', {}], signature], [[true, 'x', {}], signature], [[fn, 'x', {}], signature],
+    [[null, 'x', 42], signature], [[undefined, 'x', 'nope'], signature],
+    [[id, 'x', {}, 'extra'], signature], [[id, 'x', 42, null], signature], [[id, 'x', 42, fn], signature],
+    [[id, 'x', null, fn, 'extra'], signature], [[id, 'x', {}, null, null], signature],
+    [[{ type: 'probe' }, {}, null, null], signature],
+  ];
+  for (const [args, text] of refused) {
+    assert.throws(() => runtime.sendMessage(...args), (e) => e.name === 'TypeError' && e.message === text, JSON.stringify(args.map(String)));
   }
   assert.deepEqual(p.messages, [], 'a call Chromium refuses was held');
   const ok = runtime.sendMessage('fine');
   p.tell('bridge.reported', [{ panel: false }]);
   assert.deepEqual(p.messages, [['fine']]);
   assert.deepEqual(await ok, { heard: 'fine' });
+}
+{
+  // Chromium accepts each of these shapes (the live probe measured them as
+  // accepted, with null and undefined in each optional position). While the
+  // page holds, each is held without a throw, and is sent later with the
+  // arguments it was given (the trailing callback is Chromium's, and is not
+  // among them), in the order it was made.
+  const p = pageContext({ sidePanel: true });
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50 });
+  p.mutate();
+  const runtime = p.sandbox.chrome.runtime;
+  const id = p.chrome.runtime.id;
+  const msg = { type: 'probe' };
+  const fn = () => {};
+  // A message that is not a string is never the first argument of three, so
+  // those forms are not here: they are refused (above).
+  const accepted = [
+    [msg], [msg, fn], [msg, {}], [msg, null], [msg, undefined], [msg, {}, fn], [msg, null, fn],
+    [id, msg], [id, msg, fn], [id, msg, {}], [id, msg, null], [id, msg, undefined],
+    [id, msg, {}, fn], [id, msg, {}, null], [id, msg, {}, undefined], [id, msg, null, null],
+    [null, msg], [undefined, msg], [null, msg, {}], [undefined, msg, undefined, fn], [null, msg, null, null],
+  ];
+  const results = accepted.map((args) => {
+    try { return runtime.sendMessage(...args); } catch (e) { return e; }
+  });
+  results.forEach((result, i) => {
+    assert.ok(!(result instanceof Error), `a shape Chromium accepts threw while held: ${JSON.stringify(accepted[i].map(String))}`);
+  });
+  assert.deepEqual(p.messages, [], 'a shape was sent before the engine answered');
+  p.tell('bridge.reported', [{ panel: false }]);
+  const sent = accepted.map((args) => args.filter((a) => typeof a !== 'function'));
+  assert.deepEqual(p.rawMessages, sent, 'a held shape was not sent with its arguments, in order');
+  assert.deepEqual(p.errors, []);
 }
 // window.close() in an extension page. An extension with the "sidePanel"
 // permission asks the engine first, for at most half a second: a side

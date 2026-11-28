@@ -83,6 +83,10 @@
       const tab = sender.tab ? { id: sender.tab.id, index: sender.tab.index, windowId: sender.tab.windowId } : null;
       post(message.report.kind, Object.assign({ senderTab: tab }, message.report.data));
     }
+    // A message sent by the frames probe during its page's hold (frames-probe.js).
+    if (message && message.type === 'hold-probe') {
+      post('hold-shape', { tag: message.tag, page: message.page });
+    }
     // A panel page says who it is: what the worker sees as its sender.
     if (message && message.whoami) {
       post('sender', {
@@ -278,7 +282,8 @@
     post('closer-tab', { id: closer.id });
     await checkpoint('closer');
     const gone = await until(() => removed[closer.id] !== undefined, 10);
-    post('closer-gone', { gone, at: removed[closer.id] || null });
+    // The ids the check compares, so a failure shows a mismatch in them.
+    post('closer-gone', { gone, at: removed[closer.id] || null, closerId: closer.id, removedIds: Object.keys(removed) });
     if (!gone) await chrome.tabs.remove(closer.id).catch(() => {});
 
     // Left open for the steps by hand (side-panel.AC1.2, AC1.3).

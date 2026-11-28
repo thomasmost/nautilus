@@ -45,8 +45,10 @@
   // engine's word that the id has been told, or PANEL_TOLD_WAIT_MS. It is
   // then sent with the arguments it was given, and its answer (the promise,
   // or the callback with runtime.lastError) is Chromium's own. Once let go
-  // the function is Chromium's again, identically: a page that is no
-  // panel's is touched only until its report is answered. Only in an
+  // the property is Chromium's function again, unless the page replaced it
+  // during the hold: then the page's value stays, and this holder, which
+  // passes every call on from then, is the target that value calls. A page
+  // that is no panel's is touched only until its report is answered. Only in an
   // extension that can have a side panel. runtime.connect returns its port
   // at once and cannot be held: a port from a panel keeps its sender.tab.
   var runtime = root.chrome && root.chrome.runtime;
@@ -75,25 +77,43 @@
     sends.forEach(function (send) { send(); });
   }
   // Chromium's signature of runtime.sendMessage, and its refusal by shape.
-  // A call the shape refuses throws here at once, as Chromium's does (probed
-  // in Chromium 156 with the same TypeError), and is not held. Only the shapes
-  // the probe refused are checked: any other argument error is Chromium's,
-  // after the hold (bridge-protocol.md, the hold).
-  var SIGNATURE_ERROR = 'Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function callback): No matching signature.';
-  function refusedShape(args) {
+  // A call the shape refuses throws here at once, as Chromium's does, and is
+  // not held. Chromium 156 was measured (ci/side-panel/panel-ext/frames-probe.js,
+  // `shapes` and `accepted`): a trailing function is the callback; with two
+  // arguments left, a first that is a string, null or undefined is the
+  // extension id, and otherwise the second is the options; with three, the
+  // first is the id and the third the options; a fourth argument that is null
+  // or undefined is the absent callback. Refused: none; more than three; two
+  // with a first that is not a string, null or undefined and a second that is
+  // not an object, null or undefined; three with a first that is not a string,
+  // null or undefined, or a third that is not an object, null or undefined. A
+  // lone function is the message, which cannot be serialised. Nothing else is
+  // refused here: a string first with options is an extension id Chromium
+  // checks, and its error is Chromium's, after the hold (bridge-protocol.md).
+  var SIGNATURE = 'Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function callback): ';
+  var NO_SIGNATURE = SIGNATURE + 'No matching signature.';
+  var NOT_SERIALIZED = SIGNATURE + 'Could not serialize message.';
+  function nullable(value) { return value === null || value === undefined; }
+  // The TypeError's message for these arguments, or null when they are not refused.
+  function refusal(args) {
     var n = args.length;
+    if (n === 1 && typeof args[0] === 'function') { return NOT_SERIALIZED; }
     if (n > 0 && typeof args[n - 1] === 'function') { n -= 1; }
-    if (n === 0 || n > 3) { return true; }
-    if (n === 2) { return typeof args[0] !== 'string' && (args[1] === null || typeof args[1] !== 'object'); }
-    if (n === 3) {
-      return typeof args[0] !== 'string' || (args[2] !== undefined && args[2] !== null && typeof args[2] !== 'object');
+    else if (n === 4 && nullable(args[3])) { n -= 1; }
+    if (n === 0 || n > 3) { return NO_SIGNATURE; }
+    if (n === 2 && typeof args[0] !== 'string' && !nullable(args[0]) && typeof args[1] !== 'object' && !nullable(args[1])) {
+      return NO_SIGNATURE;
     }
-    return false;
+    if (n === 3 && (typeof args[0] !== 'string' && !nullable(args[0]) || typeof args[2] !== 'object' && !nullable(args[2]))) {
+      return NO_SIGNATURE;
+    }
+    return null;
   }
   function heldSend() {
     var args = arguments;
     if (!holding) { return ownSend.apply(runtime, args); }
-    if (refusedShape(args)) { throw new TypeError(SIGNATURE_ERROR); }
+    var refused = refusal(args);
+    if (refused !== null) { throw new TypeError(refused); }
     if (typeof args[args.length - 1] === 'function') {
       // The callback is Chromium's to call, with its lastError.
       waiting.push(function () {

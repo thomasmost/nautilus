@@ -1160,16 +1160,36 @@ panel's page then for `bridge.told`, for at most 1 s more
 (`PANEL_TOLD_WAIT_MS`). Then each held message is sent with the
 arguments it was given, in order, and its answer is Chromium's own: the
 promise settles as Chromium's does, a callback is Chromium's to call
-with `runtime.lastError`. From then on the property holds Chromium's
-function again, identically. While the holder stands, a call whose
-argument shape Chromium refuses throws at once, as Chromium's TypeError
-does, and is not held (`refusedShape` in `js/page_report.js`: no
-argument; more than three without a trailing callback; a first argument
-that is not a string where an extension id is read; options that are
-not an object). Any other argument error is Chromium's own, after the
-hold: a rejection or `runtime.lastError`, not a throw. The held messages
+with `runtime.lastError`. From then on the property is Chromium's
+function again, unless the page replaced it during the hold: then the
+page's own value stays, and the holder, which passes every call on from
+then, is the target that value calls. While the holder stands, a call
+whose argument shape Chromium refuses throws at once, as Chromium's
+TypeError does, and is not held. The rule is `refusal` in
+`js/page_report.js`, and it was measured (2026-11-27, Chromium 156: the
+live probe's `shapes` group in `ci/side-panel/panel-ext/frames-probe.js`,
+each shape's message in `send-shapes.json`). Refused: no argument
+(`No matching signature.`); a lone function (`Could not serialize
+message.`); more than three arguments left, after a trailing function
+or a fourth argument that is null or undefined has been taken as the
+callback; two arguments whose first is not a string, null or undefined,
+and whose second is not an object, null or undefined; three arguments
+whose first is not a string, null or undefined, or whose third is not
+an object, null or undefined. Every other shape is held, and the
+measured `accepted` group (the signature's forms, with null and
+undefined in each optional position, and each of five message kinds)
+is what Chromium sends. A shape the rule does not name is not refused
+here, even where Chromium refuses it: a string first with
+options is an extension id that Chromium checks (`Invalid extension
+id`), and a message that Chromium cannot send fails after the hold. Such
+an error is Chromium's own and comes after the hold, not at once: a
+promise rejects with it, and a callback form logs it to the console
+(`js/page_report.js`, `heldSend`). The held messages
 also go at the page's `pagehide`, and before its own `window.close()`
-asks the engine to close it (2026-11-27). The state forgets a wait nobody
+asks the engine to close it (2026-11-27). The flush trade-off: a message
+flushed at `pagehide` or by `window.close()` may arrive before the
+worker has been told the panel's id, so it can lack `sender.tab`. That
+is accepted so that the message is not lost. The state forgets a wait nobody
 reported on after `PUBLISH_WAIT`. Seen in `panel.sh panel`: the at-load message
 of each of the run's panel pages reached the worker without
 `sender.tab`, the word coming within the same second as the report.

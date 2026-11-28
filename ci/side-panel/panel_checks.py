@@ -579,28 +579,100 @@ def frames_check(h):
     # C11 and C19: an about:blank or srcdoc frame of an extension page is an
     # extension context to Chromium (getContexts lists it), but it must not
     # hold the bridged namespaces: Chromium's tabs.group in such a frame ends
-    # the browser process. The frames are read, never called.
-    probe = latest("frames-probe", lambda d: d.get("page") == "panel.html")
-    data = probe["data"] if probe else {}
+    # the browser process. The frames are read, never called, in both of the
+    # suite's extension pages (a window's and a tab's) and in the closer tab,
+    # which also opens a window.open('about:blank').
     names = ["tabs", "tabGroups", "windows", "sidePanel", "commands", "debugger"]
-    for frame in ("blank", "srcdoc"):
-        seen = data.get(frame) or {}
-        bare = seen.get("bridge") == "undefined" and all(
+
+    def bare(seen):
+        return seen.get("bridge") == "undefined" and all(
             (seen.get("namespaces") or {}).get(name) == "undefined" for name in names)
-        h.check(f"an extension page's {frame} frame has no bridged namespace and no bridge",
-                bare, seen)
-    # Chromium refuses each bad argument shape by a synchronous TypeError; the
-    # bridge's held sendMessage copies that (page_report.js, refusedShape).
-    shapes = latest("send-shapes", lambda d: d.get("page") == "panel.html")
-    answers = (shapes["data"]["shapes"] if shapes else {}) or {}
-    h.check("Chromium refuses each bad sendMessage argument shape with a TypeError, at once",
-            len(answers) == 7 and all(text.startswith("threw TypeError: Error in invocation of runtime.sendMessage(")
-                                      and text.endswith("No matching signature.") for text in answers.values()),
-            answers)
-    parent = data.get("parent") or {}
-    h.check("the extension page itself has the bridge and its bridged namespaces",
-            parent.get("bridge") == "object" and parent.get("namespaces", {}).get("tabs") == "object",
-            parent)
+
+    frame_labels = {
+        "blank": "about:blank (no src)",
+        "blankSrc": 'about:blank (src="about:blank")',
+        "srcdoc": "srcdoc",
+        "nested": "about:blank inside about:blank",
+    }
+    for page in ("panel.html", "panel-tab.html"):
+        probe = latest("frames-probe", lambda d, page=page: d.get("page") == page)
+        data = probe["data"] if probe else {}
+        for frame, label in frame_labels.items():
+            seen = data.get(frame) or {}
+            h.check(f"{page}: a {label} frame of the extension page has no bridged namespace and no bridge",
+                    bare(seen), seen)
+        parent = data.get("parent") or {}
+        h.check(f"{page} itself has the bridge and its bridged namespaces",
+                parent.get("bridge") == "object" and parent.get("namespaces", {}).get("tabs") == "object",
+                parent)
+
+    popup = latest("popup-probe")
+    pdata = popup["data"] if popup else {}
+    facts = pdata.get("facts") or {}
+    h.note("window.open('about:blank') from the closer tab: " + json.dumps(pdata, sort_keys=True))
+    h.check("window.open('about:blank') from an extension page opens a window, which is closed",
+            pdata.get("opened") is True and pdata.get("closedAfter") is True, pdata)
+    h.check("the window.open('about:blank') window has no bridged namespace and no bridge",
+            bare(facts), facts)
+
+    # runtime.sendMessage's argument shapes (frames-probe.js). After the hold:
+    # what Chromium's own function does with each shape. During the hold, the
+    # bridge's held function does the same with each. Both are judged.
+    after_rec = latest("send-shapes", lambda d: d.get("page") == "panel.html")
+    after = after_rec["data"] if after_rec else {}
+    during_rec = latest("hold-shapes", lambda d: d.get("page") == "panel.html")
+    during = during_rec["data"] if during_rec else {}
+    with open(str(HERE / "out" / "send-shapes.json"), "w") as f:
+        json.dump({"after": after, "during": during}, f, indent=1, sort_keys=True)
+    sig = "threw TypeError: Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function callback): "
+    no_signature = sig + "No matching signature."
+    not_serialized = sig + "Could not serialize message."
+    accepted = after.get("accepted") or {}
+    h.check("Chromium accepts each valid sendMessage shape (no throw, after the hold)",
+            len(accepted) > 0 and all(text.startswith("returned ") for text in accepted.values()),
+            [k for k, v in accepted.items() if not v.startswith("returned ")][:5])
+    three = after.get("threeArguments") or {}
+    h.check("Chromium refuses a non-string id in three arguments with 'No matching signature'",
+            len(three) > 0 and all(text == no_signature for text in three.values()),
+            [k for k, v in three.items() if v != no_signature][:5])
+    read = after.get("readAsId") or {}
+    h.check("a string first with options is read as the extension id, and Chromium checks it",
+            len(read) > 0 and all(text.startswith(sig + "Invalid extension id: ") for text in read.values()),
+            [k for k, v in read.items() if not v.startswith(sig + "Invalid extension id: ")][:5])
+    refused = after.get("shapes") or {}
+    h.check("Chromium refuses each refused shape with a TypeError, at once (after the hold)",
+            len(refused) > 0 and all(text == (not_serialized if key == "onlyCallback" else no_signature)
+                                     for key, text in refused.items()),
+            {k: v for k, v in refused.items() if v not in (no_signature, not_serialized)})
+    same = []
+    for group in ("accepted", "threeArguments", "shapes"):
+        for key, text in (after.get(group) or {}).items():
+            if (during.get(group) or {}).get(key) != text:
+                same.append([group, key, text, (during.get(group) or {}).get(key)])
+    h.check("while held, each shape gets what Chromium gives it: an accepted one is held, a refused one throws at once",
+            bool(during) and not same, same[:5])
+    held_read = during.get("readAsId") or {}
+    h.check("while held, a string-first shape is held, not refused by the bridge",
+            len(held_read) > 0 and all(text.startswith("returned ") for text in held_read.values()),
+            [k for k, v in held_read.items() if not v.startswith("returned ")][:5])
+    tagged = during.get("tagged") or {}
+    h.check("while held, each tagged form is accepted", len(tagged) == 6 and all(text.startswith("returned ") for text in tagged.values()), tagged)
+    with lock:
+        tags = [r["data"].get("tag") for r in records if r["kind"] == "hold-shape" and r["data"].get("page") == "panel.html"]
+    expected = ["message", "message, callback", "id, message", "id, message, options",
+                "id, message, options, null callback", "id, message, options, callback"]
+    # The panel page loads more than once in the suite: each load's six forms
+    # must each reach the worker with their message. The order the bridge
+    # hands them to Chromium is judged by bridge_check.mjs (the held calls
+    # reach Chromium's function in the order they were made). The order they
+    # arrive at the worker is only reported: one run showed two of the six
+    # swapped, and that is not established as Chromium's own ordering.
+    loads = [tags[i:i + len(expected)] for i in range(0, len(tags), len(expected))]
+    h.check("each tagged form held during the hold reaches the worker with its message",
+            len(tags) > 0 and len(tags) % len(expected) == 0 and all(sorted(load) == sorted(expected) for load in loads),
+            tags[:len(expected)])
+    if tags:
+        h.note("delivery order of the tagged forms at the worker, first load: " + json.dumps(tags[:len(expected)]))
 
 
 def start(h):
