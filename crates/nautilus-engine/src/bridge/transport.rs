@@ -50,6 +50,11 @@ pub(crate) trait BridgeTransport {
     /// contexts of `extension` this transport serves, starting its worker
     /// if it is stopped and delivering exactly once.
     fn emit(&self, extension: &str, event: &str, args: &[Value]);
+    /// As `emit`, for a delivery somebody waits on: the transport calls
+    /// `Hub::told(token)` when the worker has taken it, or when it is
+    /// given up. False when nothing was queued (the extension has no
+    /// worker to reach): the caller then has nobody to wait for.
+    fn emit_told(&self, extension: &str, event: &str, args: &[Value], token: u64) -> bool;
     /// Start `extension`'s worker if it is stopped; deliver nothing.
     fn wake(&self, extension: &str);
 }

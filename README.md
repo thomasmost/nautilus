@@ -906,11 +906,14 @@ Upstream causes and the features they block are tracked in
   - A panel is not restored after a restart, and a panel's page loads
     again each time the panel is opened. Options set with `setOptions`
     last for the run; only `setPanelBehavior` is kept.
-  - A message from a panel's page has no `sender.tab`, as in Chrome,
-    except that the first message a panel sends as it loads, or the
-    first one a just-started worker receives, can still carry one
-    (with `index` and `windowId` -1). A port from a panel
-    (`runtime.onConnect`) keeps the `sender.tab` Chromium gives it.
+  - A message from a panel's page has no `sender.tab`, as in Chrome;
+    the first one a panel sends as it loads is held in the page until
+    the extension's worker knows the panel (two seconds at the very
+    most). The first message a just-started worker or popup receives
+    from a panel that was already open can still carry one (with
+    `index` and `windowId` -1), and a port from a panel
+    (`runtime.connect`, `runtime.onConnect`) keeps the `sender.tab`
+    Chromium gives it.
   - Every tab group is grey: a folder has no colour, and a colour
     passed to `tabGroups.update` is ignored. `tabGroups.move` is
     refused and `tabGroups.onMoved` never fires. Tabs are grouped

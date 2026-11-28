@@ -480,7 +480,11 @@ Ninja on `PATH`:
   `extensions.track_tab`, so the view has no row in the tab-id table
   and no part in the debugger's show and hide; its page's tab report
   is kept beside the table (`table::PanelIds`), which is how a
-  message from it loses `sender.tab`. Which panel is open where is
+  message from it loses `sender.tab`; the page holds its
+  `runtime.sendMessage` until the engine says the worker has been
+  told that id (`js/page_report.js`, `bridge.reported` and
+  `bridge.told`, `BridgeState::told`), so its first message loses it
+  too. Which panel is open where is
   the model's; the engine's `panel::PanelRegistry` in `DelegateState`
   only joins a request to the view made for it and answers a panel
   page's window (`window_of`). A request of the engine's own (a click
@@ -717,7 +721,8 @@ user sees):
   `js/side_panel.js`, `Effect::SidePanel` and `Hub::side_panel_call`,
   the behaviour file, the events through `BridgeState::emit`; a panel
   page's current window from the registry; a panel page's message
-  without `sender.tab` (`table::PanelIds`, `js/runtime.js`).
+  without `sender.tab` (`table::PanelIds`, `js/runtime.js`), its
+  first message held at the sending end (`js/page_report.js`).
 - **Tab groups.** `bridge/groups.rs`, `js/tab_groups.js`, the
   `tabGroups` arm and the `group` and `ungroup` rows of the router,
   `Then::Group`, the group events in the differ.

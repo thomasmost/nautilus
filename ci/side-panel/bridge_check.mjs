@@ -1109,8 +1109,10 @@ for (const twin of [null, 'alias']) {
 // first change of the document. Chromium's `chrome` appears between the two,
 // as the render process measures it, so it is set at the change. The
 // observer is a stand-in that delivers only while it is connected.
-function pageContext({ bindingsAtChange = true, hasDocument = true, answers = true, browser = false }) {
+function pageContext({ bindingsAtChange = true, hasDocument = true, answers = true, browser = false, sidePanel = false }) {
   const observers = [];
+  const messages = []; // what Chromium's own runtime.sendMessage was given
+  const messageState = { fail: null };
   const errors = [];
   const sent = [];
   const reports = []; // the tab ids the page reported
@@ -1121,7 +1123,20 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
       id: 'abcdefghijklmnopabcdefghijklmnop',
       onConnect: nativeEvent(),
       onMessage: nativeEvent(),
-      sendMessage() {},
+      // Chromium's own, in both calling styles: it answers with what it was
+      // sent, or fails as Chromium fails a message (`messageState.fail`).
+      sendMessage(...args) {
+        const callback = typeof args[args.length - 1] === 'function' ? args.pop() : null;
+        messages.push(JSON.parse(JSON.stringify(args)));
+        const fail = messageState.fail;
+        messageState.fail = null;
+        if (callback) {
+          if (fail) chrome.runtime.lastError = { message: fail };
+          try { callback(fail ? undefined : { heard: args[0] }); } finally { delete chrome.runtime.lastError; }
+          return undefined;
+        }
+        return fail ? Promise.reject(new Error(fail)) : Promise.resolve({ heard: args[0] });
+      },
       connect() { return { name: '', onMessage: nativeEvent(), onDisconnect: nativeEvent(), postMessage() {} }; },
     },
     tabs: {
@@ -1138,6 +1153,8 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
     },
     windows: { WINDOW_ID_CURRENT: -2 },
   };
+  if (sidePanel) chrome.sidePanel = { open() {}, onOpened: nativeEvent() };
+  const nativeSendMessage = chrome.runtime.sendMessage;
   const sandbox = {
     console: { error: (...a) => errors.push(a.map(String).join(' ')), log() {} },
     Promise, Map, Set, JSON, Object, Array, Error, String, Math, Date, setTimeout, clearTimeout,
@@ -1173,7 +1190,9 @@ function pageContext({ bindingsAtChange = true, hasDocument = true, answers = tr
       if (observer.connected) observer.callback([{ type: 'childList' }]);
     }
   };
-  return { sandbox, observers, errors, sent, reports, events, reached, chrome, mutate };
+  // The engine's word to this page, as the page lane delivers an event.
+  const tell = (event, args) => sandbox.__nautilusBridgeDeliver(JSON.stringify({ event, args }));
+  return { sandbox, observers, errors, sent, reports, events, reached, chrome, mutate, messages, messageState, nativeSendMessage, tell };
 }
 
 {
@@ -1664,6 +1683,142 @@ function loadWorker(runtime) {
   vm.runInContext(read('page_transport.js'), only);
   vm.runInContext('self.__nautilusRefuseNative();', only);
   await assert.rejects(Promise.resolve().then(() => only.browser.tabs.group({})), /is not supported in this page\./);
+}
+// A side panel's first message, sent as its page loads. Chromium names the
+// panel's browser as sender.tab, and the contexts that receive the message
+// take it off only once the engine has told them the panel's id; the page's
+// own message goes straight through Chromium and would get there first. So
+// a page of an extension with a side panel holds runtime.sendMessage: until
+// the engine has answered the page's report (is this page a panel's?), and
+// in a panel's page until the engine says the id has been told, or a second
+// has passed. Then the message is sent as it was given, and its answer is
+// the caller's as Chromium gave it.
+{
+  // A panel's page: nothing is sent before the engine's word.
+  const p = pageContext({ sidePanel: true });
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50, windowId: -1 });
+  p.mutate();
+  const runtime = p.sandbox.chrome.runtime;
+  const first = runtime.sendMessage({ whoami: 'panel.html' });
+  const called = [];
+  assert.equal(runtime.sendMessage({ n: 2 }, { includeTlsChannelId: false }, (answer) => called.push([answer, runtime.lastError])), undefined);
+  assert.ok(first && typeof first.then === 'function', 'a held message without a callback is no promise');
+  await tick(); await tick();
+  assert.deepEqual(p.reports, [{ tab: 50 }]);
+  assert.deepEqual(p.messages, [], 'a message left before the engine answered the report');
+  p.tell('bridge.reported', [{ panel: true }]);
+  await tick(); await tick();
+  assert.deepEqual(p.messages, [], 'a panel\'s message left before the engine said its id was told');
+  await wait(100);
+  assert.deepEqual(p.messages, []);
+  p.tell('bridge.told', []);
+  // In the order they were made, with the arguments they were given.
+  assert.deepEqual(p.messages, [[{ whoami: 'panel.html' }], [{ n: 2 }, { includeTlsChannelId: false }]]);
+  assert.deepEqual(await first, { heard: { whoami: 'panel.html' } }, 'the promise is not Chromium\'s answer');
+  assert.deepEqual(called, [[{ heard: { n: 2 } }, undefined]], 'the callback did not get Chromium\'s answer');
+  // From then on the function is Chromium's own again, identically.
+  assert.equal(runtime.sendMessage, p.nativeSendMessage, 'the hold is still in place after the engine\'s word');
+  assert.deepEqual(await runtime.sendMessage('later'), { heard: 'later' });
+  assert.deepEqual(p.errors, []);
+}
+{
+  // A failure is the caller's as Chromium gave it: a rejection, or
+  // runtime.lastError inside the callback.
+  const p = pageContext({ sidePanel: true });
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50 });
+  p.mutate();
+  const runtime = p.sandbox.chrome.runtime;
+  const rejected = runtime.sendMessage('one').then(() => 'resolved', (e) => e.message);
+  const seen = new Promise((resolve) => runtime.sendMessage('two', () => resolve(runtime.lastError && runtime.lastError.message)));
+  await tick(); await tick();
+  p.tell('bridge.reported', [{ panel: true }]);
+  p.messageState.fail = 'Could not establish connection. Receiving end does not exist.';
+  p.tell('bridge.told', []);
+  assert.equal(await rejected, 'Could not establish connection. Receiving end does not exist.');
+  assert.equal(await seen, undefined, 'only the first was made to fail');
+  assert.equal('lastError' in runtime, false);
+  const again = pageContext({ sidePanel: true });
+  again.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50 });
+  again.mutate();
+  const failed = new Promise((resolve) => again.sandbox.chrome.runtime.sendMessage('x', () => resolve(again.sandbox.chrome.runtime.lastError && again.sandbox.chrome.runtime.lastError.message)));
+  await tick(); await tick();
+  again.messageState.fail = 'The message port closed before a response was received.';
+  again.tell('bridge.reported', [{ panel: true }]);
+  again.tell('bridge.told', []);
+  assert.equal(await failed, 'The message port closed before a response was received.');
+}
+{
+  // The engine never says the id was told: the message goes after a second.
+  const p = pageContext({ sidePanel: true });
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50 });
+  p.mutate();
+  const sent = p.sandbox.chrome.runtime.sendMessage('first');
+  await tick(); await tick();
+  p.tell('bridge.reported', [{ panel: true }]);
+  await wait(700);
+  assert.deepEqual(p.messages, [], 'the engine was not given its second');
+  await wait(500);
+  assert.deepEqual(p.messages, [['first']], 'a message the engine never released stayed held');
+  assert.deepEqual(await sent, { heard: 'first' });
+  // A word that comes late changes nothing.
+  p.tell('bridge.told', []);
+  assert.deepEqual(p.messages, [['first']]);
+}
+{
+  // A page that is no panel's (a page in a tab): its message goes when the
+  // engine has answered the report, with no wait for anything else, and the
+  // function is Chromium's own again.
+  const p = pageContext({ sidePanel: true });
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 433, windowId: 1 });
+  p.mutate();
+  const sent = p.sandbox.chrome.runtime.sendMessage('from a tab');
+  await tick(); await tick();
+  assert.deepEqual(p.messages, []);
+  p.tell('bridge.reported', [{ panel: false }]);
+  assert.deepEqual(p.messages, [['from a tab']], 'a page that is no panel\'s was held after the engine\'s answer');
+  assert.deepEqual(await sent, { heard: 'from a tab' });
+  assert.equal(p.sandbox.chrome.runtime.sendMessage, p.nativeSendMessage);
+  // A page that is no tab at all (a popup): there is no report to answer,
+  // and its message goes as soon as Chromium has said so.
+  const popup = pageContext({ sidePanel: true });
+  popup.chrome.tabs.getCurrent = () => Promise.resolve(undefined);
+  popup.mutate();
+  popup.sandbox.chrome.runtime.sendMessage('from a popup');
+  await tick(); await tick();
+  assert.deepEqual(popup.messages, [['from a popup']], 'a page with no tab was held');
+  assert.equal(popup.sandbox.chrome.runtime.sendMessage, popup.nativeSendMessage);
+  // An engine that never answers the report: the message goes at the
+  // report's own bound.
+  const silent = pageContext({ sidePanel: true });
+  silent.chrome.tabs.getCurrent = () => Promise.resolve({ id: 433 });
+  silent.mutate();
+  silent.sandbox.chrome.runtime.sendMessage('unanswered');
+  await wait(600);
+  assert.deepEqual(silent.messages, []);
+  await wait(600);
+  assert.deepEqual(silent.messages, [['unanswered']], 'a message waited for an answer past the report\'s bound');
+}
+{
+  // An extension without a side panel has no panel's page: its
+  // runtime.sendMessage is Chromium's own function from the start, and is
+  // never held.
+  const p = pageContext({});
+  p.chrome.tabs.getCurrent = () => Promise.resolve({ id: 433 });
+  p.mutate();
+  assert.equal(p.sandbox.chrome.runtime.sendMessage, p.nativeSendMessage, 'sendMessage was replaced in an extension without a side panel');
+  p.sandbox.chrome.runtime.sendMessage('at once');
+  assert.deepEqual(p.messages, [['at once']]);
+  // `browser.runtime` is `chrome.runtime`, so the hold is its too.
+  const b = pageContext({ sidePanel: true, browser: true });
+  b.chrome.tabs.getCurrent = () => Promise.resolve({ id: 50 });
+  b.mutate();
+  assert.equal(b.sandbox.browser.runtime.sendMessage, b.sandbox.chrome.runtime.sendMessage);
+  b.sandbox.browser.runtime.sendMessage('through browser');
+  await tick(); await tick();
+  assert.deepEqual(b.messages, []);
+  b.tell('bridge.reported', [{ panel: true }]);
+  b.tell('bridge.told', []);
+  assert.deepEqual(b.messages, [['through browser']]);
 }
 // window.close() in an extension page. An extension with the "sidePanel"
 // permission asks the engine first, for at most half a second: a side

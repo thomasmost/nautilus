@@ -97,11 +97,14 @@ enum Payload {
     Click { tab: TabId },
     /// A listener's event, or `bridge.wake`. `instance` is the worker
     /// instance the extension was known to have when the event was queued
-    /// (`None`: before any hello).
+    /// (`None`: before any hello). `told` is the hub's token for a
+    /// delivery somebody waits on (`BridgeTransport::emit_told`): the hub
+    /// hears when the delivery is over.
     Event {
         event: String,
         args: Vec<Value>,
         instance: Option<String>,
+        told: Option<u64>,
     },
 }
 
@@ -178,6 +181,7 @@ mod delivery_tests {
                 event: "tabs.onCreated".to_string(),
                 args: Vec::new(),
                 instance: None,
+                told: None,
             },
         }
     }
@@ -1488,10 +1492,13 @@ impl Bridge {
                         "bridge: {extension}: the click on {tab:?} (delivery {}) is dropped: {why}",
                         delivery.id
                     ),
-                    Payload::Event { .. } => log::warn!(
-                        "bridge: {extension}: {} is dropped: {why}",
-                        delivery.label()
-                    ),
+                    Payload::Event { told, .. } => {
+                        log::warn!(
+                            "bridge: {extension}: {} is dropped: {why}",
+                            delivery.label()
+                        );
+                        self.told(told);
+                    }
                 },
                 Job::Debugger {
                     extension,
@@ -1780,6 +1787,12 @@ impl Bridge {
     /// The relay of `extension` answered a delivery (`policy::after_delivery`).
     fn delivered(&self, extension: &str, mut delivery: Delivery, outcome: &Result<Value, String>) {
         let label = delivery.label();
+        // Read before the delivery is matched on: whoever waits on it hears
+        // when it is over, taken or given up, and not while it is retried.
+        let told = match &delivery.payload {
+            Payload::Event { told, .. } => *told,
+            Payload::Click { .. } => None,
+        };
         match after_delivery(outcome, delivery.attempt) {
             Next::Finished => match delivery.payload {
                 Payload::Click { .. } => {
@@ -1795,6 +1808,7 @@ impl Bridge {
                 }
                 Payload::Event { .. } => {
                     log::debug!("bridge: {extension}: {label} taken by the worker");
+                    self.told(told);
                 }
             },
             Next::Retry => {
@@ -1820,7 +1834,19 @@ impl Bridge {
                 if reopen {
                     self.close_relay(extension);
                 }
+                self.told(told);
             }
+        }
+    }
+
+    /// Tell the hub that the delivery it waits on under `token` is over
+    /// (`Hub::told`). Called with no borrow of `inner` held: the hub calls
+    /// back into this bridge.
+    fn told(&self, token: Option<u64>) {
+        if let Some(token) = token
+            && let Some(hub) = self.delegate.hub()
+        {
+            hub.told(token);
         }
     }
 
@@ -1886,20 +1912,27 @@ impl Bridge {
     /// (`BridgeTransport::emit`, `wake`). An extension that is not bridged and
     /// on, or whose relay has given up, has nothing to deliver to: the event is
     /// dropped (logged) and never retried, as an undeliverable click is.
-    fn event(&self, extension: &str, event: &str, args: &[Value]) {
+    /// Returns whether it was queued; `told` is the hub's token for a
+    /// delivery somebody waits on.
+    fn event(&self, extension: &str, event: &str, args: &[Value], told: Option<u64>) -> bool {
         let queued = self.deliver(extension, |instance| Payload::Event {
             event: event.to_string(),
             args: args.to_vec(),
             instance,
+            told,
         });
         match queued {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(Undeliverable::GivenUp) => {
                 log::warn!("bridge: {event} for {extension} is dropped: its page did not load");
+                false
             }
-            Err(Undeliverable::NotWanted) => log::debug!(
-                "bridge: {event} for {extension} is not delivered: it is not bridged and on"
-            ),
+            Err(Undeliverable::NotWanted) => {
+                log::debug!(
+                    "bridge: {event} for {extension} is not delivered: it is not bridged and on"
+                );
+                false
+            }
         }
     }
 }
@@ -1921,11 +1954,15 @@ impl BridgeTransport for Bridge {
     }
 
     fn emit(&self, extension: &str, event: &str, args: &[Value]) {
-        self.event(extension, event, args);
+        self.event(extension, event, args, None);
+    }
+
+    fn emit_told(&self, extension: &str, event: &str, args: &[Value], token: u64) -> bool {
+        self.event(extension, event, args, Some(token))
     }
 
     fn wake(&self, extension: &str) {
-        self.event(extension, "bridge.wake", &[]);
+        self.event(extension, "bridge.wake", &[], None);
     }
 }
 

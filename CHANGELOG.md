@@ -246,6 +246,13 @@ has no releases yet; `Unreleased` holds everything on `main`.
 
 ### Fixed
 
+- The first message a side panel's page sends as it loads reaches the
+  extension's worker without `sender.tab`, as every later one did and
+  as in Chrome, where an extension tells its panel from its content
+  scripts by that. The page now holds `runtime.sendMessage` for a
+  moment, until the worker has been told which Chromium tab the panel
+  is; before, the message got there first.
+
 - `runtime.getContexts` in an extension with a side panel answers for
   the moment it was called. The side panels in the answer were read
   only once Chromium's part had come back, so an extension that asks

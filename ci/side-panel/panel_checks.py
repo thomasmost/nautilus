@@ -554,6 +554,10 @@ def panel_checks(h):
             took = gone["data"]["at"] - asked["data"]["closing"]
         h.check("window.close() in an extension page that is no panel closes its tab", gone["data"].get("gone"), gone["data"])
         h.note(f"that close took {took} ms from the page's call to tabs.onRemoved in the worker")
+    with lock:
+        firsts = [r["data"] for r in records if r["kind"] == "sender" and isinstance(r["data"], dict) and not r["data"].get("late")]
+    h.note("first messages of the run's panel pages, sent as each loaded: %d, of which with a sender.tab: %d"
+           % (len(firsts), sum(1 for d in firsts if d.get("hasTab"))))
     log = h.log_text()
     h.check("the log has a 'side panel TabId(..): chrome-extension://' line for each open",
             len(re.findall(r"side panel TabId\(\d+\): chrome-extension://", log)) == 10,
@@ -604,15 +608,17 @@ def window_panel(h):
     # In Chrome a side panel's sender has no tab. Chromium here takes the
     # panel's browser for a tab of its own; the engine tells the worker that
     # tab id is a panel's, and the bridge takes sender.tab off. The page's
-    # first message, sent as it loads, races its own report to the engine
-    # and is only noted; the one it sends 2.5 s later is judged.
+    # first message, sent as it loads, is held in the page until the engine
+    # says the worker has been told (js/page_report.js), so it has no tab
+    # either; so has the one it sends 2.5 s later.
     first = wait(lambda: latest("sender", lambda d: d.get("page") == "panel.html" and not d.get("late")), 10)
     tab = first["data"].get("tab") if first else "no message arrived"
-    h.note("sender.tab of the panel page's first message, sent as it loads: " + (
-        "none" if tab is None else json.dumps(tab if not isinstance(tab, dict) else
-                                              {key: tab.get(key) for key in ("id", "index", "windowId", "url")})))
+    h.check("the panel page's first message, sent as it loads, reaches the worker with no sender.tab",
+            first is not None and first["data"].get("hasTab") is False and first["data"].get("tab") is None,
+            "no message arrived" if first is None else (tab if not isinstance(tab, dict) else
+                                                        {key: tab.get(key) for key in ("id", "index", "windowId", "url")}))
     late = wait(lambda: latest("sender", lambda d: d.get("page") == "panel.html" and d.get("late")), 10)
-    h.check("a message from the panel's page reaches the worker with no sender.tab",
+    h.check("a later message from the panel's page reaches the worker with no sender.tab",
             late is not None and late["data"].get("hasTab") is False and late["data"].get("tab") is None,
             late["data"] if late else "no later message arrived")
     h.check("and still names the panel's page as its sender",

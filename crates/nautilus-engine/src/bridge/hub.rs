@@ -434,13 +434,28 @@ impl Hub {
     /// The page of `extension`'s side panel in `view` reported its
     /// Chromium tab id: kept beside the tab table, and told to the
     /// extension's listening contexts (`BridgeState::panel_reported`).
-    pub(crate) fn report_panel(self: &Rc<Self>, view: TabId, chromium: i64, extension: &str) {
+    /// `page` is the page lane's key of the panel's frame, which is
+    /// answered (`REPORTED_EVENT`) and told when it may send (`told`).
+    pub(crate) fn report_panel(
+        self: &Rc<Self>,
+        view: TabId,
+        chromium: i64,
+        extension: &str,
+        page: u64,
+    ) {
         // The state hears of the open panels before it judges the view.
         self.sync_panels();
-        let effects = self
-            .state
-            .borrow_mut()
-            .panel_reported(view, extension, chromium);
+        let effects =
+            self.state
+                .borrow_mut()
+                .panel_reported(view, extension, chromium, page, Instant::now());
+        self.run(effects);
+    }
+
+    /// The delivery `token` of a panel's id is over (`BridgeState::told`):
+    /// the relay calls this when the worker has taken it or it is given up.
+    pub(crate) fn told(self: &Rc<Self>, token: u64) {
+        let effects = self.state.borrow_mut().told(token);
         self.run(effects);
     }
 
@@ -535,6 +550,18 @@ impl Hub {
                 } => {
                     log::debug!("bridge: {event} to {extension}'s worker");
                     self.worker.emit(&extension, event, &args);
+                }
+                Effect::EmitTold {
+                    extension,
+                    event,
+                    args,
+                    token,
+                } => {
+                    log::debug!("bridge: {event} to {extension}'s worker (told {token})");
+                    if !self.worker.emit_told(&extension, event, &args, token) {
+                        // Nobody to wait for.
+                        self.told(token);
+                    }
                 }
                 Effect::EmitPage {
                     page,

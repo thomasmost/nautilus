@@ -447,17 +447,23 @@ impl PageLane {
         };
         let text = message_text(message);
         let sorted = panel_report(&delegate.panels.borrow(), frame.is_main() != 0, &url, view);
-        match sorted {
-            PanelReport::NotPanel => {}
-            PanelReport::Dropped => return true,
-            PanelReport::Panel { view, extension } => {
-                if let Some(chromium) = text.as_deref().and_then(report_of)
-                    && let Some(hub) = delegate.hub()
-                {
-                    hub.report_panel(view, chromium, &extension);
-                }
-                return true;
-            }
+        // Every report is answered (`REPORTED_EVENT`): the page holds its
+        // `runtime.sendMessage` until it knows whether it is a side panel's
+        // (`js/page_report.js`). Only a panel's own page is told it is one,
+        // by the hub, which also says when it may send.
+        if let PanelReport::Panel { view, extension } = &sorted
+            && let Some(chromium) = text.as_deref().and_then(report_of)
+            && let Some(hub) = delegate.hub()
+        {
+            let page = self.key_of(frame, extension);
+            hub.report_panel(*view, chromium, extension, page);
+            return true;
+        }
+        if let Some(extension) = extension_of(&url) {
+            deliver(frame, &extension, &report_answer(false));
+        }
+        if sorted != PanelReport::NotPanel {
+            return true;
         }
         let Some(chromium) = text.as_deref().and_then(report_of) else {
             log::warn!("a tab report from {url} was dropped: it is not a tab id");
@@ -550,6 +556,12 @@ impl PageLane {
             deliver(&frame, extension, &json!({ "event": event, "args": args }));
         }
     }
+}
+
+/// The answer to a page's report of its own tab id, as the page lane
+/// delivers an event: whether the page is a side panel's.
+fn report_answer(panel: bool) -> Value {
+    json!({ "event": super::state::REPORTED_EVENT, "args": [{ "panel": panel }] })
 }
 
 /// A frame's current address, as the browser process holds it.

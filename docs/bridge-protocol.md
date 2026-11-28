@@ -1116,16 +1116,45 @@ told only to the panel's own extension, and nothing is inferred from an
 id being unknown to the context: a content script's tab the cache has
 not learnt keeps its `sender.tab`.
 
-What remains: a message is delivered at once, so the first message can
-still carry the tab in two cases. (1) The panel's page sends as it
-loads: its report to the engine (after Chromium's own
-`tabs.getCurrent()`) and the engine's word to the receiving context
-travel beside the message and usually lose. (2) The receiving context
-has just started (a worker the message itself woke) and its question
-has not been answered. In both the next message from that panel has no
-`tab` (the answer to `stripOf` marks the id). A port
-(`runtime.onConnect`'s `port.sender`) is not wrapped by the bridge at
-all, for tabs or panels: its `sender.tab` is Chromium's.
+**A panel's first message waits at the sending end (2026-11-27).** A
+message is delivered at once where it arrives, and the panel's report
+travels page to browser to hub to relay to the worker's port while the
+page's own `runtime.sendMessage` goes straight through Chromium, so a
+message the page sent as it loaded used to arrive first, with the tab.
+It is now held in the page (`js/page_report.js`), in every page of an
+extension that has `chrome.sidePanel`:
+
+| to the page, as an event of the page lane | |
+| --- | --- |
+| `bridge.reported` (`[{panel}]`) | the engine's answer to the page's report of its tab id: whether the page is a side panel's. `PageLane::report` answers every report; only the main frame of a panel's own page is told `true` (`BridgeState::panel_reported`) |
+| `bridge.told` (`[]`) | to a panel's page: the extension's other contexts have been told its id. Sent at once when no worker has to be told (none listens for `bridge.panels`, or the id is one they have), and otherwise when the worker has taken that delivery (`Effect::EmitTold`, `BridgeTransport::emit_told`, `Bridge::delivered`, `Hub::told`, `BridgeState::told`), or when the delivery is given up. Pages that listen are sent the ids before it, unacknowledged |
+
+`runtime.sendMessage` (one function for `chrome.runtime` and
+`browser.runtime`) is replaced by a holder until the page knows: it
+waits for `bridge.reported` under the report's own bound
+(`REPORT_WAIT_MS`, 1 s from the script's start; a page with no tab to
+report, a popup, is let go as soon as Chromium has said so), and in a
+panel's page then for `bridge.told`, for at most 1 s more
+(`PANEL_TOLD_WAIT_MS`). Then each held message is sent with the
+arguments it was given, in order, and its answer is Chromium's own: the
+promise settles as Chromium's does, a callback is Chromium's to call
+with `runtime.lastError`. From then on the property holds Chromium's
+function again, identically. The state forgets a wait nobody reported
+on after `PUBLISH_WAIT`. Seen in `panel.sh panel`: the at-load message
+of each of the run's panel pages reached the worker without
+`sender.tab`, the word coming within the same second as the report.
+
+What remains. (1) The receiving context has just started (a worker a
+later message itself woke, a popup that opens) and its own question
+(`bridge.panels`) has not been answered: that message carries the tab,
+and the next does not (the answer to `stripOf` marks the id). (2) A
+worker that does not take the delivery within the second (a slow
+start): the page sends at its bound. (3) `runtime.connect` returns its
+port at once and cannot be held, and a port (`runtime.onConnect`'s
+`port.sender`) is not wrapped by the bridge at all, for tabs or panels:
+its `sender.tab` is Chromium's. A held `sendMessage` whose arguments
+Chromium refuses rejects (or logs, with a callback) where the unheld
+call throws.
 
 **The action click.** `ExtensionManager::click` is the one decision
 (`side_panel::decide_action_click`), in Chromium's order

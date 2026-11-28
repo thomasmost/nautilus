@@ -65,6 +65,15 @@ pub(crate) enum Effect {
         event: &'static str,
         args: Vec<Value>,
     },
+    /// As `Emit`, for the delivery a side panel's page waits on: the hub
+    /// says when the worker has taken it, or that it could not be queued
+    /// (`BridgeState::told` with `token`).
+    EmitTold {
+        extension: String,
+        event: &'static str,
+        args: Vec<Value>,
+        token: u64,
+    },
     /// Run `event`'s listeners in the page context `page` of `extension`.
     EmitPage {
         page: u64,
@@ -112,6 +121,27 @@ pub(crate) enum Effect {
 /// The event that tells a context the Chromium tab ids of its extension's
 /// open side panels (`js/runtime.js` taps it): one argument, the list.
 pub(crate) const PANELS_EVENT: &str = "bridge.panels";
+
+/// The engine's answer to a page's report of its own Chromium tab id
+/// (`js/page_report.js`): one argument, `{panel}`, whether the page is a
+/// side panel's. A page of an extension that can have a side panel holds
+/// its `runtime.sendMessage` until it hears.
+pub(crate) const REPORTED_EVENT: &str = "bridge.reported";
+
+/// The engine's word to a side panel's page that its extension's other
+/// contexts have been told the panel's Chromium id, so a message it sends
+/// now arrives without a `sender.tab`. No argument.
+pub(crate) const TOLD_EVENT: &str = "bridge.told";
+
+/// A side panel's page that holds its first message until the worker has
+/// taken the delivery that names the panel's id.
+struct Telling {
+    token: u64,
+    /// The page lane's key of the panel's frame.
+    page: u64,
+    extension: String,
+    since: Instant,
+}
 
 /// Whether `call` is one the side panel's stores answer, not the router.
 fn side_panel_call(call: &BridgeCall) -> bool {
@@ -177,6 +207,9 @@ pub(crate) struct BridgeState {
     /// The Chromium tab ids of the open panels' pages, which the scripts
     /// take off `sender.tab` (`table::PanelIds`).
     panel_ids: PanelIds,
+    /// The panel pages waiting for `told`, and the last token given.
+    telling: Vec<Telling>,
+    last_telling: u64,
     seq: u64,
 }
 
@@ -221,17 +254,35 @@ impl BridgeState {
     }
 
     /// The page of `extension`'s panel in `view` reported its Chromium tab
-    /// id (`pages::panel_report`). Kept while the panel is open, and told
+    /// id (`pages::panel_report`); `page` is the page lane's key of its
+    /// frame. Kept while the panel is open, and told
     /// to the contexts of that extension that listen (`bridge.panels`,
     /// with every id of the extension's panels), so a message from the
     /// panel's page reaches them without a `sender.tab`. Refused: the view
     /// is no open panel, or the id is a strip tab's.
+    ///
+    /// The page is answered first (`REPORTED_EVENT`): it holds its
+    /// `runtime.sendMessage` until it knows whether it is a panel's, and a
+    /// panel's page then holds it until `TOLD_EVENT`. That comes at once
+    /// when no worker has to be told (none listens, or the id is one every
+    /// context has), and otherwise when the worker has taken the delivery
+    /// (`Effect::EmitTold`, `told`): the report travels to the worker
+    /// through the relay, and the page's own message, which goes straight
+    /// through Chromium, would arrive before it.
     pub(crate) fn panel_reported(
         &mut self,
         view: TabId,
         extension: &str,
         chromium: i64,
+        page: u64,
+        now: Instant,
     ) -> Vec<Effect> {
+        let to_page = |event: &'static str, args: Vec<Value>| Effect::EmitPage {
+            page,
+            extension: extension.to_string(),
+            event,
+            args,
+        };
         let strip_tab = self
             .ids
             .tab(chromium)
@@ -240,22 +291,78 @@ impl BridgeState {
             log::warn!(
                 "bridge: {extension}'s side panel report of Chromium tab {chromium} for {view:?} was ignored"
             );
-            return Vec::new();
+            return vec![to_page(REPORTED_EVENT, vec![json!({ "panel": false })])];
         }
+        let mut effects = vec![to_page(REPORTED_EVENT, vec![json!({ "panel": true })])];
         if !self.panel_ids.report(view, extension, chromium) {
-            return Vec::new();
+            // The id every context was told already (the page reloaded).
+            effects.push(to_page(TOLD_EVENT, Vec::new()));
+            return effects;
         }
         log::info!("bridge: {extension}'s side panel {view:?} is Chromium tab {chromium} (no tab)");
-        self.emit(
+        let mut waits = false;
+        for effect in self.emit(
             extension,
             PANELS_EVENT,
             vec![json!(self.panel_ids.of(extension))],
-        )
+        ) {
+            match effect {
+                Effect::Emit {
+                    extension,
+                    event,
+                    args,
+                } => {
+                    self.last_telling += 1;
+                    self.telling.push(Telling {
+                        token: self.last_telling,
+                        page,
+                        extension: extension.clone(),
+                        since: now,
+                    });
+                    waits = true;
+                    effects.push(Effect::EmitTold {
+                        extension,
+                        event,
+                        args,
+                        token: self.last_telling,
+                    });
+                }
+                other => effects.push(other),
+            }
+        }
+        if !waits {
+            effects.push(to_page(TOLD_EVENT, Vec::new()));
+        }
+        effects
+    }
+
+    /// The delivery `token` of a panel's id is over: the worker took it, or
+    /// it could not be delivered. The panel's page is told it may send
+    /// (`TOLD_EVENT`). A token nobody waits on any more says nothing.
+    pub(crate) fn told(&mut self, token: u64) -> Vec<Effect> {
+        let Some(at) = self.telling.iter().position(|t| t.token == token) else {
+            return Vec::new();
+        };
+        let telling = self.telling.remove(at);
+        log::debug!(
+            "bridge: {}'s side panel page {} may send: its id has been told",
+            telling.extension,
+            telling.page
+        );
+        vec![Effect::EmitPage {
+            page: telling.page,
+            extension: telling.extension,
+            event: TOLD_EVENT,
+            args: Vec::new(),
+        }]
     }
 
     /// Whether `tick` has anything to wait for.
     pub(crate) fn needs_tick(&self) -> bool {
-        self.held.is_some() || !self.waiting.is_empty() || !self.held_calls.is_empty()
+        self.held.is_some()
+            || !self.waiting.is_empty()
+            || !self.held_calls.is_empty()
+            || !self.telling.is_empty()
     }
 
     /// Whether `extension` is one the bridge serves: the page lane drops
@@ -538,6 +645,10 @@ impl BridgeState {
     /// Answer every waiting call the published strip now allows.
     fn settle(&mut self, now: Instant) -> Vec<Effect> {
         let mut effects = Vec::new();
+        // A delivery of a panel's id that nobody reported on (its relay
+        // went with it): its page gave up waiting long before this.
+        self.telling
+            .retain(|telling| now.saturating_duration_since(telling.since) < PUBLISH_WAIT);
         // Held page calls, in arrival order within each extension: a call
         // goes once its hold is met or its bound has passed, and a later call
         // of the same extension never goes before it. Another extension's
@@ -1639,6 +1750,27 @@ mod tests {
         );
     }
 
+    /// What the panel's page (the page lane's key 9) is answered: whether
+    /// it is a panel's.
+    fn reported(panel: bool) -> Effect {
+        Effect::EmitPage {
+            page: 9,
+            extension: EXT.to_string(),
+            event: REPORTED_EVENT,
+            args: vec![json!({ "panel": panel })],
+        }
+    }
+
+    /// The word that lets the panel's page send its first message.
+    fn told() -> Effect {
+        Effect::EmitPage {
+            page: 9,
+            extension: EXT.to_string(),
+            event: TOLD_EVENT,
+            args: vec![],
+        }
+    }
+
     #[test]
     fn a_panels_chromium_id_is_told_to_its_extension_and_is_never_a_tab() {
         const PANELS: &str = "bridge.panels";
@@ -1652,21 +1784,29 @@ mod tests {
         };
         assert_eq!(panels_of(&mut state, EXT), json!([]));
 
-        // A report for a view that is no open panel is refused.
-        assert_eq!(state.panel_reported(TabId(20), EXT, 433), vec![]);
+        // A report for a view that is no open panel is refused: its page is
+        // told it is no panel's, and holds nothing.
+        assert_eq!(
+            state.panel_reported(TabId(20), EXT, 433, 9, now),
+            vec![reported(false)]
+        );
         assert_eq!(panels_of(&mut state, EXT), json!([]));
 
         // The panel is open: its page's id is kept. Nobody listens yet, so
-        // nothing is sent (and no stopped worker is started for it); a
-        // context that starts later asks.
+        // nobody is told (and no stopped worker is started for it; a context
+        // that starts later asks): the page hears at once that it may send.
         state.set_panel_windows(HashMap::from([(TabId(20), WindowId(1))]));
-        assert_eq!(state.panel_reported(TabId(20), EXT, 433), vec![]);
+        assert_eq!(
+            state.panel_reported(TabId(20), EXT, 433, 9, now),
+            vec![reported(true), told()]
+        );
         assert_eq!(panels_of(&mut state, EXT), json!([433]));
         assert_eq!(panels_of(&mut state, OTHER), json!([]));
 
         // A second panel, with the worker and a page listening: both are
         // told every id of the extension's panels. The other extension's
-        // listener hears nothing.
+        // listener hears nothing. The worker's delivery carries a token,
+        // and the panel's page is not told to send until it is taken.
         listen(&mut state, EXT, PANELS);
         page_listen(&mut state, EXT, 5, PANELS);
         listen(&mut state, OTHER, PANELS);
@@ -1675,12 +1815,14 @@ mod tests {
             (TabId(21), WindowId(1)),
         ]));
         assert_eq!(
-            state.panel_reported(TabId(21), EXT, 434),
+            state.panel_reported(TabId(21), EXT, 434, 9, now),
             vec![
-                Effect::Emit {
+                reported(true),
+                Effect::EmitTold {
                     extension: EXT.to_string(),
                     event: PANELS,
                     args: vec![json!([433, 434])],
+                    token: 1,
                 },
                 Effect::EmitPage {
                     page: 5,
@@ -1690,8 +1832,18 @@ mod tests {
                 },
             ]
         );
-        // The same report again (the page reloaded) says nothing new.
-        assert_eq!(state.panel_reported(TabId(21), EXT, 434), vec![]);
+        assert!(state.needs_tick());
+        // The worker took the delivery: now the page is told, once.
+        assert_eq!(state.told(1), vec![told()]);
+        assert_eq!(state.told(1), vec![]);
+        assert_eq!(state.told(77), vec![]);
+        assert!(!state.needs_tick());
+        // The same report again (the page reloaded): every context has the
+        // id already, and the page may send at once.
+        assert_eq!(
+            state.panel_reported(TabId(21), EXT, 434, 9, now),
+            vec![reported(true), told()]
+        );
 
         // What `sender.tab` is given for a panel's id: the mark, for the
         // panel's own extension only; a tab's strip as before.
@@ -1717,7 +1869,10 @@ mod tests {
             (TabId(21), WindowId(1)),
             (TabId(22), WindowId(1)),
         ]));
-        assert_eq!(state.panel_reported(TabId(22), EXT, 101), vec![]);
+        assert_eq!(
+            state.panel_reported(TabId(22), EXT, 101, 9, now),
+            vec![reported(false)]
+        );
         assert_eq!(panels_of(&mut state, EXT), json!([433, 434]));
 
         // The panel in view 20 closed: its id goes. No table row was ever
@@ -1729,7 +1884,78 @@ mod tests {
             vec![Effect::Reply(8, Ok(Value::Null))]
         );
         assert_eq!(queried_ids(&mut state), vec![101]);
-        let _ = now;
+    }
+
+    #[test]
+    fn a_panels_page_is_told_to_send_only_after_its_worker_took_the_id() {
+        const PANELS: &str = "bridge.panels";
+        let (mut state, now) = started(vec![tab(1, "a*")]);
+        listen(&mut state, EXT, PANELS);
+        state.set_panel_windows(HashMap::from([
+            (TabId(20), WindowId(1)),
+            (TabId(21), WindowId(1)),
+        ]));
+        // Two panels report one after the other: each waits for its own
+        // delivery, and each is answered first that it is a panel's.
+        let first = state.panel_reported(TabId(20), EXT, 433, 9, now);
+        assert_eq!(first[0], reported(true));
+        assert!(matches!(first[1], Effect::EmitTold { token: 1, .. }));
+        assert_eq!(
+            first.len(),
+            2,
+            "the page was told before the worker took the id"
+        );
+        let second = state.panel_reported(TabId(21), EXT, 434, 10, now);
+        assert!(matches!(second[1], Effect::EmitTold { token: 2, .. }));
+        // The second delivery is taken first: only its page is told.
+        assert_eq!(
+            state.told(2),
+            vec![Effect::EmitPage {
+                page: 10,
+                extension: EXT.to_string(),
+                event: TOLD_EVENT,
+                args: vec![],
+            }]
+        );
+        assert!(state.needs_tick(), "the first page still waits");
+        assert_eq!(state.told(1), vec![told()]);
+
+        // A delivery nobody ever reports on (its relay went): the wait is
+        // forgotten at the bound, with nothing sent: the page has sent its
+        // message by then.
+        let third = state.panel_reported(TabId(20), EXT, 435, 9, now);
+        assert!(matches!(third[1], Effect::EmitTold { token: 3, .. }));
+        assert_eq!(state.tick(&live, now + Duration::from_secs(1)), vec![]);
+        assert!(state.needs_tick());
+        assert_eq!(state.tick(&live, now + PUBLISH_WAIT), vec![]);
+        assert!(!state.needs_tick());
+        assert_eq!(state.told(3), vec![]);
+
+        // An extension with no worker, and pages that listen: they are
+        // told, and the panel's page may send at once.
+        let mut state = BridgeState::default();
+        state.set_extensions(vec![(EXT.to_string(), all(), false)]);
+        state.strip_changed(
+            snapshot(vec![window(1, true, vec![tab(1, "a*")])]),
+            &live,
+            now,
+        );
+        listen(&mut state, EXT, PANELS);
+        page_listen(&mut state, EXT, 5, PANELS);
+        state.set_panel_windows(HashMap::from([(TabId(20), WindowId(1))]));
+        assert_eq!(
+            state.panel_reported(TabId(20), EXT, 433, 9, now),
+            vec![
+                reported(true),
+                Effect::EmitPage {
+                    page: 5,
+                    extension: EXT.to_string(),
+                    event: PANELS,
+                    args: vec![json!([433])],
+                },
+                told(),
+            ]
+        );
     }
 
     #[test]
